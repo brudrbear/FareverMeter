@@ -15,6 +15,8 @@ Usage:
 from __future__ import annotations
 
 import ctypes
+import json
+import math
 import os
 import queue
 import struct
@@ -30,8 +32,45 @@ import frida
 
 from event_parser import scan_events, get_entity_id_from_tx, COMBAT_EVENT_NAMES
 
+VERSION = "1.2"
+
 TARGET_PROCESS = "Farever.exe"
 HOOK_SCRIPT_PATH = Path(__file__).with_name("hook_ssl.js")
+# Persists the meter's top-left corner across restarts. Written on drag-end,
+# read on startup, deleted on Shift+/ (reset position).
+POSITION_CACHE_PATH = Path(__file__).with_name(".meter_position.json")
+
+
+def _load_position() -> tuple[int, int] | None:
+    """Return the cached (x, y) if a valid file exists, else None."""
+    try:
+        raw = POSITION_CACHE_PATH.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        x = int(data["x"])
+        y = int(data["y"])
+        return (x, y)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        print(f"[meter] ignoring bad position cache: {e}", file=sys.stderr)
+        return None
+
+
+def _save_position(x: int, y: int) -> None:
+    try:
+        POSITION_CACHE_PATH.write_text(
+            json.dumps({"x": int(x), "y": int(y)}), encoding="utf-8")
+    except OSError as e:
+        print(f"[meter] failed to save position: {e}", file=sys.stderr)
+
+
+def _clear_position_cache() -> None:
+    try:
+        POSITION_CACHE_PATH.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        print(f"[meter] failed to clear position cache: {e}", file=sys.stderr)
 
 # ---- Player-detection tunables ----
 PLAYER_BLOCK_TX_RADIUS = 1000
@@ -148,6 +187,7 @@ VK_OEM_2 = 0xBF  # the '/?' key on a US keyboard layout
 HOTKEY_TOGGLE = 1
 HOTKEY_RESET = 2
 HOTKEY_LOCK = 3
+HOTKEY_RESET_POS = 4
 
 
 def _start_global_hotkeys(callbacks: dict[int, callable]) -> None:
@@ -177,6 +217,10 @@ def _start_global_hotkeys(callbacks: dict[int, callable]) -> None:
         if not user32.RegisterHotKey(None, HOTKEY_LOCK,
                                      MOD_NOREPEAT, VK_OEM_2):
             print("[meter] failed to register '/' hotkey "
+                  "(another app may own it).", file=sys.stderr)
+        if not user32.RegisterHotKey(None, HOTKEY_RESET_POS,
+                                     MOD_SHIFT | MOD_NOREPEAT, VK_OEM_2):
+            print("[meter] failed to register 'Shift+/' hotkey "
                   "(another app may own it).", file=sys.stderr)
 
         msg = wintypes.MSG()
@@ -574,6 +618,17 @@ class SimpleOverlay:
         self._visible = True
         self._locked = True
         self._prev_visible_rows = 0   # for shrink-on-rows-hidden detection
+        # Flipped to True once the user drags the meter while unlocked, or on
+        # startup if a cached position is loaded from disk. After that,
+        # shrink/reset events preserve the user's chosen top-left corner
+        # instead of snapping back to the default top-right pin.
+        self._user_positioned = False
+        self._saved_x: int | None = None
+        self._saved_y: int | None = None
+        cached = _load_position()
+        if cached is not None:
+            self._saved_x, self._saved_y = cached
+            self._user_positioned = True
         # Hotkey thread pushes action names ("toggle" / "reset" / "lock") into
         # this queue. The refresh tick drains it on the tk main thread so we
         # never touch tk objects from the hotkey thread (which is unsafe with
@@ -589,9 +644,10 @@ class SimpleOverlay:
         self._schedule_refresh()
 
         _start_global_hotkeys({
-            HOTKEY_TOGGLE: lambda: self._hotkey_actions.put("toggle"),
-            HOTKEY_RESET:  lambda: self._hotkey_actions.put("reset"),
-            HOTKEY_LOCK:   lambda: self._hotkey_actions.put("lock"),
+            HOTKEY_TOGGLE:    lambda: self._hotkey_actions.put("toggle"),
+            HOTKEY_RESET:     lambda: self._hotkey_actions.put("reset"),
+            HOTKEY_LOCK:      lambda: self._hotkey_actions.put("lock"),
+            HOTKEY_RESET_POS: lambda: self._hotkey_actions.put("reset_pos"),
         })
 
     def _drain_hotkey_actions(self):
@@ -606,6 +662,8 @@ class SimpleOverlay:
                 self._reset_session()
             elif action == "lock":
                 self._toggle_lock()
+            elif action == "reset_pos":
+                self._reset_position()
 
     def _toggle_visibility(self):
         if self._visible:
@@ -636,6 +694,12 @@ class SimpleOverlay:
         self.root.after(REFRESH_MS * 2 + 100, self._shrink_to_natural)
 
     def _shrink_to_natural(self):
+        # Capture the current top-left BEFORE wm_geometry("") clears the
+        # explicit size — once tk recomputes the natural geometry the window
+        # can momentarily snap to a default position, and reading winfo_x/y
+        # after that would lose the user's chosen location.
+        cur_x = self.root.winfo_x()
+        cur_y = self.root.winfo_y()
         # wm_geometry("") tells tk to drop any user-set explicit size, so the
         # next read of winfo_reqheight reflects the *current* layout (post
         # pack_forget) instead of the previous explicit size we set during
@@ -649,9 +713,19 @@ class SimpleOverlay:
         self.root.update_idletasks()
         w = max(self.root.winfo_reqwidth(), 360)
         h = self.root.winfo_reqheight()
-        screen_w = self.root.winfo_screenwidth()
-        x = max(0, screen_w - w - MARGIN_FROM_RIGHT)
-        self.root.geometry(f"{w}x{h}+{x}+{MARGIN_FROM_TOP}")
+        if self._user_positioned:
+            # Prefer the explicitly-saved coordinates if we have them — they
+            # survive the wm_geometry("") reset above without depending on
+            # whatever transient position the window manager picked.
+            if self._saved_x is not None and self._saved_y is not None:
+                x, y = self._saved_x, self._saved_y
+            else:
+                x, y = cur_x, cur_y
+        else:
+            screen_w = self.root.winfo_screenwidth()
+            x = max(0, screen_w - w - MARGIN_FROM_RIGHT)
+            y = MARGIN_FROM_TOP
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
 
     # ---- Lock / drag handling ----
     def _toggle_lock(self):
@@ -667,13 +741,17 @@ class SimpleOverlay:
         if self._locked:
             self._header.unbind("<Button-1>")
             self._header.unbind("<B1-Motion>")
+            self._header.unbind("<ButtonRelease-1>")
             self.title_label.unbind("<Button-1>")
             self.title_label.unbind("<B1-Motion>")
+            self.title_label.unbind("<ButtonRelease-1>")
         else:
             self._header.bind("<Button-1>", self._drag_start)
             self._header.bind("<B1-Motion>", self._drag_motion)
+            self._header.bind("<ButtonRelease-1>", self._drag_end)
             self.title_label.bind("<Button-1>", self._drag_start)
             self.title_label.bind("<B1-Motion>", self._drag_motion)
+            self.title_label.bind("<ButtonRelease-1>", self._drag_end)
 
     def _drag_start(self, event):
         self._drag_offset_x = event.x_root - self.root.winfo_x()
@@ -683,6 +761,23 @@ class SimpleOverlay:
         x = event.x_root - self._drag_offset_x
         y = event.y_root - self._drag_offset_y
         self.root.geometry(f"+{x}+{y}")
+        self._user_positioned = True
+        self._saved_x = x
+        self._saved_y = y
+
+    def _drag_end(self, event):
+        # Persist on release rather than on every motion event — drag-motion
+        # fires dozens of times per second and we don't need to spam the disk.
+        if self._saved_x is not None and self._saved_y is not None:
+            _save_position(self._saved_x, self._saved_y)
+
+    def _reset_position(self):
+        """Forget the user's chosen position and re-pin to the default top-right."""
+        self._user_positioned = False
+        self._saved_x = None
+        self._saved_y = None
+        _clear_position_cache()
+        self._shrink_to_natural()
 
     def _build_ui(self):
         # Floating keybind hint, sitting outside the bordered meter box.
@@ -690,7 +785,7 @@ class SimpleOverlay:
         # rather than a second panel. Packed first so it sits above the meter.
         self._hint_label = tk.Label(
             self.root,
-            text="\\ show/hide    Shift+\\ reset    / lock/unlock",
+            text="\\ show/hide   Shift+\\ reset   / lock/unlock   Shift+/ reset pos",
             bg=TRANSPARENT_KEY, fg="#FFFFFF",
             font=("Segoe UI", 8, "bold"), pady=4,
         )
@@ -701,6 +796,11 @@ class SimpleOverlay:
 
         self._header = tk.Frame(outer, bg=BG_HEADER, height=28)
         self._header.pack(fill="x")
+        self.version_label = tk.Label(
+            self._header, text=f"v{VERSION}",
+            bg=BG_HEADER, fg=FG_HEADER,
+            font=("Consolas", 9), padx=10, pady=4)
+        self.version_label.pack(side="left")
         self.title_label = tk.Label(
             self._header, text="Farever Damage Meter",
             bg=BG_HEADER, fg=FG_HEADER,
@@ -721,8 +821,10 @@ class SimpleOverlay:
 
         title_row = tk.Frame(body, bg=BG_BODY)
         title_row.pack(fill="x", pady=(0, 2))
-        tk.Label(title_row, text="DAMAGE", bg=BG_BODY, fg=ACCENT,
-                 font=("Segoe UI", 11, "bold"), anchor="w").pack(side="left")
+        self._section_title_label = tk.Label(
+            title_row, text="NO DATA", bg=BG_BODY, fg=ACCENT,
+            font=("Segoe UI", 11, "bold"), anchor="w")
+        self._section_title_label.pack(side="left")
         self._combat_time_label = tk.Label(
             title_row, text="", bg=BG_BODY, fg=FG_DIM,
             font=("Segoe UI", 9), anchor="e")
@@ -761,6 +863,9 @@ class SimpleOverlay:
 
     def _reposition(self):
         self.root.update_idletasks()
+        if self._user_positioned and self._saved_x is not None:
+            self.root.geometry(f"+{self._saved_x}+{self._saved_y}")
+            return
         screen_w = self.root.winfo_screenwidth()
         win_w = max(self.root.winfo_width(), self.root.winfo_reqwidth(), 360)
         x = max(0, screen_w - win_w - MARGIN_FROM_RIGHT)
@@ -785,11 +890,17 @@ class SimpleOverlay:
         self._drain_hotkey_actions()
         self.session.tick()
         snap = self.session.snapshot(self.view_mode)
-        in_combat, _ = self.session.status()
+        in_combat, idle = self.session.status()
 
-        title = "Farever Damage Meter"
         if in_combat:
-            title += "  ·  IN COMBAT"
+            # Idle counts up from the last damage event; the encounter closes
+            # when it crosses combat_timeout. Ceil so the user sees "Ends in
+            # 30s" the moment the timer starts and "Ends in 1s" right up to
+            # the transition, instead of a confusing "Ends in 0s" hang.
+            secs_left = max(0, math.ceil(self.session.combat_timeout - idle))
+            title = f"Logging ends in {secs_left}s"
+        else:
+            title = "Farever Damage Meter"
         if not self._locked:
             title += "  ·  UNLOCKED"
         if self.title_label.cget("text") != title:
@@ -798,6 +909,7 @@ class SimpleOverlay:
         if in_combat != self._header_combat_bg:
             bg = BG_HEADER_COMBAT if in_combat else BG_HEADER
             self._header.config(bg=bg)
+            self.version_label.config(bg=bg)
             self.title_label.config(bg=bg)
             self.view_label.config(bg=bg)
             self._header_combat_bg = in_combat
@@ -830,6 +942,15 @@ class SimpleOverlay:
             stats_text = f"Total: {int(total):>6}     DPS: {rate:>7.1f}"
         if self._stats_label.cget("text") != stats_text:
             self._stats_label.config(text=stats_text)
+
+        if in_combat:
+            section_title = "Logging Damage"
+        elif total > 0:
+            section_title = "Logged Damage"
+        else:
+            section_title = "NO DATA"
+        if self._section_title_label.cget("text") != section_title:
+            self._section_title_label.config(text=section_title)
 
         # Show the attribution/disclaimer only on the awaiting screen.
         show_intro = total <= 0
@@ -913,8 +1034,8 @@ def main():
     script.on("message", on_message)
     script.load()
     print("[*] Hook loaded. Starting overlay...", file=sys.stderr)
-    print("[*] Hotkeys:  \\ show/hide   Shift+\\ reset   / lock/unlock",
-          file=sys.stderr)
+    print("[*] Hotkeys:  \\ show/hide   Shift+\\ reset   / lock/unlock   "
+          "Shift+/ reset pos", file=sys.stderr)
 
     overlay = SimpleOverlay(session, backend)
 
