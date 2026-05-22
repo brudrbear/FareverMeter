@@ -263,6 +263,13 @@ class DamageSession:
         with self.lock:
             now = time.time()
             self.current.reset(now)
+            # Clear current.start_time so the encounter clock doesn't start
+            # ticking until the first new damage event arrives. Without this,
+            # if there's a gap between reset and next combat (e.g. boss
+            # intermission, walking to the next pack), the first hit would
+            # be credited with `now - reset_time` seconds of duration, which
+            # makes the meter look like it skipped that gap and tanks DPS.
+            self.current.start_time = 0.0
             self.session.reset(now)
             self.in_combat = False
             self.last_event_time = 0.0
@@ -309,18 +316,42 @@ class MeterBackend:
         self._player_lock = threading.Lock()
         self._damaged_targets: set[int] = set()
         self._last_tx_time: float = 0.0
+        # Diagnostics — counted unconditionally, printed only in DEBUG mode.
+        self._tx_packets = 0
+        self._rx_packets = 0
+        self._rx_combat_events = 0       # events matching COMBAT_EVENT_NAMES
+        self._rx_credited = 0            # events that passed classification
+        self._rx_dropped_src = 0         # source not classified as player
+        self._rx_dropped_tgt = 0         # target classified as player (self-hit)
+        self._last_heartbeat = 0.0
+
+    def reset_player_detection(self):
+        """Partial reset of player detection state.
+
+        Wipes the TX window and the damaged-targets exclusion set so the
+        displayed player_id can be re-evaluated from fresh TX traffic and
+        previously-misclassified mobs get a second look. *Does not* clear
+        `player_block` — that's the accumulated set of "this is the player"
+        evidence built up over the session, and clearing it on reset loses
+        IDs that aren't currently in the TX stream (the cross-cluster drift
+        case where the auth/sync entity has moved on but the combat-source
+        entity is still active). For a true nuke, restart the meter.
+        """
+        with self._player_lock:
+            self.tx_history.clear()
+            self.tx_counter.clear()
+            self.player_id = None
+            # Intentionally preserved: self.player_block
+            self._damaged_targets.clear()
+            self._last_tx_time = time.time()
 
     def consume_tx(self, payload: bytes):
+        self._tx_packets += 1
+        self._maybe_heartbeat()
         # HTTP GET = dungeon/zone transition → wipe state
         if payload[:4] == b"GET ":
             print("[meter] zone transition (HTTP GET) — resetting.", file=sys.stderr)
-            with self._player_lock:
-                self.tx_history.clear()
-                self.tx_counter.clear()
-                self.player_id = None
-                self.player_block.clear()
-                self._damaged_targets.clear()
-                self._last_tx_time = time.time()
+            self.reset_player_detection()
             return
 
         eid = get_entity_id_from_tx(payload)
@@ -348,7 +379,13 @@ class MeterBackend:
             if not counter:
                 return
             top, top_count = counter.most_common(1)[0]
-            threshold = max(3, top_count // 20)
+            # Fixed threshold: a couple of TX appearances filters parser noise
+            # without locking out legitimate sub-entities that appear less
+            # often than the main entity. Earlier proportional scaling
+            # (top_count // 20) demanded dozens of TX hits before including a
+            # sub-entity, which caused damage from fresh sub-entities to be
+            # dropped until they "caught up".
+            threshold = 3
 
             if (self.player_id is not None
                     and abs(top - self.player_id) > PLAYER_ID_JUMP_THRESHOLD):
@@ -357,10 +394,34 @@ class MeterBackend:
                 self._damaged_targets.clear()
 
             self.player_id = top
-            self.player_block = {
-                e for e, n in counter.items()
-                if abs(e - top) <= PLAYER_BLOCK_TX_RADIUS and n >= threshold
-            }
+            # player_block is CUMULATIVE within a session. Once an entity has
+            # earned its way in via TX evidence (threshold appearances or a
+            # recent grace-window hit), it stays until reset_player_detection.
+            #
+            # Why: the player can control multiple entity IDs spread far apart
+            # (observed ~90k deltas between auth/sync and combat entities).
+            # The TX-dominant ID drifts between them over a session. If we
+            # rebuild player_block from scratch each tick, the drift drops the
+            # previous (still active) entity out — and any damage it deals
+            # gets misclassified as someone else's. That's the "meter stops
+            # mid-fight" bug.
+            #
+            # No radius filter on the threshold-based add because TX is clean:
+            # only the player's own client emits TX, so every TX entity is
+            # ours by construction. The grace-window add keeps the radius
+            # filter because it's a lower-confidence inclusion (1 hit suffices).
+            for e, n in counter.items():
+                if n >= threshold:
+                    self.player_block.add(e)
+            recent_cutoff = now - 5.0
+            for t, e in self.tx_history:
+                if t >= recent_cutoff and abs(e - top) <= PLAYER_BLOCK_TX_RADIUS:
+                    self.player_block.add(e)
+            # If any entity we previously labelled "mob" is now in the player
+            # block (TX evidence is stronger than the heuristic), un-label it
+            # so its damage events start counting again.
+            if self.player_block & self._damaged_targets:
+                self._damaged_targets -= self.player_block
 
     def _is_player(self, entity_id: int) -> bool:
         if not self.player_block:
@@ -376,40 +437,83 @@ class MeterBackend:
         return True
 
     def consume_rx(self, payload: bytes):
+        self._rx_packets += 1
+        self._maybe_heartbeat()
         if self.player_id is None:
             return
         parsed = list(scan_events(payload))
 
         # Pre-pass: anything the player damages is a mob, not the player.
+        # IMPORTANT: skip targets that are also in player_block. Some procs/
+        # chains/AOE ticks legitimately land on the player's own sub-entities,
+        # and once such an ID lands in damaged_targets it's excluded forever —
+        # which is what produces the "worked for a while then stopped"
+        # classification failure.
         for ev in parsed:
             if ev.name in ("Damage", "BonusDamage", "Projectile"):
-                if ev.source in self.player_block:
+                if (ev.source in self.player_block
+                        and ev.target not in self.player_block):
                     self._damaged_targets.add(ev.target)
 
         for ev in parsed:
             if ev.name not in COMBAT_EVENT_NAMES:
                 continue
+            self._rx_combat_events += 1
             base_kind = COMBAT_EVENT_NAMES[ev.name]
             src_p = self._is_player(ev.source)
             tgt_p = self._is_player(ev.target)
 
+            credited = False
             if base_kind == "damage":
                 if src_p and not tgt_p:
                     self._credit(ev, "damage")
+                    credited = True
             else:
                 # Farever quirk: projectile damage is encoded as a Heal event
                 # with source=player + target=enemy. Reclassify only that case;
                 # ignore real heals entirely in this damage-only build.
                 if src_p and not tgt_p:
                     self._credit(ev, "heal-as-projectile")
+                    credited = True
+
+            if not credited:
+                if not src_p:
+                    self._rx_dropped_src += 1
+                elif tgt_p:
+                    self._rx_dropped_tgt += 1
+                if DEBUG:
+                    reason = (
+                        "src_not_player" if not src_p else "tgt_is_player"
+                    )
+                    print(f"[meter:dbg]              DROPPED {ev.name:<12} "
+                          f"{ev.dmg_type:<8} {ev.value:>7.1f}  "
+                          f"src={ev.source} tgt={ev.target}  reason={reason}",
+                          file=sys.stderr)
 
     def _credit(self, ev, classification: str):
+        self._rx_credited += 1
         self.session.record_damage(ev.dmg_type, ev.value)
         if DEBUG:
             src_origin = "TX-block" if ev.source in self.player_block else "radius"
             print(f"[meter:dbg] {classification:>20} {ev.dmg_type:<8} "
                   f"{ev.value:>7.1f}  src={ev.source} ({src_origin})  "
                   f"tgt={ev.target}", file=sys.stderr)
+
+    def _maybe_heartbeat(self):
+        """Print a periodic state dump in DEBUG mode. Cheap when off."""
+        if not DEBUG:
+            return
+        now = time.time()
+        if now - self._last_heartbeat < 5.0:
+            return
+        self._last_heartbeat = now
+        idle = (now - self._last_tx_time) if self._last_tx_time else float("inf")
+        print(f"[meter:hb] tx={self._tx_packets} rx={self._rx_packets} "
+              f"combat_evts={self._rx_combat_events} credited={self._rx_credited} "
+              f"dropped(src!=p)={self._rx_dropped_src} dropped(self-hit)={self._rx_dropped_tgt} "
+              f"player_id={self.player_id} pblock={len(self.player_block)} "
+              f"dmg_tgts={len(self._damaged_targets)} tx_idle={idle:.1f}s",
+              file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -517,6 +621,11 @@ class SimpleOverlay:
 
     def _reset_session(self):
         self.session.reset_all()
+        # Also wipe player-ID detection so a wrong lock-on can be corrected by
+        # pressing reset. The TX consumption loop re-identifies the player
+        # within a few seconds of resumed combat.
+        if self.backend is not None:
+            self.backend.reset_player_detection()
         # Force the next refresh to redraw the "awaiting" placeholder
         self._stats_label.config(text="")
         # Auto-detection in _refresh handles the visual shrink as soon as the
