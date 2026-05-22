@@ -50,7 +50,12 @@ PLAYER_ID_JUMP_THRESHOLD = 100_000
 DEBUG = os.environ.get("FAREVER_METER_DEBUG") == "1"
 
 # ---- Combat-session tunables ----
-COMBAT_TIMEOUT_SECS = 12.0
+# Seconds of no combat events before the current encounter is considered fully
+# closed. The next damage event after this gap wipes the current view and
+# starts a fresh encounter. Set high enough to survive boss intermissions
+# (knockback phases, untargetable casts, etc.) — otherwise a long intermission
+# resets the meter mid-fight.
+COMBAT_TIMEOUT_SECS = 30.0
 ACTIVE_PROXIMITY_SECS = 2.0
 
 # ---- Overlay tunables ----
