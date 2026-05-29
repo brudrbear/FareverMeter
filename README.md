@@ -64,11 +64,16 @@ and open-source.
 
 1. In that Command Prompt window from above, type:
    ```
-   pip install frida
+   pip install frida Pillow
    ```
 2. Press **Enter**. You'll see a bunch of text scroll by while it downloads.
    This takes about 30 seconds.
 3. When you get the prompt (the blinking cursor on a new line) back, it's done.
+
+> **Pillow** is only needed if you want to save 30s Parse screenshots as PNGs
+> (see [30s Parse Mode](#30s-parse-mode) below). The rest of the meter works
+> without it — if `pip install Pillow` fails, you can ignore the error and
+> just skip the screenshot feature.
 
 ### A note about antivirus
 
@@ -122,18 +127,58 @@ The meter shows a few things:
 - **Per-type bars** — your damage broken down by element (Physical, Fire,
   Spark, etc.), with hit counts.
 
+The saved 30s Parse screenshots also include a **Damage Timeline** bar graph
+(per-second damage shape) — that one's PNG-only to keep the on-screen
+overlay compact.
+
 ### Hotkeys
 
-These work anywhere — even while Farever has focus.
+These only fire when **Farever has keyboard focus** — typing into another
+app (or into the 30s Parse popup window) won't trigger them.
 
 | Key | What it does |
 |---|---|
 | `\` (backslash) | Show/hide the meter |
 | `Shift + \` | Reset the meter to zero |
+| `Ctrl + \` | Toggle **30s Parse Mode** (see below) |
 | `/` (forward slash) | Lock/unlock the meter so you can drag it to a new spot |
+| `Shift + /` | Reset the meter's position back to top-right |
 
 To move the meter: press `/`, then click-and-drag the **teal/red header bar**
 to wherever you want it. Press `/` again to lock it in place.
+
+> **AV note:** the meter uses a low-level Windows keyboard hook so it knows
+> when Farever has focus. The hook only ever inspects `\` and `/` keystrokes,
+> and only fires actions while Farever is the foreground window — but some
+> antivirus tools flag any low-level keyboard hook as a "keylogger" on
+> principle. If yours yells, the full source for the hook is in the
+> `_run_focused_keyboard_hook` function in `live_meter_simple.py`. If the
+> hook can't install (locked-down corporate Windows, etc.) the meter falls
+> back to a global hotkey that fires regardless of focus.
+
+### 30s Parse Mode
+
+For target-dummy damage checks where you want a clean 30-second window every
+time. Press `Ctrl + \` to toggle it on — the header switches to "Parse Mode"
+and the meter waits for your first hit. As soon as combat starts, a 30-second
+countdown begins. When it ends, the meter freezes the results so you can read
+them. Press `Shift + \` to clear for another parse, or `Ctrl + \` again to
+return to normal continuous logging.
+
+**Result popup.** When the 30s timer hits zero, a small window appears
+centered on the monitor your meter is on with:
+
+- An optional **Name** field (e.g. "Frostfang dummy, no buffs")
+- An optional **Description** field (build notes, conditions, whatever)
+- The auto-filled date and time
+- A **Save Screenshot** button that writes a meter-styled PNG to a folder
+  called `parse_screenshots/` next to the script — and an **Open Folder**
+  button to jump there
+
+The popup is modeless: you can alt-tab away or click into Farever without
+closing it. Closing it (X button) just dismisses without saving. Each PNG
+filename is `YYYY-MM-DD_HH-MM-SS_<name>.png`, so they sort chronologically
+in Explorer.
 
 ---
 
@@ -176,10 +221,27 @@ The overlay will disappear. Farever keeps running fine.
 > treat all debuggers as suspicious. You can either whitelist the folder or
 > not use the meter.
 
+**"LL keyboard hook install failed (errno …); falling back to global RegisterHotKey."**
+> The focus-conditional hook couldn't install (often: a security policy
+> blocks low-level hooks). The meter falls back to global hotkeys, which
+> still work — but pressing `\` while typing into the parse result popup
+> will toggle the meter. Workaround: use the popup buttons with the mouse.
+
 **"failed to register '\\' hotkey (another app may own it)."**
-> Something else on your computer is already using `\`, `Shift+\`, or `/`
-> as a global hotkey. The meter still works, you just can't toggle/reset/
-> unlock with the keyboard until you close whatever has those keys claimed.
+> Only shows up in the RegisterHotKey fallback path. Something else on your
+> computer is already using `\`, `Shift+\`, `Ctrl+\`, or `/` as a global
+> hotkey. The meter still works, you just can't toggle/reset/parse/unlock
+> with the keyboard until you close whatever has those keys claimed.
+
+**Saved parse screenshots are missing or "Pillow not installed" shows up.**
+> Run `pip install Pillow` in Command Prompt. Screenshots write into a
+> folder called `parse_screenshots/` next to `live_meter_simple.py`.
+
+**The 30s Parse popup window doesn't appear when the timer ends.**
+> It may have opened on a different monitor — it anchors to whichever
+> monitor the meter overlay is on. Look there first. If it still doesn't
+> show, check the black Command Prompt window for a "failed to open parse
+> popup" error.
 
 ---
 

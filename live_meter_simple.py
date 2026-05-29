@@ -19,6 +19,7 @@ import json
 import math
 import os
 import queue
+import re
 import struct
 import sys
 import threading
@@ -26,19 +27,23 @@ import time
 import tkinter as tk
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import frida
 
 from event_parser import scan_events, get_entity_id_from_tx, COMBAT_EVENT_NAMES
 
-VERSION = "1.2"
+VERSION = "1.3"
 
 TARGET_PROCESS = "Farever.exe"
 HOOK_SCRIPT_PATH = Path(__file__).with_name("hook_ssl.js")
 # Persists the meter's top-left corner across restarts. Written on drag-end,
 # read on startup, deleted on Shift+/ (reset position).
 POSITION_CACHE_PATH = Path(__file__).with_name(".meter_position.json")
+# 30s Parse Mode saves a styled PNG of each completed parse here. Folder is
+# created on first save; the meter never touches it otherwise.
+PARSE_SCREENSHOTS_DIR = Path(__file__).with_name("parse_screenshots")
 
 
 def _load_position() -> tuple[int, int] | None:
@@ -96,6 +101,14 @@ DEBUG = os.environ.get("FAREVER_METER_DEBUG") == "1"
 # resets the meter mid-fight.
 COMBAT_TIMEOUT_SECS = 30.0
 ACTIVE_PROXIMITY_SECS = 2.0
+
+# ---- 30s Parse Mode tunables ----
+# When parse mode is toggled on (Ctrl+\), the meter records at most this many
+# seconds of combat (timer starts on first damage event) and then freezes.
+# Subsequent damage events are dropped until Shift+\ hard-resets for another
+# parse, or Ctrl+\ toggles parse mode off. Useful for target-dummy damage
+# checks where you want a clean 30-second window every time.
+PARSE_MODE_DURATION_SECS = 30.0
 
 # ---- Overlay tunables ----
 REFRESH_MS = 250
@@ -175,25 +188,47 @@ def _make_window_clickthrough(hwnd: int) -> None:
 
 # ---- Global hotkey support (Windows only) ----
 # Click-through windows never receive keyboard focus, so tk bindings can't see
-# keypresses. RegisterHotKey installs system-wide hotkeys that fire regardless
-# of which window has focus — exactly what we want for an overlay.
+# keypresses. We prefer a WH_KEYBOARD_LL hook so hotkeys only fire when the
+# target process (Farever) owns the foreground window — that way, typing in
+# our own popup (Toplevel) lets `\` and `/` through to the text fields
+# instead of being eaten as toggle/lock commands. Falls back to RegisterHotKey
+# (which fires globally regardless of focus) if the LL hook can't install.
 WM_HOTKEY = 0x0312
 MOD_SHIFT = 0x0004
 MOD_CONTROL = 0x0002
 MOD_NOREPEAT = 0x4000
 VK_OEM_5 = 0xDC  # the '\|' key on a US keyboard layout
 VK_OEM_2 = 0xBF  # the '/?' key on a US keyboard layout
+VK_SHIFT = 0x10
+VK_CONTROL = 0x11
+VK_MENU = 0x12  # Alt
+
+# Low-level hook constants
+WH_KEYBOARD_LL = 13
+HC_ACTION = 0
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
+WM_SYSKEYDOWN = 0x0104
+WM_SYSKEYUP = 0x0105
 
 HOTKEY_TOGGLE = 1
 HOTKEY_RESET = 2
 HOTKEY_LOCK = 3
 HOTKEY_RESET_POS = 4
+HOTKEY_PARSE = 5
 
 
-def _start_global_hotkeys(callbacks: dict[int, callable]) -> None:
-    """Spawn a daemon thread that registers global hotkeys and pumps WM_HOTKEY.
+def _start_global_hotkeys(callbacks: dict[int, callable],
+                          target_pid: int | None = None) -> None:
+    """Spawn a daemon thread that listens for our global hotkeys.
 
-    `callbacks` maps a HOTKEY_* id to a no-arg function (called on the hotkey
+    When `target_pid` is provided AND we can install a WH_KEYBOARD_LL hook,
+    hotkeys only fire when that PID owns the foreground window — typing into
+    our own popup window passes through cleanly. Falls back to RegisterHotKey
+    on hook install failure or when no PID is supplied; in that mode, hotkeys
+    fire globally and will eat `\\` keystrokes from any focused app.
+
+    `callbacks` maps a HOTKEY_* id to a no-arg function (called on the hook
     thread — callers must marshal back to the tk main thread if needed).
 
     No-op on non-Windows platforms.
@@ -206,6 +241,14 @@ def _start_global_hotkeys(callbacks: dict[int, callable]) -> None:
     def _pump():
         from ctypes import wintypes
         user32 = ctypes.windll.user32
+
+        # ---- Try focus-conditional WH_KEYBOARD_LL hook first ----
+        if target_pid is not None:
+            if _run_focused_keyboard_hook(user32, callbacks, target_pid):
+                return  # message loop exited cleanly
+            # else: install failed; fall through to RegisterHotKey
+
+        # ---- RegisterHotKey fallback (focus-blind, global) ----
         if not user32.RegisterHotKey(None, HOTKEY_TOGGLE,
                                      MOD_NOREPEAT, VK_OEM_5):
             print("[meter] failed to register '\\' hotkey "
@@ -221,6 +264,10 @@ def _start_global_hotkeys(callbacks: dict[int, callable]) -> None:
         if not user32.RegisterHotKey(None, HOTKEY_RESET_POS,
                                      MOD_SHIFT | MOD_NOREPEAT, VK_OEM_2):
             print("[meter] failed to register 'Shift+/' hotkey "
+                  "(another app may own it).", file=sys.stderr)
+        if not user32.RegisterHotKey(None, HOTKEY_PARSE,
+                                     MOD_CONTROL | MOD_NOREPEAT, VK_OEM_5):
+            print("[meter] failed to register 'Ctrl+\\' hotkey "
                   "(another app may own it).", file=sys.stderr)
 
         msg = wintypes.MSG()
@@ -240,6 +287,150 @@ def _start_global_hotkeys(callbacks: dict[int, callable]) -> None:
                      name="hotkey-pump").start()
 
 
+def _run_focused_keyboard_hook(user32, callbacks: dict, target_pid: int) -> bool:
+    """Install WH_KEYBOARD_LL and run a Windows message loop until exit.
+
+    Returns False if the hook can't install (caller falls back to RegisterHotKey).
+    Returns True after the message loop exits cleanly (shutdown).
+
+    The hook function inspects every keydown system-wide but only acts on our
+    five binds AND only when GetForegroundWindow's PID matches `target_pid`.
+    Everything else passes through unchanged so unrelated apps (and our own
+    popup window when it has focus) keep working normally.
+    """
+    from ctypes import wintypes
+
+    # Proper Win64 signatures — without these, LRESULT returns truncate to
+    # 32 bits and pointers come back garbled.
+    LRESULT = ctypes.c_ssize_t
+    HHOOK = ctypes.c_void_p
+
+    class KBDLLHOOKSTRUCT(ctypes.Structure):
+        _fields_ = [
+            ("vkCode", wintypes.DWORD),
+            ("scanCode", wintypes.DWORD),
+            ("flags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ctypes.c_void_p),
+        ]
+
+    HOOKPROC = ctypes.WINFUNCTYPE(
+        LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
+    user32.SetWindowsHookExW.restype = HHOOK
+    user32.SetWindowsHookExW.argtypes = [
+        ctypes.c_int, HOOKPROC, ctypes.c_void_p, wintypes.DWORD]
+    user32.CallNextHookEx.restype = LRESULT
+    user32.CallNextHookEx.argtypes = [
+        HHOOK, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+    user32.UnhookWindowsHookEx.restype = ctypes.c_int
+    user32.UnhookWindowsHookEx.argtypes = [HHOOK]
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.GetWindowThreadProcessId.argtypes = [
+        wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetAsyncKeyState.restype = ctypes.c_short
+    user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+
+    keys_down: set[int] = set()
+
+    def _is_pressed(vk: int) -> bool:
+        return bool(user32.GetAsyncKeyState(vk) & 0x8000)
+
+    def _foreground_pid() -> int:
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return 0
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return pid.value
+
+    def hook_proc(nCode, wParam, lParam):
+        if nCode != HC_ACTION:
+            return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+        kbd = ctypes.cast(
+            lParam, ctypes.POINTER(KBDLLHOOKSTRUCT))[0]
+        vk = kbd.vkCode
+
+        # Track key state so auto-repeat (still keydown after first press)
+        # doesn't re-fire our binds.
+        if wParam in (WM_KEYUP, WM_SYSKEYUP):
+            keys_down.discard(vk)
+            return user32.CallNextHookEx(None, nCode, wParam, lParam)
+        if wParam not in (WM_KEYDOWN, WM_SYSKEYDOWN):
+            return user32.CallNextHookEx(None, nCode, wParam, lParam)
+        if vk in keys_down:
+            return user32.CallNextHookEx(None, nCode, wParam, lParam)
+        keys_down.add(vk)
+
+        # Bail fast for keys that aren't one of ours.
+        if vk not in (VK_OEM_5, VK_OEM_2):
+            return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+        # The whole point: only fire when Farever has the foreground.
+        if _foreground_pid() != target_pid:
+            return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+        shift = _is_pressed(VK_SHIFT)
+        ctrl = _is_pressed(VK_CONTROL)
+        alt = _is_pressed(VK_MENU)
+        # Alt+anything isn't a bind we care about — let it pass.
+        if alt:
+            return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+        action = None
+        if vk == VK_OEM_5:  # backslash family
+            if ctrl and not shift:
+                action = HOTKEY_PARSE
+            elif shift and not ctrl:
+                action = HOTKEY_RESET
+            elif not shift and not ctrl:
+                action = HOTKEY_TOGGLE
+        elif vk == VK_OEM_2:  # forward-slash family
+            if shift and not ctrl:
+                action = HOTKEY_RESET_POS
+            elif not shift and not ctrl:
+                action = HOTKEY_LOCK
+
+        if action is not None:
+            cb = callbacks.get(action)
+            if cb is not None:
+                try:
+                    cb()
+                except Exception as e:
+                    print(f"[!] hotkey handler error: {e}",
+                          file=sys.stderr)
+            return 1  # consume so Farever doesn't also see the key
+
+        return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+    # Bind the WINFUNCTYPE wrapper to a local to keep it alive for the
+    # lifetime of the hook (GC'd callback = crash on next key event).
+    c_hook_proc = HOOKPROC(hook_proc)
+
+    kernel32 = ctypes.windll.kernel32
+    hMod = kernel32.GetModuleHandleW(None)
+    hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, c_hook_proc, hMod, 0)
+    if not hook:
+        err = ctypes.get_last_error()
+        print(f"[meter] LL keyboard hook install failed (errno {err}); "
+              "falling back to global RegisterHotKey.", file=sys.stderr)
+        return False
+
+    print(f"[meter] focus-conditional hotkeys installed "
+          f"(active only while Farever PID {target_pid} owns foreground).",
+          file=sys.stderr)
+
+    msg = wintypes.MSG()
+    while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+        user32.TranslateMessage(ctypes.byref(msg))
+        user32.DispatchMessageW(ctypes.byref(msg))
+
+    user32.UnhookWindowsHookEx(hook)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Damage-only session tracker
 # ---------------------------------------------------------------------------
@@ -247,12 +438,17 @@ def _start_global_hotkeys(callbacks: dict[int, callable]) -> None:
 class DamageAggregate:
     damage: dict[str, list[float]] = field(
         default_factory=lambda: defaultdict(lambda: [0, 0.0]))
+    # 1-second buckets keyed by integer seconds since start_time. Feeds the
+    # timeline graph in both the live overlay and the saved screenshot.
+    timeline: dict[int, float] = field(
+        default_factory=lambda: defaultdict(float))
     start_time: float = 0.0
     end_time: float = 0.0
     duration: float = 0.0
 
     def reset(self, now: float):
         self.damage.clear()
+        self.timeline.clear()
         self.start_time = now
         self.end_time = now
         self.duration = 0.0
@@ -278,20 +474,40 @@ class DamageSession:
         self.session.start_time = time.time()
         self.in_combat = False
         self.last_event_time = 0.0
+        # 30s parse mode: timer arms when parse_mode flips on, but parse_start
+        # only advances off 0.0 when the FIRST damage event arrives — so idle
+        # time before pulling the dummy doesn't eat into the 30s window.
+        self.parse_mode = False
+        self.parse_start = 0.0
+        self.parse_frozen = False
 
     def record_damage(self, dmg_type: str, value: float):
         with self.lock:
             now = time.time()
+            if self.parse_mode:
+                if self.parse_frozen:
+                    return
+                if self.parse_start == 0.0:
+                    self.parse_start = now
+                elif now - self.parse_start >= PARSE_MODE_DURATION_SECS:
+                    self.parse_frozen = True
+                    self.in_combat = False
+                    return
             if not self.in_combat and self.last_event_time > 0:
                 self.current.reset(now)
             self.in_combat = True
+            # Hoisted above the loop so the timeline-bucket calc below sees a
+            # valid start_time on the very first event of an encounter.
+            if self.current.start_time == 0:
+                self.current.start_time = now
             for agg in (self.current, self.session):
                 agg.damage[dmg_type][0] += 1
                 agg.damage[dmg_type][1] += value
+                if agg.start_time > 0:
+                    bucket = max(0, int(now - agg.start_time))
+                    agg.timeline[bucket] += value
             self.last_event_time = now
             self.current.end_time = now
-            if self.current.start_time == 0:
-                self.current.start_time = now
             self.current.duration = max(0.001, now - self.current.start_time)
             self.session.end_time = now
             self.session.duration = now - self.session.start_time
@@ -300,6 +516,13 @@ class DamageSession:
         with self.lock:
             now = time.time()
             if self.in_combat and (now - self.last_event_time) > self.combat_timeout:
+                self.in_combat = False
+            # Freeze parse mode even if no event has arrived since the deadline,
+            # so the UI doesn't sit on a stale "Logging…" title past 30s.
+            if (self.parse_mode and not self.parse_frozen
+                    and self.parse_start > 0
+                    and now - self.parse_start >= PARSE_MODE_DURATION_SECS):
+                self.parse_frozen = True
                 self.in_combat = False
 
     def reset_all(self):
@@ -317,6 +540,26 @@ class DamageSession:
             self.session.reset(now)
             self.in_combat = False
             self.last_event_time = 0.0
+            # Hard reset re-arms parse mode (parse_mode flag itself is sticky
+            # — toggling it is a separate explicit action via Ctrl+\).
+            self.parse_start = 0.0
+            self.parse_frozen = False
+
+    def set_parse_mode(self, enabled: bool):
+        """Toggle 30s parse mode. Caller is responsible for calling reset_all()
+        if they want a clean slate (the overlay does this on toggle)."""
+        with self.lock:
+            self.parse_mode = enabled
+            self.parse_start = 0.0
+            self.parse_frozen = False
+
+    def parse_state(self) -> tuple[bool, bool, float]:
+        """Return (enabled, frozen, elapsed_seconds_since_first_hit)."""
+        with self.lock:
+            if not self.parse_mode:
+                return (False, False, 0.0)
+            elapsed = (time.time() - self.parse_start) if self.parse_start > 0 else 0.0
+            return (True, self.parse_frozen, elapsed)
 
     def snapshot(self, view: str = "current") -> DamageAggregate:
         with self.lock:
@@ -324,6 +567,9 @@ class DamageSession:
             snap = DamageAggregate()
             for k, v in src.damage.items():
                 snap.damage[k] = list(v)
+            # Shallow copy is fine — buckets are plain floats keyed by int.
+            for k, v in src.timeline.items():
+                snap.timeline[k] = v
             snap.start_time = src.start_time
             snap.end_time = src.end_time
             if view == "current" and self.in_combat and src.start_time > 0:
@@ -593,11 +839,472 @@ class _Row:
             self._packed = False
 
 
+# ---------------------------------------------------------------------------
+# Parse-result screenshot rendering
+# ---------------------------------------------------------------------------
+# Windows TrueType font paths used by the PNG renderer. Picked so the saved
+# image mirrors the on-screen meter's typography. Falls back to PIL's default
+# bitmap font if any are missing (rendering still works, just plainer).
+_FONT_PATHS = {
+    ("segoe", False): r"C:\Windows\Fonts\segoeui.ttf",
+    ("segoe", True):  r"C:\Windows\Fonts\segoeuib.ttf",
+    ("consolas", False): r"C:\Windows\Fonts\consola.ttf",
+    ("consolas", True):  r"C:\Windows\Fonts\consolab.ttf",
+}
+
+
+def _font(family: str, size: int, bold: bool = False):
+    """Load a TrueType font with a graceful fallback to PIL's default.
+
+    Lazy-imports PIL.ImageFont so the meter still starts if Pillow isn't
+    installed — only the screenshot save path needs it.
+    """
+    from PIL import ImageFont
+    path = _FONT_PATHS.get((family, bold))
+    if path and Path(path).exists():
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            pass
+    return ImageFont.load_default()
+
+
+def _wrap_text_chars(text: str, max_chars: int) -> list[str]:
+    """Naive whitespace-aware word wrap by character count.
+
+    Good enough for the description field on a fixed-width card; not
+    typographically perfect for variable-width fonts but renders predictably.
+    """
+    out: list[str] = []
+    for paragraph in text.splitlines():
+        if not paragraph.strip():
+            out.append("")
+            continue
+        words = paragraph.split()
+        cur = ""
+        for w in words:
+            if not cur:
+                cur = w
+            elif len(cur) + 1 + len(w) <= max_chars:
+                cur = cur + " " + w
+            else:
+                out.append(cur)
+                cur = w
+        if cur:
+            out.append(cur)
+    return out
+
+
+def _render_parse_image(snap, name: str, description: str,
+                        timestamp_str: str, player_id: int | None):
+    """Render a meter-styled PNG summarising a 30s parse. Returns a PIL Image.
+
+    Mirrors the on-screen overlay: dark border, teal header with version + ID,
+    cream body with title + total/DPS + per-type bars. Layout heights are
+    precomputed so the final image is tight to the content (no whitespace
+    padding at the bottom).
+    """
+    from PIL import Image, ImageDraw
+
+    breakdown = snap.breakdown()
+    duration = max(0.001, snap.duration)
+    total = snap.total()
+    dps = snap.dps()
+
+    width = 420
+    border = 2
+    header_h = 38
+    body_pad = 14
+
+    title_h = 26
+    sep_h = 8                       # 1px line + 7px gap
+
+    desc_lines = _wrap_text_chars(description.strip(), 56) if description and description.strip() else []
+    desc_h = (16 * len(desc_lines) + 8) if desc_lines else 0
+
+    stats_h = 30
+    row_text_h = 17
+    row_bar_h = 7                   # 5px bar + 2px gap
+    row_gap = 4
+    row_h = row_text_h + row_bar_h + row_gap
+
+    rows_block_h = row_h * len(breakdown) if breakdown else 24
+
+    # Timeline section sits between per-type rows and the footer when the
+    # parse actually has data. Mirrors the live-overlay layout.
+    has_timeline = total > 0 and bool(getattr(snap, "timeline", None))
+    timeline_plot_h = 50
+    timeline_block_h = (8 + 18 + timeline_plot_h + 8) if has_timeline else 0
+
+    footer_h = 22
+
+    body_h = (body_pad + title_h + sep_h + desc_h + stats_h
+              + rows_block_h + timeline_block_h + footer_h + body_pad)
+    total_h = border + header_h + body_h + border
+
+    img = Image.new("RGB", (width, total_h), color=BG_BORDER)
+    draw = ImageDraw.Draw(img)
+
+    # Body background
+    draw.rectangle((border, border + header_h,
+                    width - border - 1, total_h - border - 1), fill=BG_BODY)
+
+    # Header bar
+    draw.rectangle((border, border,
+                    width - border - 1, border + header_h - 1), fill=BG_HEADER)
+    f_version = _font("consolas", 12)
+    f_header_title = _font("segoe", 14, bold=True)
+    f_id = _font("consolas", 12)
+    draw.text((border + 10, border + 11), f"v{VERSION}",
+              fill=FG_HEADER, font=f_version)
+    draw.text((border + 56, border + 9), "Farever Damage Meter",
+              fill=FG_HEADER, font=f_header_title)
+    if player_id is not None:
+        id_short = struct.pack("<Q", player_id)[:4].hex()
+        id_text = f"ID: {id_short}"
+        bbox = draw.textbbox((0, 0), id_text, font=f_id)
+        draw.text((width - border - 10 - (bbox[2] - bbox[0]),
+                   border + 11), id_text, fill=FG_HEADER, font=f_id)
+
+    # Body cursor
+    x_left = border + body_pad
+    x_right = width - border - body_pad
+    y = border + header_h + body_pad
+
+    # Title row: parse name (or default) + duration
+    f_title = _font("segoe", 14, bold=True)
+    f_dim = _font("segoe", 10)
+    title_text = name.strip() if name and name.strip() else "30s Parse Result"
+    draw.text((x_left, y), title_text, fill=ACCENT, font=f_title)
+    secs = int(duration)
+    mins, ss = divmod(secs, 60)
+    combat_text = f"Time: {mins}:{ss:02d}"
+    bbox = draw.textbbox((0, 0), combat_text, font=f_dim)
+    draw.text((x_right - (bbox[2] - bbox[0]), y + 6),
+              combat_text, fill=FG_DIM, font=f_dim)
+    y += title_h
+
+    # Separator
+    draw.line((x_left, y, x_right, y), fill=BG_BODY_SOFT, width=1)
+    y += sep_h
+
+    # Description (if any)
+    if desc_lines:
+        f_desc = _font("segoe", 10)
+        for line in desc_lines:
+            draw.text((x_left, y), line, fill=FG_TEXT, font=f_desc)
+            y += 16
+        y += 8
+
+    # Stats line
+    f_stats = _font("consolas", 14, bold=True)
+    if total > 0:
+        stats_text = f"Total: {int(total):>6}     DPS: {dps:>7.1f}"
+    else:
+        stats_text = "No damage recorded"
+    draw.text((x_left, y), stats_text, fill=FG_VALUE, font=f_stats)
+    y += stats_h
+
+    # Per-type rows
+    if breakdown:
+        max_total = max((t for _, _, t in breakdown), default=1.0) or 1.0
+        f_row = _font("consolas", 11)
+        for dt, count, t in breakdown:
+            dps_val = t / duration
+            text = f"{dt:<10} {int(t):>6}  ({dps_val:>5.1f}/s)  {count} hits"
+            draw.text((x_left, y), text, fill=FG_TEXT, font=f_row)
+            y += row_text_h
+            # Bar background
+            draw.rectangle((x_left, y, x_right, y + 5), fill=BG_BAR_TRACK)
+            frac = max(0.01, t / max_total)
+            fill_x1 = x_left + int((x_right - x_left) * frac)
+            color = TYPE_COLORS.get(dt, ACCENT)
+            draw.rectangle((x_left, y, fill_x1, y + 5), fill=color)
+            y += row_bar_h + row_gap
+    else:
+        y += 24
+
+    # Timeline section (per-second damage bars)
+    if has_timeline:
+        draw.line((x_left, y, x_right, y), fill=BG_BODY_SOFT, width=1)
+        y += 8
+        f_section = _font("segoe", 10, bold=True)
+        draw.text((x_left, y), "Damage Timeline",
+                  fill=ACCENT, font=f_section)
+        y += 18
+        num_buckets = max(1, int(math.ceil(max(duration, 1.0))))
+        tl_vals = snap.timeline
+        max_val = max(tl_vals.values()) if tl_vals else 1.0
+        if max_val <= 0:
+            max_val = 1.0
+        bar_w = (x_right - x_left) / num_buckets
+        base_y = y + timeline_plot_h
+        for i in range(num_buckets):
+            v = tl_vals.get(i, 0.0)
+            if v <= 0:
+                continue
+            bh = int((v / max_val) * timeline_plot_h)
+            if bh < 1:
+                bh = 1
+            x0 = int(x_left + i * bar_w)
+            x1 = max(x0 + 1, int(x_left + (i + 1) * bar_w) - 1)
+            draw.rectangle((x0, base_y - bh, x1, base_y), fill=ACCENT)
+        y += timeline_plot_h + 8
+
+    # Footer: timestamp + credit
+    f_foot = _font("segoe", 9)
+    footer_text = f"{timestamp_str}   ·   Made by Brudr"
+    draw.text((x_left, y), footer_text, fill=FG_DIM, font=f_foot)
+
+    return img
+
+
+def _sanitize_for_filename(s: str) -> str:
+    """Strip filesystem-illegal chars (Windows-strictest set) and truncate."""
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1F]+', "_", s).strip().strip(".")
+    return s[:60]
+
+
+def _center_on_monitor(anchor_window, w: int, h: int, fallback_window):
+    """Return (x, y) centered on the work area of the monitor containing
+    `anchor_window`. Falls back to primary-screen center on non-Windows or if
+    the Win32 monitor APIs fail. y is biased to the upper third so the popup
+    sits comfortably above the centre line rather than under it.
+    """
+    if sys.platform == "win32":
+        try:
+            from ctypes import wintypes
+
+            class _RECT(ctypes.Structure):
+                _fields_ = [
+                    ("left", wintypes.LONG), ("top", wintypes.LONG),
+                    ("right", wintypes.LONG), ("bottom", wintypes.LONG),
+                ]
+
+            class _MONITORINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", wintypes.DWORD),
+                    ("rcMonitor", _RECT),
+                    ("rcWork", _RECT),
+                    ("dwFlags", wintypes.DWORD),
+                ]
+
+            MONITOR_DEFAULTTONEAREST = 2
+            user32 = ctypes.windll.user32
+            user32.MonitorFromWindow.restype = ctypes.c_void_p
+            user32.GetMonitorInfoW.restype = ctypes.c_int
+            user32.GetMonitorInfoW.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(_MONITORINFO)]
+
+            anchor_window.update_idletasks()
+            hwnd = anchor_window.winfo_id()
+            outer = user32.GetParent(hwnd)
+            if outer:
+                hwnd = outer
+
+            hmon = user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+            if not hmon:
+                raise RuntimeError("MonitorFromWindow returned NULL")
+            mi = _MONITORINFO()
+            mi.cbSize = ctypes.sizeof(_MONITORINFO)
+            if not user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+                raise RuntimeError("GetMonitorInfoW failed")
+
+            rc = mi.rcWork  # excludes taskbar
+            mon_w = rc.right - rc.left
+            mon_h = rc.bottom - rc.top
+            x = rc.left + (mon_w - w) // 2
+            # Bias to upper-third so the popup doesn't bury itself under the
+            # vertical centre on tall monitors.
+            y = rc.top + max(0, (mon_h - h) // 3)
+            return (x, y)
+        except Exception as e:
+            print(f"[meter] monitor lookup failed ({e}); "
+                  "falling back to primary-screen center.", file=sys.stderr)
+
+    sw = fallback_window.winfo_screenwidth()
+    sh = fallback_window.winfo_screenheight()
+    return (max(0, (sw - w) // 2), max(0, (sh - h) // 3))
+
+
+class _ParseResultsPopup:
+    """Modeless results window opened when a 30s parse finishes.
+
+    Holds its own snapshot of the parse so subsequent meter activity doesn't
+    disturb the captured data. Closing the window dismisses without saving;
+    the user can re-parse to get a fresh popup.
+    """
+
+    def __init__(self, parent_root: tk.Tk, snap, player_id: int | None):
+        self.snap = snap
+        self.player_id = player_id
+        self.timestamp = datetime.now()
+        self.timestamp_str = self.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+        self._saved_path: Path | None = None
+
+        self.win = tk.Toplevel(parent_root)
+        self.win.title("30s Parse Result")
+        self.win.configure(bg=BG_BODY)
+        # Briefly topmost so the popup surfaces above the game on freeze, then
+        # released so the user can alt-tab freely (modeless behavior).
+        self.win.attributes("-topmost", True)
+        self.win.after(800, lambda: self._safe_attr("-topmost", False))
+
+        w, h = 440, 380
+        # Center on the work area of whichever monitor the meter overlay is
+        # on. Previous "anchor below the meter" approach was misreading the
+        # parent's geometry on some configs and dumping the popup in the
+        # bottom-right of the screen. MonitorFromWindow is the canonical Win32
+        # answer to "which display is this window on".
+        x, y = _center_on_monitor(parent_root, w, h, self.win)
+        self.win.geometry(f"{w}x{h}+{x}+{y}")
+        self.win.minsize(420, 360)
+
+        self._build_ui()
+        self.win.lift()
+        self.win.focus_force()
+
+    def _safe_attr(self, key: str, value):
+        try:
+            self.win.attributes(key, value)
+        except tk.TclError:
+            pass
+
+    def _build_ui(self):
+        outer = tk.Frame(self.win, bg=BG_BORDER, padx=2, pady=2)
+        outer.pack(fill="both", expand=True)
+
+        header = tk.Frame(outer, bg=BG_HEADER, height=32)
+        header.pack(fill="x")
+        tk.Label(header, text="30s Parse Result",
+                 bg=BG_HEADER, fg=FG_HEADER,
+                 font=("Segoe UI", 11, "bold"),
+                 padx=12, pady=6).pack(side="left")
+        tk.Label(header, text=self.timestamp_str,
+                 bg=BG_HEADER, fg=FG_HEADER,
+                 font=("Consolas", 9),
+                 padx=12, pady=6).pack(side="right")
+
+        body = tk.Frame(outer, bg=BG_BODY, padx=14, pady=12)
+        body.pack(fill="both", expand=True)
+
+        # Summary readout — what's actually in this parse
+        total = self.snap.total()
+        dps = self.snap.dps()
+        n_types = len(self.snap.breakdown())
+        summary_text = (f"Total: {int(total)}     "
+                        f"DPS: {dps:.1f}     "
+                        f"{n_types} damage type{'s' if n_types != 1 else ''}")
+        tk.Label(body, text=summary_text, bg=BG_BODY, fg=FG_VALUE,
+                 font=("Consolas", 11, "bold"),
+                 anchor="w").pack(fill="x", pady=(0, 12))
+
+        tk.Frame(body, bg=BG_BODY_SOFT, height=1).pack(fill="x", pady=(0, 10))
+
+        tk.Label(body, text="Name (optional)", bg=BG_BODY, fg=FG_TEXT,
+                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
+        self.name_entry = tk.Entry(body, bg="#FFFFFF", fg=FG_VALUE,
+                                   font=("Segoe UI", 10),
+                                   relief="flat", highlightthickness=1,
+                                   highlightbackground=BG_BODY_SOFT,
+                                   highlightcolor=ACCENT)
+        self.name_entry.pack(fill="x", pady=(2, 10), ipady=4)
+
+        tk.Label(body, text="Description (optional)", bg=BG_BODY, fg=FG_TEXT,
+                 font=("Segoe UI", 9), anchor="w").pack(fill="x")
+        self.desc_text = tk.Text(body, height=4, bg="#FFFFFF", fg=FG_VALUE,
+                                 font=("Segoe UI", 10), wrap="word",
+                                 relief="flat", highlightthickness=1,
+                                 highlightbackground=BG_BODY_SOFT,
+                                 highlightcolor=ACCENT)
+        self.desc_text.pack(fill="x", pady=(2, 12))
+
+        btn_row = tk.Frame(body, bg=BG_BODY)
+        btn_row.pack(fill="x")
+        self.save_btn = tk.Button(
+            btn_row, text="Save Screenshot",
+            command=self._save,
+            bg=BG_HEADER, fg=FG_HEADER,
+            activebackground=ACCENT, activeforeground=FG_HEADER,
+            font=("Segoe UI", 10, "bold"),
+            relief="flat", padx=14, pady=6, cursor="hand2",
+        )
+        self.save_btn.pack(side="left")
+        self.open_btn = tk.Button(
+            btn_row, text="Open Folder",
+            command=self._open_folder,
+            bg=BG_BODY_SOFT, fg=FG_TEXT,
+            activebackground=BG_BAR_TRACK, activeforeground=FG_VALUE,
+            font=("Segoe UI", 10),
+            relief="flat", padx=14, pady=6, cursor="hand2",
+            state="disabled",
+        )
+        self.open_btn.pack(side="left", padx=(8, 0))
+
+        self.status_label = tk.Label(body, text="", bg=BG_BODY, fg=FG_DIM,
+                                     font=("Segoe UI", 9),
+                                     wraplength=400, justify="left",
+                                     anchor="w")
+        self.status_label.pack(fill="x", pady=(10, 0))
+
+    def _save(self):
+        name = self.name_entry.get().strip()
+        description = self.desc_text.get("1.0", "end").strip()
+        try:
+            img = _render_parse_image(
+                self.snap, name, description,
+                self.timestamp_str, self.player_id)
+        except ImportError:
+            self.status_label.config(
+                text="Pillow not installed — run:  pip install Pillow",
+                fg="#B0392E")
+            return
+        except Exception as e:
+            self.status_label.config(
+                text=f"Render failed: {e}", fg="#B0392E")
+            return
+
+        try:
+            PARSE_SCREENSHOTS_DIR.mkdir(exist_ok=True)
+            ts_safe = self.timestamp.strftime("%Y-%m-%d_%H-%M-%S")
+            if name:
+                name_safe = _sanitize_for_filename(name)
+                filename = f"{ts_safe}_{name_safe}.png" if name_safe else f"{ts_safe}.png"
+            else:
+                filename = f"{ts_safe}.png"
+            path = PARSE_SCREENSHOTS_DIR / filename
+            img.save(path, "PNG")
+            self._saved_path = path
+            self.status_label.config(
+                text=f"Saved to parse_screenshots/{filename}", fg=ACCENT)
+            self.open_btn.config(state="normal")
+        except OSError as e:
+            self.status_label.config(
+                text=f"Save failed: {e}", fg="#B0392E")
+
+    def _open_folder(self):
+        if self._saved_path is None:
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(self._saved_path.parent))
+            else:
+                self.status_label.config(
+                    text=f"Folder: {self._saved_path.parent}", fg=FG_DIM)
+        except OSError as e:
+            self.status_label.config(text=f"Open failed: {e}", fg="#B0392E")
+
+
 class SimpleOverlay:
-    def __init__(self, session: DamageSession, backend: MeterBackend):
+    def __init__(self, session: DamageSession, backend: MeterBackend,
+                 target_pid: int | None = None):
         self.session = session
         self.backend = backend
         self.view_mode = "current"
+        # Used by the focus-conditional hotkey hook to filter keystrokes —
+        # None falls back to global RegisterHotKey (works but eats keystrokes
+        # in our popup window).
+        self._target_pid = target_pid
 
         self.root = tk.Tk()
         self.root.title("Farever Damage Meter")
@@ -634,6 +1341,11 @@ class SimpleOverlay:
         # never touch tk objects from the hotkey thread (which is unsafe with
         # the custom pump loop this overlay uses).
         self._hotkey_actions: "queue.Queue[str]" = queue.Queue()
+        # Parse-mode popup state. Armed when parse mode toggles on or hard
+        # reset happens; consumed on the rising edge of parse_frozen so each
+        # 30s window gets exactly one popup.
+        self._popup_armed = False
+        self._popup_last_frozen = False
         self._build_ui()
 
         self.root.update_idletasks()
@@ -648,7 +1360,8 @@ class SimpleOverlay:
             HOTKEY_RESET:     lambda: self._hotkey_actions.put("reset"),
             HOTKEY_LOCK:      lambda: self._hotkey_actions.put("lock"),
             HOTKEY_RESET_POS: lambda: self._hotkey_actions.put("reset_pos"),
-        })
+            HOTKEY_PARSE:     lambda: self._hotkey_actions.put("parse"),
+        }, target_pid=self._target_pid)
 
     def _drain_hotkey_actions(self):
         while True:
@@ -664,6 +1377,8 @@ class SimpleOverlay:
                 self._toggle_lock()
             elif action == "reset_pos":
                 self._reset_position()
+            elif action == "parse":
+                self._toggle_parse_mode()
 
     def _toggle_visibility(self):
         if self._visible:
@@ -684,6 +1399,10 @@ class SimpleOverlay:
         # within a few seconds of resumed combat.
         if self.backend is not None:
             self.backend.reset_player_detection()
+        # Hard reset re-arms the parse popup so the next freeze opens a fresh
+        # one. Also clear the edge-detection flag so the rising edge fires.
+        self._popup_armed = True
+        self._popup_last_frozen = False
         # Force the next refresh to redraw the "awaiting" placeholder
         self._stats_label.config(text="")
         # Auto-detection in _refresh handles the visual shrink as soon as the
@@ -692,6 +1411,38 @@ class SimpleOverlay:
         # usual (e.g. under heavy packet load right at reset time).
         self.root.after(REFRESH_MS + 50, self._shrink_to_natural)
         self.root.after(REFRESH_MS * 2 + 100, self._shrink_to_natural)
+
+    def _toggle_parse_mode(self):
+        """Flip 30s parse mode on/off and clear the meter for a fresh window.
+
+        Toggling EITHER direction wipes session data + player detection so the
+        user always starts from a known-clean state. Inside parse mode, the
+        Shift+\\ hard reset re-arms the 30s timer without disturbing the
+        parse_mode flag itself.
+        """
+        enabled_now, _, _ = self.session.parse_state()
+        going_on = not enabled_now
+        self.session.set_parse_mode(going_on)
+        self.session.reset_all()
+        if self.backend is not None:
+            self.backend.reset_player_detection()
+        # Arm the popup only when turning parse mode ON. Turning it off should
+        # not queue a popup that the user wouldn't expect to see.
+        self._popup_armed = going_on
+        self._popup_last_frozen = False
+        self._stats_label.config(text="")
+        self.root.after(REFRESH_MS + 50, self._shrink_to_natural)
+        self.root.after(REFRESH_MS * 2 + 100, self._shrink_to_natural)
+
+    def _open_parse_popup(self):
+        """Open a results popup for the just-frozen parse. Snapshots the data
+        so the popup is unaffected by subsequent meter activity."""
+        snap = self.session.snapshot("current")
+        pid = getattr(self.backend, "player_id", None)
+        try:
+            _ParseResultsPopup(self.root, snap, pid)
+        except tk.TclError as e:
+            print(f"[meter] failed to open parse popup: {e}", file=sys.stderr)
 
     def _shrink_to_natural(self):
         # Capture the current top-left BEFORE wm_geometry("") clears the
@@ -785,9 +1536,12 @@ class SimpleOverlay:
         # rather than a second panel. Packed first so it sits above the meter.
         self._hint_label = tk.Label(
             self.root,
-            text="\\ show/hide   Shift+\\ reset   / lock/unlock   Shift+/ reset pos",
+            text=(
+                "\\ show/hide   Shift+\\ reset   Ctrl+\\ 30s parse\n"
+                "/ lock/unlock   Shift+/ reset pos"
+            ),
             bg=TRANSPARENT_KEY, fg="#FFFFFF",
-            font=("Segoe UI", 8, "bold"), pady=4,
+            font=("Segoe UI", 8, "bold"), pady=4, justify="center",
         )
         self._hint_label.pack(fill="x")
 
@@ -859,6 +1613,11 @@ class SimpleOverlay:
         for _ in range(MAX_ROWS):
             self._rows.append(_Row(rows_container))
 
+        # NOTE: The Damage Timeline graph is intentionally NOT rendered in the
+        # live overlay — it's only included in the saved screenshot PNG (see
+        # _render_parse_image). Keeps the on-screen meter compact and avoids
+        # the constant 4-Hz canvas redraw while in combat.
+
         self.root.minsize(360, 0)
 
     def _reposition(self):
@@ -882,17 +1641,81 @@ class SimpleOverlay:
         except Exception as e:
             print(f"[!] click-through setup failed: {e}", file=sys.stderr)
 
+    def _maintain_visibility(self):
+        """Re-assert HWND_TOPMOST whenever someone other than our own popup
+        owns the foreground window.
+
+        Windows can quietly drop WS_EX_NOACTIVATE topmost overlays behind the
+        foreground app on focus changes — most commonly when alt-tabbing back
+        into a fullscreen-borderless game. SetWindowPos with HWND_TOPMOST +
+        SWP_NOACTIVATE is idempotent (no flicker if we're already on top) and
+        cheap enough to run every refresh tick. We skip the call when our own
+        popup is foregrounded so we don't fight it for z-order.
+        """
+        if sys.platform != "win32":
+            return
+        if not self._visible:
+            return  # user explicitly hid the meter via `\` — respect that
+        try:
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            fg = user32.GetForegroundWindow()
+            if fg:
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(fg, ctypes.byref(pid))
+                # Our own popup window lives in this Python process. Don't
+                # shove the meter on top of it.
+                if pid.value == os.getpid():
+                    return
+            hwnd = self.root.winfo_id()
+            outer = user32.GetParent(hwnd)
+            target = outer if outer else hwnd
+            HWND_TOPMOST = -1
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            SWP_NOACTIVATE = 0x0010
+            SWP_SHOWWINDOW = 0x0040
+            user32.SetWindowPos(
+                target, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+        except Exception:
+            # Visibility maintenance is best-effort; any error here would
+            # spam stderr every 250ms. Swallow silently.
+            pass
+
     def _schedule_refresh(self):
         self._refresh()
         self.root.after(REFRESH_MS, self._schedule_refresh)
 
     def _refresh(self):
         self._drain_hotkey_actions()
+        self._maintain_visibility()
         self.session.tick()
         snap = self.session.snapshot(self.view_mode)
         in_combat, idle = self.session.status()
+        parse_enabled, parse_frozen, parse_elapsed = self.session.parse_state()
 
-        if in_combat:
+        # Rising-edge detection: open the popup the first refresh tick after
+        # parse_frozen flips True. Guarded by _popup_armed so toggling parse
+        # mode off (or skipping arm on a stale freeze) doesn't open a window.
+        if (parse_enabled and parse_frozen and not self._popup_last_frozen
+                and self._popup_armed):
+            self._popup_armed = False
+            self._open_parse_popup()
+        self._popup_last_frozen = parse_frozen
+
+        if parse_enabled:
+            if parse_frozen:
+                title = "Parse Complete (30s)  ·  Shift+\\ to reset"
+            elif parse_elapsed > 0:
+                # Ceil so the first tick reads "30s" and the final tick reads
+                # "1s" rather than briefly flashing "0s".
+                remaining = max(
+                    0, math.ceil(PARSE_MODE_DURATION_SECS - parse_elapsed))
+                title = f"Parse Mode  ·  {remaining}s remaining"
+            else:
+                title = "Parse Mode  ·  awaiting first hit"
+        elif in_combat:
             # Idle counts up from the last damage event; the encounter closes
             # when it crosses combat_timeout. Ceil so the user sees "Ends in
             # 30s" the moment the timer starts and "Ends in 1s" right up to
@@ -943,7 +1766,13 @@ class SimpleOverlay:
         if self._stats_label.cget("text") != stats_text:
             self._stats_label.config(text=stats_text)
 
-        if in_combat:
+        if parse_enabled and parse_frozen:
+            section_title = "Parse Results (30s)"
+        elif parse_enabled and total > 0:
+            section_title = "Parse Logging…"
+        elif parse_enabled:
+            section_title = "PARSE READY"
+        elif in_combat:
             section_title = "Logging Damage"
         elif total > 0:
             section_title = "Logged Damage"
@@ -1013,6 +1842,16 @@ def main():
     except frida.ProcessNotFoundError:
         sys.exit(f"[!] {TARGET_PROCESS} not running. Launch the game first.")
 
+    # Resolve Farever's PID so the keyboard hook can filter keystrokes to only
+    # fire when the game has focus. If lookup fails, fall back to global
+    # RegisterHotKey hotkeys.
+    farever_pid: int | None = None
+    try:
+        farever_pid = frida.get_local_device().get_process(TARGET_PROCESS).pid
+    except Exception as e:
+        print(f"[meter] PID lookup failed for focus-conditional hotkeys "
+              f"({e}); hotkeys will fire globally.", file=sys.stderr)
+
     def on_message(message, data):
         if message["type"] != "send":
             if message["type"] == "error":
@@ -1034,10 +1873,10 @@ def main():
     script.on("message", on_message)
     script.load()
     print("[*] Hook loaded. Starting overlay...", file=sys.stderr)
-    print("[*] Hotkeys:  \\ show/hide   Shift+\\ reset   / lock/unlock   "
-          "Shift+/ reset pos", file=sys.stderr)
+    print("[*] Hotkeys:  \\ show/hide   Shift+\\ reset   Ctrl+\\ 30s parse   "
+          "/ lock/unlock   Shift+/ reset pos", file=sys.stderr)
 
-    overlay = SimpleOverlay(session, backend)
+    overlay = SimpleOverlay(session, backend, target_pid=farever_pid)
 
     try:
         overlay.run()
