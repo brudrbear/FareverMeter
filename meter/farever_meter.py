@@ -273,23 +273,23 @@ MINIMAP_Z_MARK_DARK = "#000000"
 MINIMAP_Z_MARK_LIGHT = "#FFFFFF"
 MINIMAP_PARTY_RING = "#57C7FF"  # the ring that marks a group member
 
-# rotationZ is measured from +x (east), not +y (north) — established by the
-# arrow pointing 90 degrees off the player's real facing until it was corrected.
+# Angles from the game need no correction at all, which took a while to
+# establish and two wrong guesses along the way.
 #
-# ...and it increases the opposite way round to the screen convention, which
-# showed up as the map turning right when the camera turned left. Every angle
-# from the game goes through _yaw() so the map, the player arrow and the other
-# players' chevrons all flip together; they have to agree or the arrow ends up
-# pointing somewhere the map disagrees with. Flip this one constant if the
-# rotation ever reads backwards again.
-MINIMAP_YAW_SIGN = -1.0
-
-# ...and rotationZ points the opposite way to the model's actual forward, so a
-# marker drawn straight from it comes out facing backwards. Applied to FACINGS
-# ONLY — the player arrow and the other players' chevrons — never to the camera
-# heading that turns the map, which is correct as it stands. Half a turn, so
-# the sign above doesn't matter to it.
-MINIMAP_FACING_OFFSET = math.pi
+# The camera's curDirection was measured against ground truth — the azimuth
+# from the render camera's own pos to its target, read out of h3d.Camera — and
+# the two agree to 0.00 degrees through a full swing. So curDirection IS the
+# world azimuth of the view, in the same frame as posx/posy, and rotationZ is
+# the same convention for entities.
+#
+# The sign flip and half-turn offset that used to live here were compensating
+# for a misread, not for the game. What they actually did was mirror the map,
+# which is why it never quite made sense to look at: on a mirrored map every
+# turn goes the wrong way and no single fix ever makes it right.
+#
+# Worth stating plainly, because it reads as a bug and isn't: a rotating
+# minimap ALWAYS counter-rotates. Turn the camera left and the world on the map
+# sweeps right, because the map is showing the world relative to your view.
 
 # A flat map can't tell you that a mob is on the gantry above you or in the
 # tunnel below, and those are very different news. Anything further than this
@@ -696,11 +696,6 @@ def _contrast_ink(bg, dark=MINIMAP_Z_MARK_DARK, light=MINIMAP_Z_MARK_LIGHT):
     except (ValueError, IndexError):
         return dark
     return dark if (0.299 * r + 0.587 * g + 0.114 * b) > 140 else light
-
-
-def _yaw(a):
-    """A game yaw as the geometry here expects it. See MINIMAP_YAW_SIGN."""
-    return float(a or 0.0) * MINIMAP_YAW_SIGN
 
 
 def _pretty_id(sid: str) -> str:
@@ -2208,8 +2203,8 @@ class Overlay:
         cam = me.get("c")
         if cam is not None:
             self._last_cam = float(cam)
-        heading = _yaw(self._last_cam if self._last_cam is not None
-                       else (me.get("r", 0.0) or 0.0))
+        heading = float(self._last_cam if self._last_cam is not None
+                        else (me.get("r", 0.0) or 0.0))
         rot = ((math.cos(heading), math.sin(heading))
                if self._map_mode == "Rotating" else None)
         # The marker shows where the CAMERA is pointing, nothing else. In
@@ -2252,7 +2247,7 @@ class Overlay:
                 # keep their world heading while the map turned under them.
                 facing = None
                 if cat == "hero" and e.get("r") is not None:
-                    facing = self._facing_screen(_yaw(e["r"]), heading,
+                    facing = self._facing_screen(float(e["r"]), heading,
                                                  rot is not None)
                 # Outlined against the panel, not black: on the rift theme a
                 # hard black edge on a dark body reads as a hole.
@@ -2288,11 +2283,10 @@ class Overlay:
         relative to the camera, because the map itself has already turned by
         that much — otherwise everything would keep its world heading while the
         ground moved under it."""
-        a = world_angle + MINIMAP_FACING_OFFSET
         if rotating:
-            d = a - heading
+            d = world_angle - heading
             return (-math.sin(d), -math.cos(d))
-        return (math.cos(a), -math.sin(a))
+        return (math.cos(world_angle), -math.sin(world_angle))
 
     def _draw_view_cone(self, c, half, dx, dy, body):
         """A wedge and centre line out of the player marker, showing where the

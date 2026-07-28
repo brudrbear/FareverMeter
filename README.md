@@ -265,6 +265,11 @@ you can read which way a group is heading; group members get a blue ring.
 The map turns with the **camera**, and so does the marker in the middle — a
 cone and centre line show where you're looking.
 
+Turning the camera left makes the markers sweep right, and that's correct
+rather than backwards: the map shows the world *relative to your view*, so
+whatever you turn away from has to move the other way. It's the same as
+turning your head while holding a map fixed in front of you.
+
 **Anything on a different floor is drawn faded**, with a small black caret above
 or below it for which way you'd have to go — a mob in the tunnel below you is not
 the same news as one you can walk to, and on a flat map they'd look identical.
