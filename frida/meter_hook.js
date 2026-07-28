@@ -243,6 +243,25 @@ function windowClosed(win) {
     } catch (e) {}
 }
 
+// ---- rift detection ----
+// hero -> st.State.layer -> st.GameLayer.isRift. Pure pointer + byte reads, no
+// HL calls, so unlike checkZone() this is safe from the heartbeat timer rather
+// than having to ride along inside the damage hook — which matters, because you
+// can enter a rift long before you hit anything in it. Reported on change only.
+let lastRift = null;
+function checkRift() {
+    try {
+        if (!localHero || localHero.isNull() || !OFF.GameLayer) return;
+        const layer = localHero.add(OFF.Hero.layer).readPointer();
+        if (!layer || layer.isNull()) return;
+        const state = layer.add(OFF.GameLayer.isRift).readU8() !== 0;
+        if (state !== lastRift) {
+            lastRift = state;
+            send({ kind: "rift", state: state ? 1 : 0 });
+        }
+    } catch (e) {}
+}
+
 function resetWindows() {
     for (const nm in winOpenCount) send({ kind: "window", name: nm, open: 0 });
     for (const k in winClassOf) delete winClassOf[k];
@@ -374,6 +393,7 @@ function main() {
             state[nm] = inCombat(heroByName[nm].ptr);
         }
         send({ kind: "combat", state: state });
+        checkRift();
     }, 400);
 
     const fi = DATA.count_targets["ent.Unit.onInflictDamage"];
@@ -550,7 +570,8 @@ function main() {
         log("game window tracking active");
     }
 
-    log("meter hook active (local hero: " + (localName || "pending") + ")");
+    log("meter hook active (local hero " + (localName ? "identified" : "pending")
+        + ")");
     send({ kind: "ready", ok: true });
 }
 // Defer setup off the load() call so script.load() returns immediately. Running
