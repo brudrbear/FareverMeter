@@ -224,19 +224,24 @@ MINIMAP_MODES = ("Rotating", "Fixed")
 MINIMAP_RATES = (("Ultra", 33), ("High", 60), ("Medium", 110), ("Low", 250))
 MINIMAP_RATE_MS = dict(MINIMAP_RATES)
 MINIMAP_RATE_NAMES = [n for n, _ in MINIMAP_RATES]
-MINIMAP_SIZE = 270          # square, in pixels at 100% UI scale
-# World units from centre to edge. Measured against a live fight rather than
-# guessed, because the guess was out by a factor of four: a group and the pack
-# it's fighting sit 1-12 units apart, nearby chests and orbs 10-80, and the
-# next activity several hundred. Anything above ~150 collapses a whole fight
-# into a couple of pixels; much below ~80 loses the interactibles.
-MINIMAP_RANGE = 120
+MINIMAP_SIZE = 405          # square, in pixels at 100% UI scale
+# World units from centre to edge. This and MINIMAP_SIZE move together: what
+# matters is units-per-pixel, not either number alone. 120 units on the old
+# 270px panel was the density that made a fight readable; 175 on 405px is
+# looser than that and still shows half again as much ground as 120 did.
+# Landed on by eye, from 250 — which fit more in but had started to shrink a
+# fight back toward the couple of pixels the range exists to avoid.
+MINIMAP_RANGE = 175
 # The canvas is redrawn at roughly twice the sweep rate. Matching them exactly
 # would beat against the hook's timer and drop or double frames; drawing a bit
 # faster than the data arrives keeps motion even.
 
-# The hook culls to 600 units, so the range above can grow without touching it.
-MINIMAP_RANGE_MIN, MINIMAP_RANGE_MAX = 80, 600
+# The floor and ceiling the range is allowed to take. Nothing moves it at
+# runtime today — there's no zoom control — so the ceiling is documentation for
+# whatever adds one. It stops short of the hook's 600u foe cull on purpose:
+# past that the map would show chests and players with the mobs thinning out
+# around them, which reads as the map breaking rather than as the cull it is.
+MINIMAP_RANGE_MIN, MINIMAP_RANGE_MAX = 80, 175
 
 # How each category is drawn: colour, radius in pixels, and shape. Kept in one
 # table so the legend, the draw pass and any future re-skin can't disagree.
@@ -250,9 +255,19 @@ MINIMAP_STYLE = (
     # usually several, they cluster on the same spot, and a stack of chevrons
     # will happily bury the one chest you were looking for. The map is for
     # finding things in the world; the people are the part already on screen.
-    ("hero",     {"fill": "#5FAEFF", "r": 4.2, "shape": "chevron"}),
+    ("hero",     {"fill": "#5FAEFF", "r": 5.5, "shape": "chevron"}),
     ("activity", {"fill": "#FFD95E", "r": 4.0, "shape": "diamond"}),
-    ("obelisk",  {"fill": "#C48CFF", "r": 4.4, "shape": "monolith"}),
+    # Half again the size of the rest. An obelisk is a fixed landmark you
+    # navigate by rather than something you might walk past, and the monolith
+    # silhouette — a tall block with a dark eye — is the one glyph here that
+    # carries detail worth seeing.
+    ("obelisk",  {"fill": "#C48CFF", "r": 6.6, "shape": "monolith"}),
+    # The soulstone's own colour, taken off the thing in the world rather than
+    # picked from a palette: it is a hot magenta crystal with a lighter core,
+    # and matching it is what makes the marker identifiable before you've
+    # learned the legend. Purple enough to sit near the obelisk's lavender, so
+    # the two are told apart by SHAPE — a shard against a standing stone.
+    ("soulstone", {"fill": "#FF3DC4", "r": 4.6, "shape": "shard"}),
     ("respawn",  {"fill": "#5FE3C0", "r": 3.0, "shape": "square"}),
     ("chest",    {"fill": "#FF9E3D", "r": 3.5, "shape": "square"}),
     ("orb",      {"fill": "#FFD400", "r": 3.6, "shape": "dot",
@@ -261,6 +276,12 @@ MINIMAP_STYLE = (
 )
 MINIMAP_STYLE_MAP = dict(MINIMAP_STYLE)
 MINIMAP_ORDER = [k for k, _ in MINIMAP_STYLE]
+# Every marker on the MAP is drawn this much larger than the table says. One
+# multiplier rather than eight edited radii, so the relative sizes above — which
+# are tuned against each other, not against the panel — survive a resize. The
+# compass deliberately doesn't use it: markers there sit on a 38px strip with
+# numbers under them, and have no room to grow.
+MINIMAP_ICON_SCALE = 1.20
 
 # What the hover strip says with nothing under the cursor. It doubles as the
 # hint that hovering does anything, which is why it isn't blank.
@@ -283,11 +304,34 @@ MINIMAP_TIP_MAXLEN = 22
 # noise — "Obelisk" is the whole message. Anything NOT on this list is shown:
 # Locked, or a state no one has seen yet, which is how an unfamiliar one makes
 # itself known instead of passing for ordinary.
-MINIMAP_PLAIN_STATES = ("Closed", "Enabled", "Idle", "Active", "Default")
+# "None" is on the list because a soulstone has no state machine at all — every
+# one of them reads it, so "Soulstone · None" would be noise on every marker
+# rather than the warning an unfamiliar state is meant to be.
+MINIMAP_PLAIN_STATES = ("Closed", "Enabled", "Idle", "Active", "Default", "None")
 
 # Short class tags for the meter. The game's own names come off ent.Unit.kind,
 # which for a hero is its class rather than a creature id.
 CLASS_ABBR = {"Warrior": "War", "Mage": "Mag", "Priest": "Pst", "Rogue": "Rog"}
+
+# The meter's name and class columns, in monospace cells. They used to be one
+# 17-cell field with the class in brackets after the name; a class of its own is
+# both easier to scan down and immune to a long name pushing it about. The two
+# still add up to 17, so the DMG column and MIN_W["meter"] are where they were.
+METER_NAME_CELLS = 13
+METER_CLASS_CELLS = 4
+
+
+def _short_dist(units):
+    """A distance narrow enough to sit under a compass marker.
+
+    No unit suffix: every number on that strip is world units, and at four
+    characters wide the "u" is the difference between two neighbouring markers
+    reading cleanly and their labels touching. Thousands are abbreviated for the
+    same reason — "2.7k" where "2731" would be, since nothing you do with a
+    bearing that far out depends on the last two digits."""
+    if units < 1000:
+        return f"{units:.0f}"
+    return f"{units / 1000.0:.1f}k"
 
 
 def _class_tag(kind):
@@ -300,6 +344,7 @@ def _class_tag(kind):
 MINIMAP_LABELS = {
     "hero": "Player", "foe": "Enemy", "chest": "Chest", "orb": "Orb",
     "obelisk": "Obelisk", "respawn": "Respawn point", "activity": "Activity",
+    "soulstone": "Soulstone",
 }
 
 # ---------------------------------------------------------------------------
@@ -311,17 +356,56 @@ MINIMAP_LABELS = {
 # so the thing you're walking toward stays on screen long after it has left
 # the map.
 COMPASS_W = 460             # px at 100% scale
-COMPASS_H = 26
+# Three bands, top to bottom: cardinals, markers, distances. The strip grew
+# from 26px when the distances arrived — they need a line of their own, since
+# tucking them beside the glyphs made two markers half a degree apart overlap
+# into an unreadable smear.
+COMPASS_H = 38
+COMPASS_CARD_Y = 0.15       # cardinal letter, as a fraction of the height
+COMPASS_TICK_TOP = 0.28     # its tick, below the letter
+COMPASS_TICK_BOT = 0.36
+COMPASS_MARK_Y = 0.56       # marker centres
+COMPASS_DIST_Y = 0.87       # the distance under each one
+# Minimum px between two distance labels at 100% scale. "1.2k ↑" is about this
+# wide, so anything closer would be printing one number over another; the
+# nearer marker keeps its label and the farther one goes without.
+COMPASS_DIST_GAP = 30
 COMPASS_FOV = 180.0         # degrees of bearing shown, centred on your view
-COMPASS_RANGE = 600.0       # matches the agent's own cull, so nothing is lost
-# Categories worth a bearing, and how far out each is worth one. Enemies,
-# respawn points and activities are deliberately absent: the strip is for
-# things you're travelling to, and a compass crowded with mobs is a smear.
-COMPASS_CATS = ("chest", "orb", "obelisk", "hero")
-COMPASS_LIMITS = {"obelisk": 200.0}
-COMPASS_CARDINALS = ((0.0, "E"), (90.0, "N"), (180.0, "W"), (270.0, "S"))
+# No range limit, except where a category earns one. The agent sends these from
+# the whole layer rather than a radius around you (see SWEEP_RADIUS_FOE in
+# meter_hook.js), and the point of the strip is the thing you're walking to,
+# which is exactly the thing that is far away. Measured: a world zone holds
+# ~250 entities of which a handful are on this list, so "everything" is a
+# smaller number than it sounds.
+# Enemies, respawn points and activities are deliberately absent: the strip is
+# for things you're travelling to, and a compass crowded with mobs is a smear.
+# Obelisks are off it too — there are ten in a zone, they're permanent scenery,
+# and at whole-map range they were most of what the strip was carrying.
+COMPASS_CATS = ("chest", "orb", "hero", "soulstone")
+# Soulstones are the one category that keeps a radius. They're worth knowing
+# about when you're near one and noise when you aren't, which is the opposite
+# of how the chests and party members on this strip behave.
+COMPASS_LIMITS = {"soulstone": 200.0}
+# The ground plane is left-handed against the screen — the same fact
+# MINIMAP_MIRROR_X exists for — so the axis that trigonometry calls north is
+# the game's SOUTH. Naming +y "north" gave a compass that was a mirror of a
+# real one: facing its N put E on your left. E and W sit on the mirror axis and
+# so are unmoved; only N and S trade places. If these ever look wrong again,
+# check the handedness rather than the eye: with the heading set to N, E must
+# come out RIGHT of centre through _compass_x. A reflected compass is
+# self-consistent and looks perfectly ordinary until you compare it to the sky.
+COMPASS_CARDINALS = ((0.0, "E"), (90.0, "S"), (180.0, "W"), (270.0, "N"))
 
-MINIMAP_ME = "#FFFFFF"          # the player arrow — brightest thing on the map
+# The player arrow: whatever stands furthest off the panel, so it's the
+# brightest thing on a dark map and the darkest on a light one. A constant white
+# arrow vanished on the Farever panel, which is exactly the failure the note
+# below warns about — a colour that happens to equal its background.
+MINIMAP_ME_LIFT = 0.92
+# How far marker colours are darkened on a light panel. 0.35 keeps every hue
+# recognisable (the orb stays yellow, the soulstone stays magenta) while
+# clearing the parchment: measured against MAP_BODY_FAREVER, the palest marker
+# still lands well below it in luma.
+MINIMAP_LIGHT_DARKEN = 0.35
 
 # The map panel gets its own background ("map_body" on each theme) rather than
 # the meter's parchment body — the damage tables want to look like parchment
@@ -333,15 +417,15 @@ MINIMAP_ME = "#FFFFFF"          # the player arrow — brightest thing on the ma
 # The view cone out of the player marker. Drawn under everything else and
 # blended toward the panel, so it reads as a hint of where you're looking
 # rather than as another object on the map.
-# The view line, blended toward the theme's ACCENT rather than toward
-# MINIMAP_ME — the player marker is near enough the panel colour that blending
+# The view line, blended toward the theme's ACCENT rather than toward the
+# player marker's own colour — the marker is near enough the panel that blending
 # toward it draws nothing, which is how the old view cone spent a release
 # invisible.
 MINIMAP_VIEW_LINE = 0.60
 
 # The up/down caret is drawn in whichever of black or white stands out against
-# the panel — black on the Farever body, white on the rift theme's near-black
-# one. Chosen from the body's brightness rather than listed per theme, so it
+# the panel — black on the Farever parchment, white on the dark and rift ones.
+# Chosen from the body's brightness rather than listed per theme, so it
 # stays right on its own if the palette is ever retuned. It's a symbol rather
 # than a shade of the marker it belongs to, and it has to read on something
 # already faded halfway into the background.
@@ -450,9 +534,27 @@ RIFT_BOX_NEAR = {"glow": RIFT_GLOW, "edge": RIFT_EDGE, "body": RIFT_BODY,
 # The meter and breakdown re-skin themselves while you're inside a rift, so the
 # overlay matches what's on screen around it. Same widget tree either way — only
 # the colours are swapped, by _apply_theme.
-# Theme choices offered in the control menu. "Dynamic" is the interesting one:
-# it follows the game, so the overlay matches whatever you're standing in.
-THEME_MODES = ("Dynamic", "Farever", "Rift")
+# Theme choices offered in the control menu. The two Dynamic ones are the
+# interesting entries: they follow the game, so the overlay matches whatever
+# you're standing in.
+#
+# Farever and Dark differ only in the MAP PANELS — the minimap's background and
+# the compass ink. The meter and breakdown are parchment either way; that's the
+# app's face and there's no dark version of it. Farever paints the map to match
+# them; Dark leaves it the deep navy the panels have always been.
+#
+# There is deliberately no "Farever Rift" or "Dark Rift". A rift looks like a
+# rift, and inside one both Dynamic modes go there — which is the whole point of
+# them. Pinned Rift stays available for anyone who just likes the colours.
+THEME_MODES = ("Farever Dynamic", "Dark Dynamic", "Farever", "Dark", "Rift")
+# What a fresh install gets, and where an unrecognised saved value lands. Not
+# THEME_MODES[0]: the dark panels are what the meter has always shipped with,
+# and a new option shouldn't repaint anybody's overlay on upgrade.
+THEME_MODE_DEFAULT = "Dark Dynamic"
+# Settings written before the split said "Dynamic", which drew dark panels — so
+# it maps to Dark Dynamic, not to the entry that merely has the same first word.
+# The old "Farever" and "Rift" keep their names and now mean what they say.
+THEME_MODE_ALIASES = {"Dynamic": "Dark Dynamic"}
 
 # Every font in the overlay is a *named* Tk font. That's what makes the scale
 # slider possible: reconfiguring a named font resizes every widget using it and
@@ -493,6 +595,9 @@ MINIMAP_SCALE_MIN, MINIMAP_SCALE_MAX = 50, 250
 MIN_W = {"meter": 360, "detail": 320, "menu": 230, "prompt": 320}
 WARN_WRAP = 460                            # the red banner's wrap, at 100%
 
+MAP_BODY_DARK = "#121C30"       # the deep navy the panels shipped with
+MAP_BODY_FAREVER = BG_BODY_SOFT  # ...and the parchment version of the same
+
 THEME_DEFAULT = {
     "border": BG_BORDER, "body": BG_BODY, "soft": BG_BODY_SOFT,
     "header": BG_HEADER, "header_combat": BG_HEADER_COMBAT,
@@ -501,8 +606,46 @@ THEME_DEFAULT = {
     "fg_text": FG_TEXT, "fg_value": FG_VALUE, "fg_dim": FG_DIM,
     "accent": ACCENT, "dmg": DMG_BAR, "heal": HEAL_BAR,
     "header_off": "#4A4441",
-    "map_body": "#121C30",
+    # The map matches the meter on this theme. The panel used to be dark on
+    # every theme, on the reasoning that a map is not a damage table — still
+    # true, and still why Dark exists; but "make it look like the rest of the
+    # overlay" is a legitimate thing to want and it now has an entry.
+    "map_body": MAP_BODY_FAREVER,
+    # The compass has no background, so its ink can't be derived from a panel
+    # that isn't drawn — it has to contrast with the GAME. Named per theme for
+    # that reason.
+    #
+    # Parchment CREAM, not the meter's brown. A light theme suggests dark ink
+    # and dark ink is exactly wrong here: tried, screenshotted, and the numbers
+    # disappeared into a grass texture. Whatever is behind this strip is the
+    # game, which is mostly dark, so every theme's ink is light — Farever's is
+    # simply the warm one. The theme still reads as itself, and still reads.
+    "compass_ink": BG_BODY,
 }
+# The dark overlay: the same layout in the map panel's navy, meter and
+# breakdown included. Built on top of Farever rather than from scratch so a key
+# added to one theme can't be missing from this one — but almost every value is
+# overridden, because a dark theme is not a light theme with a darker box.
+#
+# What deliberately does NOT change: the damage and healing bars keep their blue
+# and green, and green still means "the overlay is unlocked". Those three carry
+# meaning, and a theme that recoloured them would be renaming the language the
+# meter is written in.
+THEME_DARK = dict(
+    THEME_DEFAULT,
+    border="#080D18",       # near-black navy; the panel edge
+    body="#141E33",         # one step up from the map, so the map reads as inset
+    soft="#1C2942",         # separators and the breakdown's column rule
+    header="#2E6B70",       # the teal, taken down to sit on a dark body
+    header_combat="#A94F22",
+    track="#22304D",        # bar troughs
+    fg_header="#FFFFFF", fg_header_dim="#CFE3E5",
+    fg_text="#C6D3E8", fg_value="#FFFFFF", fg_dim="#7E8CA6",
+    accent="#7FD4D4",       # headings; the teal lifted to read on navy
+    header_off="#2A3346",   # a header bar whose element is hidden
+    map_body=MAP_BODY_DARK,
+    compass_ink="#EAF1FF",
+)
 THEME_RIFT = {
     "border": RIFT_EDGE, "body": RIFT_BODY, "soft": "#3D0F28",
     "header": RIFT_GLOW, "header_combat": "#C41E6E",
@@ -515,6 +658,7 @@ THEME_RIFT = {
     "accent": RIFT_TITLE, "dmg": DMG_BAR, "heal": HEAL_BAR,
     "header_off": "#3B3036",
     "map_body": RIFT_BODY,
+    "compass_ink": "#FFD9EC",
 }
 
 ELEMENT_COLORS = {
@@ -1679,7 +1823,7 @@ class Overlay:
         self._combat_seen_at = 0.0     # last moment a tracked player was fighting
         self._header_bg = BG_HEADER    # last tint pushed to the header bars
         self._theme = THEME_DEFAULT    # what's painted right now
-        self._theme_mode = THEME_MODES[0]   # what the player asked for
+        self._theme_mode = THEME_MODE_DEFAULT   # what the player asked for
         self._action_q = []
         self._q_lock = threading.Lock()
         self._quit_armed = False       # the Quit button's second-click window
@@ -1978,8 +2122,12 @@ class Overlay:
             return                      # absent or unreadable => defaults
         if not isinstance(data, dict):
             return
-        if data.get("theme") in THEME_MODES:
-            self._theme_mode = data["theme"]
+        # Aliased before the check, so a value written by an older build lands
+        # on the entry that draws what that build drew rather than falling
+        # through to the default and quietly changing someone's overlay.
+        theme = THEME_MODE_ALIASES.get(data.get("theme"), data.get("theme"))
+        if theme in THEME_MODES:
+            self._theme_mode = theme
         if data.get("map_mode") in MINIMAP_MODES:
             self._map_mode = data["map_mode"]
         if data.get("map_rate") in MINIMAP_RATE_MS:
@@ -2108,7 +2256,8 @@ class Overlay:
         self.root.minsize(MIN_W["meter"], 0)
 
     def _meter_cols_text(self):
-        head = f"  #  {'NAME':<17}{'DMG':>9} {'DPS':>6} {'%':>4}"
+        head = (f"  #  {'NAME':<{METER_NAME_CELLS}}{'CLS':<{METER_CLASS_CELLS}}"
+                f"{'DMG':>9} {'DPS':>6} {'%':>4}")
         return head + (f"{'HEAL':>9}" if self._show_heal else "")
 
     def _build_detail(self):
@@ -2398,16 +2547,10 @@ class Overlay:
             self.mapwin, bg=_lerp_hex(THEME_DEFAULT["map_body"], "#000000", 0.45),
             padx=2, pady=2)
         self.map_border.pack(fill="both", expand=True)
-        self.map_header = tk.Frame(self.map_border, bg=BG_HEADER)
-        self.map_header.pack(fill="x")
-        self.map_title = tk.Label(self.map_header, text="Nearby", bg=BG_HEADER,
-                                  fg=FG_HEADER, font=self.fonts_map["ui_sm_b"],
-                                  anchor="w", padx=6, pady=2)
-        self.map_title.pack(side="left")
-        self.map_count = tk.Label(self.map_header, text="", bg=BG_HEADER,
-                                  fg=FG_HEADER_DIM, font=self.fonts_map["ui_tiny_i"],
-                                  anchor="e", padx=6, pady=2)
-        self.map_count.pack(side="right")
+        # No title bar. A map that is already a labelled square doesn't need a
+        # strip saying "Nearby" over it, and the bar was the tallest piece of
+        # chrome on the smallest window. The hover box below takes over as the
+        # drag handle — see the note at the end of this method.
         _mb = THEME_DEFAULT["map_body"]
         self.map_canvas = tk.Canvas(self.map_border, bg=_mb,
                                     highlightthickness=0, bd=0,
@@ -2420,6 +2563,8 @@ class Overlay:
                                    bg=_lerp_hex(_mb, "#FFFFFF", 0.16),
                                    padx=1, pady=1)
         self.map_tipbox.pack(fill="x", pady=(3, 0))
+        # ...but only while there's a pointer to hover with — see _sync_map_tip.
+        self._map_tip_shown = True
         self.map_tip = tk.Label(self.map_tipbox, text=MINIMAP_TIP_IDLE,
                                 bg=_lerp_hex(_mb, "#000000", 0.30),
                                 fg=_lerp_hex(_mb, "#FFFFFF", 0.55),
@@ -2438,11 +2583,14 @@ class Overlay:
         self.map_canvas.bind("<Motion>", self._on_map_hover)
         self.map_canvas.bind("<Leave>",
                              lambda _e: self._clear_map_tip(drop_cursor=True))
-        self._bind_drag(self.mapwin, (self.map_header, self.map_title,
-                                      self.map_count),
+        # With the header gone, the hover box is the handle. It's the only other
+        # part of the panel that isn't the map itself, it's always present
+        # rather than appearing on hover, and its idle text already says the map
+        # takes the mouse — so it reads as the part you grab.
+        self._bind_drag(self.mapwin, (self.map_tipbox, self.map_tip),
                         unlocked=self._mouse_available)
         # Dragging the map body would fight with the click-to-inspect idea if
-        # that ever lands, so only the header moves it — same as the meter.
+        # that ever lands, so the canvas stays out of it — same as the meter.
         self._map_range = MINIMAP_RANGE
 
     def _minimap_px(self, ex, ey, me, half, scale, rot):
@@ -2481,10 +2629,8 @@ class Overlay:
             # Say so rather than showing an empty box: a blank map and a map of
             # an empty area look identical, and only one of them is a problem.
             c.create_text(half, half, text="waiting for the game",
-                          fill=_lerp_hex(self._theme.get("map_body", BG_BODY),
-                                         "#FFFFFF", 0.45),
+                          fill=self._map_ink(0.45),
                           font=self.fonts_map["ui_tiny_i"])
-            self.map_count.config(text="")
             self._map_hits = []
             return
 
@@ -2526,7 +2672,6 @@ class Overlay:
 
         self._draw_view_line(c, half, me_dir[0], me_dir[1], body)
 
-        drawn = 0
         hits = []
         by_cat = {}
         for e in ents:
@@ -2538,7 +2683,7 @@ class Overlay:
                                         half, scale, rot)
                 if not (0 <= x <= size and 0 <= y <= size):
                     continue        # outside the square; the hook's cull is round
-                r = style["r"] * self._scales["minimap"]
+                r = style["r"] * MINIMAP_ICON_SCALE * self._scales["minimap"]
                 # The local player is drawn last, as an arrow, not a dot.
                 if cat == "hero" and e.get("n") and e["n"] == local:
                     continue
@@ -2549,7 +2694,7 @@ class Overlay:
                 # just makes the thing you're navigating to harder to see.
                 far = abs(e.get("z", mez) - mez) > MINIMAP_Z_FADE
                 fade = far and cat in ("hero", "foe")
-                fill = style["fill"]
+                fill = self._marker_fill(style["fill"])
                 if fade:
                     fill = _lerp_hex(body, fill, MINIMAP_Z_DIM)
                 # Other players point where they're facing. In rotating mode
@@ -2562,7 +2707,8 @@ class Overlay:
                 # Outlined against the panel, not black: on the rift theme a
                 # hard black edge on a dark body reads as a hole.
                 edge = _lerp_hex(body, BG_BORDER, 0.35 if fade else 0.8)
-                self._map_glyph(c, x, y, r, style, fill, facing, edge)
+                self._map_glyph(c, x, y, r, style, fill, facing, edge,
+                                ring=self._marker_fill(style.get("ring")))
                 if far:
                     self._map_z_marker(c, x, y, r, e.get("z", mez) - mez,
                                        _contrast_ink(body))
@@ -2575,14 +2721,13 @@ class Overlay:
                     # colour already means category, and overloading it would
                     # make a grouped player read as a different kind of thing.
                     rr = r + 2.5 * self._scales["minimap"]
-                    ring = (_lerp_hex(body, MINIMAP_PARTY_RING, MINIMAP_Z_DIM)
-                            if fade else MINIMAP_PARTY_RING)
+                    party = self._marker_fill(MINIMAP_PARTY_RING)
+                    ring = (_lerp_hex(body, party, MINIMAP_Z_DIM)
+                            if fade else party)
                     c.create_oval(x - rr, y - rr, x + rr, y + rr,
                                   outline=ring, width=2)
-                drawn += 1
 
         self._draw_me_arrow(c, half, me_dir[0], me_dir[1])
-        self.map_count.config(text=f"{drawn}  ·  {int(self._map_range)}u")
         self._map_hits = hits
         # Last, so the ring sits over everything including the player marker.
         hit = self._update_map_tip()
@@ -2590,7 +2735,8 @@ class Overlay:
             hx, hy, hr = hit[0], hit[1], hit[2]
             rr = hr + 4.0 * self._scales["minimap"]
             c.create_oval(hx - rr, hy - rr, hx + rr, hy + rr,
-                          outline="#FFFFFF", width=max(1, int(round(self._scales["minimap"] * 2))))
+                          outline=self._map_ink(0.95),
+                          width=max(1, int(round(self._scales["minimap"] * 2))))
 
     def _facing_screen(self, world_angle, heading, rotating):
         """A world heading as a screen-space unit vector.
@@ -2708,15 +2854,41 @@ class Overlay:
         except tk.TclError:
             pass
 
-    def _map_ink(self, amount):
-        """Text for the map panel, lifted off its background by `amount`.
+    def _map_ink(self, amount, bg=None):
+        """Text and lines for the map panel, lifted off its background by
+        `amount` — toward white on a dark panel, toward black on a light one.
 
-        Derived rather than named, because the panel is dark on both themes now
-        and the meter's own FG_TEXT is a brown picked for parchment — which is
-        how the hover line ended up dark-on-dark."""
-        return _lerp_hex(self._theme.get("map_body", BG_BODY), "#FFFFFF", amount)
+        Derived rather than named because the panel is a different colour on
+        every theme, and the meter's own FG_TEXT is a brown picked for
+        parchment, which is how the hover line once ended up dark-on-dark. The
+        direction has to be derived too, now that Farever's panel is light:
+        lifting toward white on parchment is how you'd get it back.
 
-    def _map_glyph(self, c, x, y, r, style, fill, facing=None, edge=None):
+        Everything on the panel that isn't a marker goes through here."""
+        bg = bg or self._theme.get("map_body", BG_BODY)
+        return _lerp_hex(bg, _contrast_ink(bg), amount)
+
+    def _map_is_light(self):
+        return _contrast_ink(self._theme.get("map_body", BG_BODY)) == \
+            MINIMAP_Z_MARK_DARK
+
+    def _marker_fill(self, fill):
+        """A marker colour, adjusted for the panel it lands on.
+
+        MINIMAP_STYLE is tuned for a dark panel — the markers are meant to be
+        the bright thing on it. On parchment those same colours wash out
+        (#FFD400 on #E8D5B8 is barely a marker at all), so they're darkened
+        toward the same hue rather than being listed twice per category: one
+        table of colours, and the light theme can't drift out of step with it."""
+        if not fill or not self._map_is_light():
+            return fill
+        return _lerp_hex(fill, "#000000", MINIMAP_LIGHT_DARKEN)
+
+    def _map_glyph(self, c, x, y, r, style, fill, facing=None, edge=None,
+                   ring=None):
+        """`fill` and `ring` arrive already adjusted for wherever this is being
+        drawn — the minimap tones them for its panel, the compass doesn't have
+        one — so nothing in here consults the theme."""
         shape = style["shape"]
         if shape == "chevron" and facing is not None:
             # Same arrow as the player marker, smaller. The outline is what
@@ -2744,10 +2916,39 @@ class Overlay:
             c.create_oval(x - dr, dy - dr, x + dr, dy + dr,
                           fill="#000000", outline="")
             return
+        if shape == "shard":
+            # The soulstone in the world is a cluster of angular crystals
+            # throwing off a magenta glow. At nine pixels that whole formation
+            # is one blob, so what's drawn is what survives the shrinking: a
+            # four-pointed shard with concave sides, a dim halo of the same
+            # colour standing in for the glow, and a lighter core for the lit
+            # middle. Nothing else on the map has points, which is what makes
+            # it findable at a glance.
+            def _star(rx, ry, waist):
+                # Taller than it is wide, and with a fat waist: a thin one came
+                # out as a pink plus sign next to the solid dots, which is the
+                # one thing a crystal shouldn't look like. The waist is what
+                # gives it a body to see; the points are what make it a shard.
+                pts = []
+                for i in range(8):
+                    a = math.pi / 2.0 * (i / 2.0)
+                    k = 1.0 if i % 2 == 0 else waist
+                    pts.extend((x + math.cos(a) * rx * k,
+                                y + math.sin(a) * ry * k))
+                return pts
+            # Halo first, under everything: the fill darkened rather than a
+            # colour of its own, so a faded marker on another floor fades its
+            # glow with it instead of keeping a bright ring around a dim shard.
+            c.create_polygon(*_star(r * 1.15, r * 1.62, 0.50),
+                             fill=_lerp_hex(fill, "#000000", 0.42), outline="")
+            c.create_polygon(*_star(r * 0.84, r * 1.22, 0.55),
+                             fill=fill, outline=edge or "", width=1)
+            c.create_polygon(*_star(r * 0.32, r * 0.48, 0.62),
+                             fill=_lerp_hex(fill, "#FFFFFF", 0.62), outline="")
+            return
         if shape in ("dot", "chevron"):
             # `ring` is a second colour around the dot, for markers the game
             # itself gives two — the orbs are a yellow core in a purple glow.
-            ring = style.get("ring")
             if ring:
                 rr = r + 1.6 * self._scales["minimap"]
                 c.create_oval(x - rr, y - rr, x + rr, y + rr,
@@ -2779,30 +2980,38 @@ class Overlay:
         space — already resolved by the caller, because the two modes disagree
         about it: fixed mode turns the arrow, rotating mode turned the world
         instead and leaves the arrow pointing at the top of the map."""
-        s = 6.0 * self._scales["minimap"]
+        # Grows with the markers: an arrow left at its old size next to markers
+        # 20% larger reads as the map having shrunk around you.
+        s = 6.0 * MINIMAP_ICON_SCALE * self._scales["minimap"]
         px, py = -dy, dx        # perpendicular, for the two back corners
         tip = (half + dx * 1.4 * s, half + dy * 1.4 * s)
         tail = (half - dx * 0.4 * s, half - dy * 0.4 * s)
         left = (half - dx * s + px * 0.9 * s, half - dy * s + py * 0.9 * s)
         right = (half - dx * s - px * 0.9 * s, half - dy * s - py * 0.9 * s)
-        c.create_polygon(*tip, *left, *tail, *right, fill=MINIMAP_ME,
+        c.create_polygon(*tip, *left, *tail, *right,
+                         fill=self._map_ink(MINIMAP_ME_LIFT),
                          outline=BG_BORDER, width=1)
 
     def _build_compass(self):
-        """A bearing strip. One canvas, redrawn each tick like the map."""
-        self.compass_border = tk.Frame(
-            self.compasswin,
-            bg=_lerp_hex(THEME_DEFAULT["map_body"], "#000000", 0.45),
-            padx=2, pady=2)
-        self.compass_border.pack(fill="both", expand=True)
+        """A bearing strip with no panel behind it: markers and numbers alone,
+        floating over the game.
+
+        No background, no border and no shadow — the canvas is filled with the
+        transparency key every overlay window already uses, so those pixels are
+        not merely invisible but absent, and the game shows through them. That
+        also means the strip can't be grabbed where nothing is drawn, since
+        Windows sends those clicks straight past it; _draw_compass paints a
+        backing rectangle while the mouse is free so there's something to take
+        hold of exactly when you can.
+
+        The ink can no longer be derived from a panel colour, because there is
+        no panel. It comes from the theme's `compass_ink`, which has to contrast
+        with the GAME rather than with the overlay."""
         self.compass_canvas = tk.Canvas(
-            self.compass_border, bg=THEME_DEFAULT["map_body"],
+            self.compasswin, bg=TRANSPARENT_KEY,
             highlightthickness=0, bd=0, width=COMPASS_W, height=COMPASS_H)
         self.compass_canvas.pack()
-        # Draggable anywhere on it: unlike the map there's nothing to click, so
-        # the whole strip can be the grab handle.
-        self._bind_drag(self.compasswin,
-                        (self.compass_canvas, self.compass_border),
+        self._bind_drag(self.compasswin, (self.compass_canvas,),
                         unlocked=self._mouse_available)
 
     def _compass_x(self, dx, dy, rot, half_w):
@@ -2830,45 +3039,68 @@ class Overlay:
         if int(c["width"]) != w or int(c["height"]) != h:
             c.config(width=w, height=h)
         theme = self._theme
-        body = theme.get("map_body", BG_BODY)
-        c.configure(bg=body)
+        c.configure(bg=TRANSPARENT_KEY)
         half_w = w / 2.0
 
+        # Nothing is ever drawn behind the strip — not even while the mouse is
+        # free. A backing plate went in first so there'd be something to grab,
+        # since transparent pixels don't take clicks; it was a worse trade than
+        # it sounds, because the plate appearing every time you opened the
+        # escape menu is the one moment you're looking straight at the overlay.
+        # Dragging is by the markers, the cardinal letters and the centre tick,
+        # all of which are real pixels.
         if not self.world.fresh():
             return
         heading = float(self._last_cam if self._last_cam is not None
                         else (me.get("r", 0.0) or 0.0))
         rot = (math.cos(heading), math.sin(heading))
 
-        # Cardinals first, so markers sit over them.
-        ink = _lerp_hex(body, "#FFFFFF", 0.40)
+        # Ink from the theme, not from a panel: with nothing drawn behind the
+        # strip these sit on the game, and the only thing they can be picked to
+        # contrast with is the theme's intent.
+        base_ink = theme.get("compass_ink", "#EAF1FF")
+        # Cardinals first, so markers sit over them. They live in the top band,
+        # clear of the distances along the bottom. Full-strength ink: they used
+        # to be dimmed toward the panel colour, which stopped meaning anything
+        # the moment there was no panel to dim toward.
+        ink = base_ink
         for deg, letter in COMPASS_CARDINALS:
             a = math.radians(deg)
             x = self._compass_x(math.cos(a), math.sin(a), rot, half_w)
             if x is None:
                 continue
-            c.create_line(x, h - 6 * scale, x, h, fill=ink)
-            c.create_text(x, h * 0.42, text=letter, fill=ink,
-                          font=self.fonts_compass["ui_tiny_i"])
+            c.create_line(x, h * COMPASS_TICK_TOP, x, h * COMPASS_TICK_BOT,
+                          fill=ink)
+            # Bold and upright, unlike the distances under the markers: a
+            # cardinal is a landmark you find at a glance rather than something
+            # you read, and the italic 7pt it shared with the numbers was doing
+            # neither job well over a moving background.
+            c.create_text(x, h * COMPASS_CARD_Y, text=letter, fill=ink,
+                          font=self.fonts_compass["ui_sm_b"])
         # Dead ahead.
-        c.create_line(half_w, 0, half_w, h * 0.3,
-                      fill=_lerp_hex(body, "#FFFFFF", 0.7))
+        c.create_line(half_w, 0, half_w, h * COMPASS_TICK_BOT, fill=base_ink)
 
         mez = me.get("z", 0)
-        _local, roster = self.world.who()
+        local, roster = self.world.who()
         rows = []
         for e in ents:
             cat = e.get("c")
             if cat not in COMPASS_CATS:
                 continue
             # Party only — a compass full of strangers tells you nothing about
-            # where your group went.
-            if cat == "hero" and e.get("n") not in roster:
+            # where your group went. And never yourself: you are dead ahead by
+            # construction, so the marker sat permanently over the centre tick
+            # saying nothing.
+            if cat == "hero" and (e.get("n") not in roster
+                                  or (local and e.get("n") == local)):
                 continue
             dx = e.get("x", 0) - me.get("x", 0)
             dy = e.get("y", 0) - me.get("y", 0)
             dist = math.hypot(dx, dy)
-            if dist > COMPASS_LIMITS.get(cat, COMPASS_RANGE):
+            # Only categories in COMPASS_LIMITS have a range at all; everything
+            # else is carried however far away it is.
+            limit = COMPASS_LIMITS.get(cat)
+            if limit is not None and dist > limit:
                 continue
             x = self._compass_x(dx, dy, rot, half_w)
             if x is None:
@@ -2876,17 +3108,51 @@ class Overlay:
             rows.append((dist, cat, x, e))
         # Farthest first, so the nearer marker wins an overlap.
         rows.sort(key=lambda t: -t[0])
+        my = h * COMPASS_MARK_Y
         for dist, cat, x, e in rows:
             style = MINIMAP_STYLE_MAP[cat]
             r = style["r"] * scale
             facing = None
             if cat == "hero" and e.get("r") is not None:
                 facing = self._facing_screen(float(e["r"]), heading, True)
-            edge = _lerp_hex(body, BG_BORDER, 0.8)
-            self._map_glyph(c, x, h * 0.5, r, style, style["fill"], facing, edge)
+            # Markers keep the bright palette on every theme. On the minimap
+            # they're adjusted to the panel they land on; here there is no
+            # panel, and what they have to stand out against is whatever the
+            # game is drawing — which is never parchment.
+            edge = BG_BORDER
+            self._map_glyph(c, x, my, r, style, style["fill"], facing, edge,
+                            ring=style.get("ring"))
+        self._draw_compass_dists(c, rows, h, scale, theme, mez)
+
+    def _draw_compass_dists(self, c, rows, h, scale, theme, mez):
+        """How far away each marker is, on the line under it.
+
+        A second pass rather than part of the glyph loop, because the two want
+        opposite orders. Glyphs draw farthest-first so the nearer one lands on
+        top; labels have to be placed NEAREST-first, since when two of them
+        collide the one worth keeping is the near one — and unlike overlapping
+        glyphs, overlapping text isn't a marker half-hidden, it's four digits
+        of neither number.
+
+        Elevation rides on this line as an arrow rather than as the map's
+        caret. The caret hangs below the glyph, which is where the number now
+        is, and a strip this short has no row of pixels to spare for both."""
+        # Full-strength theme ink: the numbers are the part you read, and they
+        # have the game behind them rather than a panel.
+        ink = theme.get("compass_ink", "#EAF1FF")
+        y = h * COMPASS_DIST_Y
+        font = self.fonts_compass["ui_tiny_i"]
+        placed = []
+        for dist, _cat, x, e in reversed(rows):
+            if any(abs(x - px) < COMPASS_DIST_GAP * scale for px in placed):
+                continue
+            placed.append(x)
             dz = e.get("z", mez) - mez
+            arrow = ""
             if abs(dz) > MINIMAP_Z_FADE:
-                self._map_z_marker(c, x, h * 0.5, r, dz, _contrast_ink(body))
+                arrow = " ↑" if dz > 0 else " ↓"
+            c.create_text(x, y, text=_short_dist(dist) + arrow, fill=ink,
+                          font=font)
 
     def _build_rift(self):
         """The next-rift countdown. Styled after the rifts themselves rather
@@ -3438,7 +3704,10 @@ class Overlay:
         # much smaller panel, so DWM's rounding has nothing to round — it just
         # leaves a faint border floating out where the ripple ends. The panel
         # draws its own edges.
-        if win is self.riftwin:
+        # Not the compass either, for the same reason and one more: it is
+        # transparent all the way to its edges, and rounding a window is also
+        # what asks DWM for the drop shadow that goes with it.
+        if win in (self.riftwin, self.compasswin):
             return
         self._round_win_corners(win)
 
@@ -3456,6 +3725,15 @@ class Overlay:
         pointable = not self._mouse_available()
         self._set_win_clickthrough(self.root, pointable)
         self._set_win_clickthrough(self.mapwin, pointable)
+        # The compass joins them now that it has no background. Its transparent
+        # pixels already pass clicks through on their own, but the markers and
+        # numbers are real pixels sitting over the middle of the screen, and a
+        # click landing on one of those was a click the game never saw.
+        self._set_win_clickthrough(self.compasswin, pointable)
+        # The hover box comes and goes with the same signal: it is only ever
+        # useful when there's a cursor, and this is the one place both halves of
+        # that answer (the escape menu and the freed mouse) are already known.
+        self._sync_map_tip()
         # The control menu is always interactive (it is only ever shown while
         # the cursor is free); the floating hint and parse banner are text over
         # the game and must never take a click.
@@ -3465,6 +3743,31 @@ class Overlay:
         # The prompt must take clicks whenever it's up, regardless of lock
         # state — it's the one overlay window that has to be answered.
         self._set_win_clickthrough(self.promptwin, False)
+
+    def _sync_map_tip(self):
+        """Show the hover box only while the mouse is free.
+
+        It can't tell you anything without a pointer, and the map spends most of
+        its life being glanced at rather than pointed at — so for most of that
+        life it was two lines of grey text under the map saying how to get a
+        cursor. The panel shrinks to just the map when it goes, which is the
+        decluttering; the map itself doesn't move, since the window is anchored
+        by its top-left corner.
+
+        It's also the drag handle, and that costs nothing: dragging was already
+        gated on the same condition, so the handle is present exactly when it
+        would have worked anyway."""
+        want = self._mouse_available()
+        if want == self._map_tip_shown:
+            return
+        self._map_tip_shown = want
+        try:
+            if want:
+                self.map_tipbox.pack(fill="x", pady=(3, 0))
+            else:
+                self.map_tipbox.pack_forget()
+        except tk.TclError:
+            pass
 
     def _sync_game_ui(self):
         """Follow the game's UI: while a cursor-freeing window (escape menu) is
@@ -3675,14 +3978,23 @@ class Overlay:
         The escape menu overrides all of it — including a window you ticked off
         yourself. Being able to see what a checkbox does while you're clicking
         it matters more than honouring the setting for those few seconds, and it
-        means the control menu is never the only thing on screen."""
+        means the control menu is never the only thing on screen.
+
+        What the escape menu does NOT override is another game window on top of
+        it. Options, feedback and the two confirmations are all reached through
+        it, and while one of those is up the game has taken the screen back."""
         ooc_hidden = (self._hide_ooc and not self._menu_unlock and
                       (time.time() - self._combat_seen_at) >= HIDE_OOC_LINGER_SECS)
         # Any game window that isn't the escape menu (inventory, map, ...) owns
         # the screen while it's up — see MENU_IGNORE_WINDOWS. Unlike the OOC
         # rule this is unconditional: it isn't a setting the player can untick.
-        menu_hidden = (not self._menu_unlock and
-                       self.ui_state.any_open_except(MENU_IGNORE_WINDOWS))
+        #
+        # It applies even while the escape menu is open, which is the whole
+        # point: options, the feedback form and the "back to menu"/"exit game"
+        # confirmations are all opened FROM the escape menu and sit on top of
+        # it. Treating the escape menu as a blanket exemption left the overlay
+        # sitting over every one of them.
+        menu_hidden = self.ui_state.any_open_except(MENU_IGNORE_WINDOWS)
         # The rift prompt is modal: while it's up nothing else is on screen, not
         # even the control menu. That's deliberate — it leaves Esc free to hand
         # the cursor back so the question can actually be clicked.
@@ -3714,7 +4026,17 @@ class Overlay:
             if key == "rift" and self._rift_idle and not self._menu_unlock:
                 want = False
             changed |= self._want_visible(key, want)
-        menu_visible = self._menu_unlock and not self._prompt_open
+        # ...and the control menu goes with everything else when you alt-tab.
+        # The game's escape menu stays open behind you, so _menu_unlock stays
+        # true, and without this the one window that ignores every other hiding
+        # rule sat over your browser — the exact thing the focus check exists to
+        # prevent, on the largest window the overlay has.
+        # ...and it goes when the game opens something over the escape menu,
+        # for the same reason as everything else: "hide all UI" has to include
+        # the meter's own settings panel, or the one window left on screen is
+        # the one you were trying to get out of the way.
+        menu_visible = (self._menu_unlock and not self._prompt_open
+                        and self._focused and not menu_hidden)
         changed |= self._want_visible("menu", menu_visible)
         changed |= self._want_visible("hint", menu_visible)
         changed |= self._want_visible("prompt", self._prompt_open)
@@ -3722,17 +4044,24 @@ class Overlay:
             self._start_fade()
 
     def _pick_theme(self):
-        """Dynamic follows the game; the other two are pinned. Either way the
-        escape menu wins: the control menu is Farever-styled and the meter sits
-        right next to it, so matching that beats matching a rift you can't
-        currently see."""
-        if self._menu_unlock:
-            return THEME_DEFAULT
-        if self._theme_mode == "Farever":
-            return THEME_DEFAULT
+        """The mode names two things: which base to wear, and whether a rift
+        overrides it.
+
+        The escape menu wins over the rift either way — the control menu is
+        Farever-styled and the meter sits right next to it, so matching that
+        beats matching a rift you can't currently see. It does NOT win over the
+        base: a Dark player opening the menu should not watch their map turn to
+        parchment and back."""
+        base = (THEME_DARK if self._theme_mode in ("Dark", "Dark Dynamic")
+                else THEME_DEFAULT)
         if self._theme_mode == "Rift":
+            return base if self._menu_unlock else THEME_RIFT
+        if self._menu_unlock:
+            return base
+        if (self._theme_mode.endswith("Dynamic")
+                and self.ui_state.in_rift()):
             return THEME_RIFT
-        return THEME_RIFT if self.ui_state.in_rift() else THEME_DEFAULT
+        return base
 
     def _set_theme_mode(self, mode):
         self._theme_mode = mode
@@ -3760,21 +4089,22 @@ class Overlay:
         # The minimap follows too. Its canvas contents are redrawn from scratch
         # on the next tick and read self._theme directly, so only the chrome
         # needs repainting here.
-        self.map_border.config(bg=t["border"])
-        self.map_header.config(bg=t["header"])
-        self.map_title.config(bg=t["header"], fg=t["fg_header"])
-        self.map_count.config(bg=t["header"], fg=t["fg_header_dim"])
         mb = t.get("map_body", BG_BODY)
-        self.map_tipbox.config(bg=_lerp_hex(mb, "#FFFFFF", 0.16))
-        self.map_tip.config(bg=_lerp_hex(mb, "#000000", 0.30),
-                            fg=_lerp_hex(mb, "#FFFFFF", 0.55))
+        # The hover well is always DARKER than the panel, on both kinds of
+        # panel — a sunk box that got lighter than its surroundings would read
+        # as raised. Its text is then lifted off the well rather than off the
+        # panel, since that's what it actually sits on.
+        sunk = _lerp_hex(mb, "#000000", 0.30 if not self._map_is_light() else 0.12)
+        self.map_tipbox.config(bg=self._map_ink(0.16))
+        self.map_tip.config(bg=sunk, fg=self._map_ink(0.75, bg=sunk))
         self.map_canvas.config(bg=mb)
-        # Also from the map colour: the meter's brown edge goes muddy against
-        # navy. The header still carries the theme, so the panel stays
-        # recognisably part of the same overlay.
+        # Derived from the map colour rather than the meter's palette: the
+        # brown edge goes muddy against navy. Darkening works on either kind of
+        # panel, which is why the edge doesn't need the contrast treatment the
+        # text does. With the header gone this and the hover box are all the
+        # theme has left to show on the minimap.
         self.map_border.config(bg=_lerp_hex(mb, "#000000", 0.45))
-        self.compass_border.config(bg=_lerp_hex(mb, "#000000", 0.45))
-        self.compass_canvas.config(bg=mb)
+        # The compass has no chrome to repaint — see _build_compass.
         # Force the header tint to be re-pushed: its guard compares against the
         # last colour applied, which belongs to the theme we just left.
         self._header_bg = None
@@ -4095,9 +4425,25 @@ class PlayerRow:
         self.fonts = fonts
         self.theme = theme or THEME_DEFAULT
         self.f = tk.Frame(parent, bg=BG_BODY)
-        self.line = tk.Label(self.f, text="", bg=BG_BODY, fg=FG_TEXT,
+        # Two labels, not one line of text. The left one holds the rank, name
+        # and class; the right one holds nothing but ASCII digits. They live in
+        # a grid whose first column has a fixed pixel width, which is what
+        # actually pins the numbers: a monospace font is only monospace for the
+        # glyphs it has, and a name in a fallback face (CJK measures 1.71 cells
+        # per glyph in Consolas) drags everything after it out of true. Padding
+        # with spaces gets close and can't get exact — two rows will round
+        # opposite ways — so the width is enforced by the layout instead.
+        self.top = tk.Frame(self.f, bg=BG_BODY)
+        self.top.pack(fill="x")
+        self.line = tk.Label(self.top, text="", bg=BG_BODY, fg=FG_TEXT,
                              font=self.fonts["mono_10"], anchor="w")
-        self.line.pack(fill="x")
+        self.cls = tk.Label(self.top, text="", bg=BG_BODY, fg=FG_TEXT,
+                            font=self.fonts["mono_10"], anchor="w")
+        self.nums = tk.Label(self.top, text="", bg=BG_BODY, fg=FG_TEXT,
+                             font=self.fonts["mono_10"], anchor="w")
+        self.line.grid(row=0, column=0, sticky="w")
+        self.cls.grid(row=0, column=1, sticky="w")
+        self.nums.grid(row=0, column=2, sticky="w")
         self.dmg_track = tk.Frame(self.f, bg=BG_BAR_TRACK, height=5)
         self.dmg_track.pack(fill="x")
         self.dmg_bar = tk.Frame(self.dmg_track, bg=DMG_BAR, height=5)
@@ -4106,7 +4452,7 @@ class PlayerRow:
         self.heal_track.pack(fill="x", pady=(1, 2))
         self.heal_bar = tk.Frame(self.heal_track, bg=HEAL_BAR, height=5)
         self.heal_bar.place(relwidth=0.0, relheight=1.0)
-        for w in (self.f, self.line):
+        for w in (self.f, self.top, self.line, self.cls, self.nums):
             w.bind("<Button-1>", lambda e: on_click(self._name))
         self._packed = False
         self._heal_packed = True
@@ -4115,12 +4461,28 @@ class PlayerRow:
 
     def set_theme(self, t):
         self.f.config(bg=t["body"])
-        self.line.config(bg=t["body"],
-                         fg=t["fg_value"] if self._is_me else t["fg_text"])
+        self.top.config(bg=t["body"])
+        ink = t["fg_value"] if self._is_me else t["fg_text"]
+        for w in (self.line, self.cls, self.nums):
+            w.config(bg=t["body"], fg=ink)
         self.dmg_track.config(bg=t["track"])
         self.dmg_bar.config(bg=t["dmg"])
         self.heal_track.config(bg=t["track"])
         self.heal_bar.config(bg=t["heal"])
+
+    def _trim(self, text, cells):
+        """`text` cut down until it fits `cells` monospace cells.
+
+        Measured against the font rather than counted, because a character
+        count is only a width for the glyphs the mono face actually carries.
+        Nothing is padded — the grid column does that, exactly, which spaces
+        cannot."""
+        f = self.fonts["mono_10"]
+        target = (f.measure(" ") or 1) * cells
+        text = text or ""
+        while text and f.measure(text) > target:
+            text = text[:-1]
+        return text
 
     def show(self, rank, p, dps, pct, focused, dmg_frac, heal_frac,
              show_heal=True, cls_tag=""):
@@ -4130,20 +4492,28 @@ class PlayerRow:
         self._name = p.name
         tag = "▸ " if focused else "  "
         me = "*" if p.is_me else " "
-        # Name and class share one column. The class is what tells you whether
-        # the number next to it is good — a Priest at the bottom of a damage
-        # meter is doing their job.
-        who = p.name[:11]
-        if cls_tag:
-            who = f"{who} ({cls_tag})"
-        line = (f"{tag}{rank}.{me}{who[:17]:<17}{int(p.total):>9} "
-                f"{dps:>6.0f} {pct:>3.0f}%")
+        # Name and class are separate columns. The class is what tells you
+        # whether the number next to it is good — a Priest at the bottom of a
+        # damage meter is doing their job — and it reads far better down a
+        # column of its own than trailing each name in brackets.
+        #
+        # Each column is a label of its own in a grid whose widths are set in
+        # pixels, so nothing is padded and nothing can push its neighbour along.
+        # The name is only ever TRIMMED to fit; grid does the rest. minsize is a
+        # floor, not a ceiling — which is why the trim has to be measured, or a
+        # wide name would simply widen its column and undo the whole exercise.
+        cell = self.fonts["mono_10"].measure(" ") or 1
+        self.top.grid_columnconfigure(0, minsize=cell * (5 + METER_NAME_CELLS))
+        self.top.grid_columnconfigure(1, minsize=cell * METER_CLASS_CELLS)
+        line = f"{tag}{rank}.{me}{self._trim(p.name, METER_NAME_CELLS)}"
+        nums = f"{int(p.total):>9} {dps:>6.0f} {pct:>3.0f}%"
         if show_heal:
-            line += f"{int(p.heal_total):>9}"
+            nums += f"{int(p.heal_total):>9}"
         self._is_me = p.is_me
-        self.line.config(text=line,
-                         fg=self.theme["fg_value"] if p.is_me
-                         else self.theme["fg_text"])
+        ink = (self.theme["fg_value"] if p.is_me else self.theme["fg_text"])
+        self.line.config(text=line, fg=ink)
+        self.cls.config(text=cls_tag, fg=ink)
+        self.nums.config(text=nums, fg=ink)
         self.dmg_bar.place_configure(relwidth=_clamp01(dmg_frac))
         if show_heal != self._heal_packed:
             self._heal_packed = show_heal

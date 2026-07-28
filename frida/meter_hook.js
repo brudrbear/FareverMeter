@@ -288,8 +288,26 @@ function checkRift() {
 // The layer keeps `units`, `interactibles` and `entities` built already, so
 // this is three array walks rather than a search. Activities only appear in
 // `entities`, which is why all three are read.
-const SWEEP_RADIUS = 600;        // world units; generous, to leave zoom headroom
+// Navigation markers — chests, orbs, obelisks, respawn points, activities and
+// players — are sent from the WHOLE layer, at any distance, because that is
+// what the compass is for: the thing you are walking to is by definition the
+// thing that is far away, and a radius cull made it appear only once you were
+// nearly there. Affordable because the layer is small: measured in a populated
+// world zone, 252 entities total, of which ~90 were within the old 600u and the
+// farthest was 3305u away. The walk costs 0-1ms either way — the arrays are
+// already built, so distance was never what made this cheap.
+//
+// Foes keep a radius, and are the only category that does. They are the
+// numerous class (95 of those 252), they are worthless on a compass that
+// deliberately doesn't draw them, and the minimap can't zoom past 600 anyway.
+const SWEEP_RADIUS_FOE = 600;    // world units; matches MINIMAP_RANGE_MAX
 const SWEEP_MAX = 400;           // hard cap on entities reported, worst case
+// Foes get their own slice of SWEEP_MAX. Without it, `units` being swept first
+// means a crowded fight can spend the whole budget on mobs and push the chests
+// and party members off the far end — which, now that those are unbounded in
+// range, would empty the compass exactly when it's carrying the most.
+const SWEEP_FOE_MAX = 150;
+let foeCount = 0;                // reset per sweep, in sweepWorld()
 // Foes this far above or below are dropped outright rather than sent and
 // faded. In the vertical zones this is for, a mob two floors down is not
 // something you can fight or avoid, and there can be a great many of them —
@@ -418,6 +436,13 @@ const ORB_KIND = /orb/i;
 // than trusting either on its own.
 const ORB_STATE = "Enabled";
 
+// Soulstones are the same shape of thing: plain ent.Element, `kind` like
+// "Soulstone_Demon_5". Measured on a live one — stateId "None",
+// currentVisualState null, no script, and radius/hitRadius/height all zero, so
+// the layer treats it as scenery and nothing here can be filtered on state.
+// The name is all there is to go on, which is why no state check follows it.
+const SOULSTONE_KIND = /soulstone/i;
+
 // ent.Element.stateId, measured on the live game:
 //   chests  Closed | Locked        obelisks  Closed        orbs  Enabled
 // A state on this list means the thing is spent and not worth drawing. Kept as
@@ -426,13 +451,33 @@ const ORB_STATE = "Enabled";
 const SPENT_STATES = { "Opened": 1, "Disabled": 1, "Collected": 1,
                        "Used": 1, "Empty": 1, "Done": 1 };
 
-// Per-category overrides, because the same word means different things to
-// different objects. A chest reading "Closed" is one you've already been to;
-// an obelisk reading "Closed" is simply an obelisk, and hiding those on the
-// same word emptied the category once already.
-const SPENT_BY_CAT = {
-    chest: { "Closed": 1 },
-};
+// Per-category overrides on stateId. Empty, and the entry that used to be here
+// is worth keeping as a warning:
+//
+//   chest: { "Closed": 1 }
+//
+// went in because looted chests kept showing and read "Closed". They do — but
+// so does every chest that has never been opened, and filtering on it hid
+// nearly every chest in the world. A chest's stateId does not move when you
+// loot it. Measured on ONE chest, before and after pressing F:
+//
+//   before   stateId Closed   currentVisualState Closed
+//   after    stateId Closed   currentVisualState Opened
+//
+// So the visual state is the signal, and stateId only ever says whether the
+// thing needs a key ("Locked").
+const SPENT_BY_CAT = {};
+
+// Categories whose currentVisualState is worth believing. It is a RENDERING
+// state, so it means different things to different objects, and the general
+// rule remains "don't trust it" — an obelisk and a respawn point both read
+// "Opened" while plainly standing there, and filtering those on it emptied two
+// whole categories once already.
+//
+// Chests earn their place here by the measurement above. Orbs earned theirs the
+// same way: a pickup flips the visual to "Disabled" while stateId stays
+// "Enabled". Nothing goes on this list without watching the field change.
+const VISUAL_SPENT_CATS = { orb: 1, chest: 1 };
 
 // Runtime type names are resolved through typeName(), which caches by type
 // pointer — a zone holds hundreds of entities but only a couple of dozen
@@ -468,6 +513,8 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
             if (elemKind && ORB_KIND.test(elemKind)) {
                 const est = hlStr(e.add(OFF.Element.stateId).readPointer());
                 if (est === ORB_STATE) cat = "orb";
+            } else if (elemKind && SOULSTONE_KIND.test(elemKind)) {
+                cat = "soulstone";
             }
         }
         if (!cat) continue;
@@ -482,13 +529,17 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
             }
             const x = e.add(OFF.Entity.posx).readDouble();
             const y = e.add(OFF.Entity.posy).readDouble();
-            const dx = x - me.x, dy = y - me.y;
-            if (dx * dx + dy * dy > SWEEP_RADIUS * SWEEP_RADIUS) continue;
             const z = e.add(OFF.Entity.posz).readDouble();
-            if (cat === "foe" && Math.abs(z - me.z) > SWEEP_Z_CULL) continue;
-            // Culled here rather than overlay-side so the payload stays small
-            // regardless of how crowded the zone is. Rounded for the same
-            // reason: sub-unit precision is invisible on a minimap.
+            if (cat === "foe") {
+                const dx = x - me.x, dy = y - me.y;
+                if (dx * dx + dy * dy > SWEEP_RADIUS_FOE * SWEEP_RADIUS_FOE) continue;
+                if (Math.abs(z - me.z) > SWEEP_Z_CULL) continue;
+                if (foeCount >= SWEEP_FOE_MAX) continue;
+                foeCount++;
+            }
+            // Foes are culled here rather than overlay-side so the payload
+            // stays small regardless of how crowded the zone is. Rounded for
+            // the same reason: sub-unit precision is invisible on a minimap.
             // z rides along so the overlay can fade things on a different
             // floor: a mob directly below you is not the same news as one you
             // can walk to, and on the flat map they look identical.
@@ -533,15 +584,14 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
                     const st = hlStr(e.add(OFF.Element.stateId).readPointer());
                     const vis = hlStr(
                         e.add(OFF.Element.currentVisualState).readPointer());
-                    // currentVisualState means different things per element
-                    // and is only trustworthy for orbs, where a pickup flips
-                    // it to "Disabled" while stateId stays "Enabled". On a
-                    // chest or an obelisk it reads "Opened" while the thing is
-                    // plainly shut — measured, on every one of them — so
-                    // consulting it there hides the entire category.
+                    // Two filters, and which field each one reads is the whole
+                    // subject of the notes on SPENT_BY_CAT and
+                    // VISUAL_SPENT_CATS above. Short version: stateId for
+                    // everything, plus the visual state for the two categories
+                    // measured to move it — chests and orbs.
                     const catSpent = SPENT_BY_CAT[cat];
                     if (SPENT_STATES[st] || (catSpent && catSpent[st])) continue;
-                    if (cat === "orb" && SPENT_STATES[vis]) continue;
+                    if (VISUAL_SPENT_CATS[cat] && SPENT_STATES[vis]) continue;
                     if (st) ent.s = st;
                     if (vis && vis !== st) ent.v = vis;
                     const k = elemKind ||
@@ -567,6 +617,7 @@ function sweepWorld() {
         };
         const cam = cameraDirection();
         const out = [], seen = {};
+        foeCount = 0;
         const G = OFF.GameLayer;
         // Order matters with the dedupe: the narrow, purpose-built lists first,
         // then `entities` last to pick up activities and anything the other two

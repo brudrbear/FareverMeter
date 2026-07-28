@@ -104,8 +104,11 @@ Two ways, and both shut down cleanly:
 > notification on first run to say so.
 
 **Alt-tab away and the whole overlay goes with it**, returning when you click
-back into the game — so a damage meter isn't floating over your browser. The
-tray icon stays put, which is how you'd stop the meter from out there anyway.
+back into the game — so a damage meter isn't floating over your browser. That
+includes the control menu: the game's escape menu stays open behind you, so
+without this the largest window the overlay has was the one thing left on
+screen. The tray icon stays put, which is how you'd stop the meter from out
+there anyway.
 
 **Don't end it from Task Manager.** That kills the process before it can unload
 its hook and detach, and a half-attached agent is what destabilises Farever
@@ -149,9 +152,10 @@ meter still works fine.
 
 Two overlay windows appear top-right:
 
-* **Meter** — one line per player with their class in brackets — `Brodr (War)`,
-  `Snailz (Mag)`, `Ninger (Pst)`, `Goobert (Rog)` — sorted by damage done, with
-  damage / DPS / % / healing-done columns; your row is marked `*`. Under each line sit two
+* **Meter** — one line per player, with columns for name, class (`War`, `Mag`,
+  `Pst`, `Rog`), damage, DPS, % and healing done, sorted by damage; your row is
+  marked `*`. The columns hold their positions whatever a name is written in —
+  a player called 双子星 doesn't shove the numbers along. Under each line sit two
   bars: **blue = damage**, **green = healing**, each scaled against the
   biggest damage/healing number currently on the meter.
 * **Breakdown** — the inspected player's (default: you) per-skill damage and
@@ -196,7 +200,7 @@ again.
 | Section | Button | Does |
 |---|---|---|
 | Options | Show all players / Show party only | switches between your group and everyone nearby; resets the encounter |
-| Options | Theme | `Dynamic` (default) follows the game — rift colours inside a rift, Farever colours everywhere else. `Farever` and `Rift` pin it either way. |
+| Options | Theme | Five choices — see [Themes](#themes). `Dark Dynamic` is the default. |
 | Options | Minimap | `Rotating` (default) turns the map with the camera, so the top of the map is whatever you're looking at. `Fixed` keeps north up and turns the arrow instead. |
 | Options | Map refresh | how often the minimap is updated — `Ultra` (~30/sec), `High` (~16/sec, default), `Medium` (~9/sec), `Low` (~4/sec). Lower costs less CPU in the game; below about 8/sec the dots visibly step. |
 | Scaling | Meter / Breakdown / Settings / Minimap | each window sizes independently, so one can be big and another small |
@@ -256,16 +260,32 @@ finished parse would quietly append live hits to the numbers you were reading.
 
 A square map of what's around you, drawn from the game's own entity lists:
 **players** (group members ringed blue), **mobs**, **chests**, **orbs**,
-**obelisks**, **respawn points** and **activities**. Opened chests and
-collected orbs drop off the map, and hovering names the state — a chest you
-can't open yet reads `Chest · Locked`. Drag it by its header like
-the other windows; its position is remembered and it has a Show / hide tick.
+**soulstones**, **obelisks**, **respawn points** and **activities**. Collected
+orbs drop off the map, and hovering names the state — a chest you can't open yet
+reads `Chest · Locked`. Soulstones are drawn as a magenta shard, matching the
+crystal in the world.
+
+**Chests you've opened drop off; shut ones stay.** Worth knowing why that took
+two goes: a chest's `stateId` doesn't change when you loot it (it reads `Closed`
+either way — that means "shut", not "been here"), so what the meter watches is
+the chest's *visual* state, measured by opening one with a probe running.
+
+Also worth knowing: **the game only keeps a handful of chests loaded at a time**
+— four or five, in a zone with 47 of them. So a chest appears on the map as you
+get near it, not the moment you enter the zone. If nothing is showing, it's
+usually because everything currently loaded is already looted.
+
+It has no title bar, and the hover box under it only appears while the mouse is
+free — the rest of the time the panel is just the map. **Drag it by that box**
+(which is also the only time dragging worked anyway). Its position is remembered
+and it has a Show / hide tick like the other windows.
 
 `Rotating` (the default) turns the map **with the camera**, so the top of the
 map is whatever you're looking at — not where your character happens to be
 pointing, which changes constantly as it turns to face things. `Fixed` keeps the
-map still and turns the arrow instead. The range is 120 world units from the
-centre out.
+map still and turns the arrow instead. The range is 250 world units from the
+centre out, on a panel 405px square at 100% — the Minimap scale slider takes it
+from there.
 
 Other players are drawn as outlined chevrons pointing where they're facing, so
 you can read which way a group is heading; group members get a blue ring.
@@ -273,8 +293,10 @@ you can read which way a group is heading; group members get a blue ring.
 The map turns with the **camera**, and so does the marker in the middle — a
 cone and centre line show where you're looking.
 
-The panel is dark on both themes so the markers are the bright thing on it,
-which is easier to read at a glance than icons on a pale background.
+The panel is dark on the `Dark` themes so the markers are the bright thing on
+it, which is easier to read at a glance than icons on a pale background; the
+`Farever` themes paint it parchment to match the meter and darken the markers to
+suit. See [Themes](#themes).
 
 **Anything on a different floor gets a small caret** above or below it for which
 way you'd have to go, and **players and enemies are dimmed** as well — a mob in the tunnel below you is not
@@ -290,7 +312,7 @@ meter to inspect them, and **hovering a marker rings it in white** and names it 
 with its ground distance and how far up or down it is. Players read as
 `Name (Party)` or `Name (Player)`, and enemies by their actual name —
 `Rice Seedling (Enemy)` — since a name on its own doesn't tell you what
-kind of thing you're pointing at. You can drag the map by its header then too.
+kind of thing you're pointing at. You can drag the map by that box then too.
 
 Only the minimap does this. Freeing the mouse with Alt won't put the control
 menu on screen — that still waits for `Esc`.
@@ -307,16 +329,63 @@ travelling is most of the point.
 
 A strip of bearings across the top of the view, answering the question the
 minimap can't: *which way is that*, for things too far away to be on the map.
-It reaches the full 600 units the meter can see, where the minimap stops at 120.
+**There is no range limit** — it reaches to the far side of the zone, where the
+minimap stops at 120 units. A chest three thousand units away still has a
+bearing, and that's the case the strip exists for.
 
 It carries only what you'd travel toward — **party members**, **available
-orbs**, **unopened chests**, and **obelisks within 200u**. Enemies, respawn
-points and activities are left off on purpose: a compass crowded with mobs is
-a smear. Icons match the minimap, `N`/`E`/`S`/`W` mark the cardinals, and the
-tick in the middle is dead ahead.
+orbs**, **unopened chests** and **soulstones**. Enemies, respawn points,
+activities and obelisks are left off on purpose: a compass crowded with things
+that are permanently there is a smear. **Soulstones are the one exception to
+the no-limit rule** and only appear within 200 units, since they're worth
+knowing about when you're near one and noise when you aren't.
 
-Drag it anywhere, hide it or set it to `Show in ESC` like the other windows,
-and it has its own entry under Scaling.
+**Under each marker is how far away it is** in world units — `44`, `653`,
+`2.7k` — with `↑` or `↓` if it's well above or below you. When two markers are
+close enough that their numbers would overlap, the nearer one keeps its label.
+
+Icons match the minimap, `N`/`E`/`S`/`W` mark the cardinals along the top, and
+the tick in the middle is dead ahead. You aren't drawn on it: you're dead ahead
+by definition.
+
+**It has no panel** — no background, no border, no shadow, in any theme and at
+any time. The markers and numbers sit straight on the game, and clicks pass
+through them to whatever is underneath. To move it, free the mouse (`Alt` or
+`Esc`) and drag it **by a marker, a cardinal letter or the centre tick**: those
+are the only real pixels on it, and everything else is genuinely not there.
+
+Hide it or set it to `Show in ESC` like the other windows, and it has its own
+entry under Scaling.
+
+### Themes
+
+Five entries under **Theme** in the control menu. `Dark` re-skins the **whole
+overlay** — meter, breakdown, minimap and compass — into the map panel's navy;
+`Farever` is the parchment original.
+
+| Theme | Outside a rift | Inside a rift |
+|---|---|---|
+| `Farever Dynamic` | parchment throughout | rift colours |
+| `Dark Dynamic` *(default)* | navy throughout | rift colours |
+| `Farever` | parchment throughout | unchanged |
+| `Dark` | navy throughout | unchanged |
+| `Rift` | rift colours | rift colours |
+
+Three colours never change with the theme: **blue damage**, **green healing**,
+and green for "the overlay is unlocked". Those carry meaning, and a theme that
+recoloured them would be renaming the language the meter is written in.
+
+The rift look has no Farever or Dark variant on purpose: a rift looks like a
+rift, and the two `Dynamic` entries are how you get it — that's what they're
+for. `Rift` pins it for anyone who just likes the colours.
+
+Note that the **compass ink is light on every theme**, warm cream on Farever and
+cool white on Dark. With no panel behind it the strip has to read against the
+game, and the game is mostly dark; a brown-inked compass was tried and the
+numbers vanished into a grass texture.
+
+If you're upgrading, a saved `Dynamic` becomes `Dark Dynamic` — the same thing
+it always drew.
 
 ### The only hotkey
 
@@ -336,9 +405,9 @@ hook. That matters: you enter a rift well before you hit anything in it.
 
 While you're inside a rift the meter and breakdown **re-skin themselves** into
 the rift palette — same widget tree, only the colours swap, so it's safe
-mid-combat. That's the `Dynamic` theme; the control menu can pin it to `Farever`
-or `Rift` instead. The damage and healing bars keep their blue and green, since those
-carry meaning the theme shouldn't overwrite.
+mid-combat. That's what the two `Dynamic` themes do; the others pin it. The
+damage and healing bars keep their blue and green, since those carry meaning the
+theme shouldn't overwrite.
 
 Entering one raises a rift-styled prompt in the middle of the game window asking
 **"Enable 'View All Players'?"**, and leaving raises the mirror of it —
@@ -512,9 +581,12 @@ live. Solo (no group) shows just you in party mode.
 - The window feed is generic (every `ui.win.*` class reports itself). Only
   `ui.win.EscapeMenu` *unlocks* the overlay (`UNLOCK_ON_WINDOWS`); every other
   class fades it out for as long as that window is up, so the game's own screens
-  are never covered. If some always-on HUD class turns out to report itself as
-  open — the names are logged as `[meter] game window ...` — add it to
-  `MENU_IGNORE_WINDOWS` in `meter/farever_meter.py` and it stops counting.
+  are never covered — **including the ones reached from the escape menu**
+  (options, feedback, the back-to-menu and exit confirmations), which sit on
+  top of it and take the screen back. If some always-on HUD class turns out to
+  report itself as open — the names are logged as `[meter] game window ...` —
+  add it to `MENU_IGNORE_WINDOWS` in `meter/farever_meter.py` and it stops
+  counting.
 - `Shift+\` is the last keybind. It survives because a reset is wanted *mid-fight*,
   which is exactly when the escape menu isn't an option.
 - Summon/pet damage (non-`ent.Hero` dealers) is not yet attributed to its owner.
