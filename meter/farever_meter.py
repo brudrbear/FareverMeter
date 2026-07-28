@@ -1666,6 +1666,7 @@ class Overlay:
         self._scales = {"meter": 1.0, "detail": 1.0, "menu": 1.0, "minimap": 1.0}
         self._game_hwnd = None         # cached; re-resolved if it goes stale
         self._cursor_free = False      # game has released the mouse (Alt, menus)
+        self._focused = True           # Farever is the window you're looking at
         self._last_cam = None          # last camera heading seen; see _draw_minimap
         # True while the countdown has nothing to count down to. The window is
         # hidden in that state unless the escape menu is open, so it isn't
@@ -3156,6 +3157,30 @@ class Overlay:
             w.bind("<B1-Motion>", move)
             w.bind("<ButtonRelease-1>", end)
 
+    def _foreground_pid(self):
+        if sys.platform != "win32":
+            return 0
+        try:
+            u = ctypes.windll.user32
+            pid = wintypes.DWORD()
+            u.GetWindowThreadProcessId(u.GetForegroundWindow(),
+                                       ctypes.byref(pid))
+            return pid.value
+        except Exception:
+            return 0
+
+    def _game_has_focus(self):
+        """Is Farever the window you're actually looking at?
+
+        Our own windows count as the game having focus. They're WS_EX_NOACTIVATE
+        so they shouldn't take it, but Tk's dropdown menus are its own windows
+        and do — without this, opening the Theme dropdown would hide the very
+        menu you opened it from."""
+        if sys.platform != "win32" or not self.target_pid:
+            return True         # can't tell => don't start hiding things
+        fg = self._foreground_pid()
+        return fg in (self.target_pid, os.getpid()) or fg == 0
+
     def _cursor_is_free(self):
         """Has the game let go of the mouse?
 
@@ -3178,10 +3203,7 @@ class Overlay:
                 return False
             if not (ci.flags & CURSOR_SHOWING):
                 return False
-            fg = u.GetForegroundWindow()
-            pid = wintypes.DWORD()
-            u.GetWindowThreadProcessId(fg, ctypes.byref(pid))
-            return pid.value == self.target_pid
+            return self._foreground_pid() == self.target_pid
         except Exception:
             return False
 
@@ -3501,7 +3523,12 @@ class Overlay:
         # The rift prompt is modal: while it's up nothing else is on screen, not
         # even the control menu. That's deliberate — it leaves Esc free to hand
         # the cursor back so the question can actually be clicked.
-        blanket = menu_hidden or self._prompt_open
+        # Alt-tab away and the whole overlay goes with you. It's drawn on top
+        # of everything, so leaving it up means a damage meter floating over
+        # your browser — and worse, one you can't click past while the cursor
+        # is free. The tray icon stays, which is how you'd stop the meter from
+        # out here anyway.
+        blanket = menu_hidden or self._prompt_open or not self._focused
         changed = False
         for key in self._element_win:
             hidden = blanket or (ooc_hidden and key not in OOC_EXEMPT)
@@ -3731,6 +3758,10 @@ class Overlay:
             self._apply_clickthrough()
             if not free:
                 self._clear_map_tip(drop_cursor=True)
+        focused = self._game_has_focus()
+        if focused != self._focused:
+            self._focused = focused
+            self._refresh_visibility()
         # Before the epoch check below: starting a parse resets the session
         # itself, and syncs _last_epoch so that isn't mistaken for the player
         # resetting back out of parse mode.

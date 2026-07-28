@@ -103,6 +103,10 @@ Two ways, and both shut down cleanly:
 > out** onto the taskbar, so it's there when you want it. The meter pops a
 > notification on first run to say so.
 
+**Alt-tab away and the whole overlay goes with it**, returning when you click
+back into the game — so a damage meter isn't floating over your browser. The
+tray icon stays put, which is how you'd stop the meter from out there anyway.
+
 **Don't end it from Task Manager.** That kills the process before it can unload
 its hook and detach, and a half-attached agent is what destabilises Farever
 across repeated relaunches. Both buttons above take the proper path.
