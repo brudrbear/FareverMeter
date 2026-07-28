@@ -161,12 +161,25 @@ function hlStr(p) {
         return b.readUtf16String();
     } catch (e) { return null; }
 }
+// Cached by type pointer. HL type descriptors are static for the life of the
+// process, so this is safe — and it's what makes the world sweep affordable:
+// a zone holds hundreds of entities but only a couple of dozen distinct
+// classes, so after warmup naming one is a map hit instead of four memory
+// reads and a UTF-16 decode, several hundred times a tick.
+const typeNameCache = {};
 function typeName(p) {
     try {
         if (!p || p.isNull()) return null;
-        const t = p.readPointer(); const k = t.readU32();
-        if (k === 11 || k === 21) return t.add(8).readPointer().add(16).readPointer().readUtf16String();
-        return "kind" + k;
+        const t = p.readPointer();
+        const key = t.toString();
+        const hit = typeNameCache[key];
+        if (hit !== undefined) return hit;
+        const k = t.readU32();
+        const nm = (k === 11 || k === 21)
+            ? t.add(8).readPointer().add(16).readPointer().readUtf16String()
+            : "kind" + k;
+        typeNameCache[key] = nm;
+        return nm;
     } catch (e) { return null; }
 }
 
@@ -259,6 +272,112 @@ function checkRift() {
             lastRift = state;
             send({ kind: "rift", state: state ? 1 : 0 });
         }
+    } catch (e) {}
+}
+
+// ---- minimap world sweep ----
+// Same reasoning as checkRift(): plain pointer and scalar reads off the layer,
+// no HL calls, so it's safe from a timer rather than having to ride inside the
+// damage hook. Measured at ~1ms for 300 entities, which is what makes running
+// it several times a second reasonable at all.
+//
+// The layer keeps `units`, `interactibles` and `entities` built already, so
+// this is three array walks rather than a search. Activities only appear in
+// `entities`, which is why all three are read.
+const SWEEP_RADIUS = 600;        // world units; generous, to leave zoom headroom
+const SWEEP_MAX = 400;           // hard cap on entities reported, worst case
+const WORLD_TICK_MS = 150;       // ~6.7/sec — smooth enough that dots glide
+
+// What we draw, keyed by runtime class name. An allowlist rather than "whatever
+// is in the array": `interactibles` is ~60% generic ent.Element scenery, which
+// would bury the things worth seeing.
+const SWEEP_CLASS = {
+    "ent.Hero": "hero",
+    "ent.Foe": "foe",
+    "ent.interactible.Chest": "chest",
+    "ent.interactible.InstanceOrb": "orb",
+    "ent.interactible.Obelisk": "obelisk",
+    "ent.interactible.RespawnPoint": "respawn",
+};
+
+// Runtime type names are resolved through typeName(), which caches by type
+// pointer — a zone holds hundreds of entities but only a couple of dozen
+// distinct classes, so classification is a map hit after the first of each.
+function sweepArray(arrPtr, out, me, isEntities, seen) {
+    const A = OFF.ArrayObj;
+    if (!arrPtr || arrPtr.isNull()) return;
+    const n = arrPtr.add(A.length).readS32();
+    if (n <= 0 || n > 20000) return;              // never trust a raw length
+    const data = arrPtr.add(A.array).readPointer();
+    if (data.isNull()) return;
+    for (let i = 0; i < n && out.length < SWEEP_MAX; i++) {
+        let e;
+        try { e = data.add(A.data + i * 8).readPointer(); } catch (x) { continue; }
+        if (!e || e.isNull() || e.compare(ptr("0x10000")) <= 0) continue;
+        // The three arrays overlap — `entities` also holds what's in `units`
+        // and `interactibles`, so without this every player and chest is
+        // reported twice and the minimap draws each of them on top of itself.
+        const id = e.toString();
+        if (seen[id]) continue;
+        seen[id] = 1;
+        const cls = typeName(e);
+        if (!cls) continue;
+        let cat = SWEEP_CLASS[cls];
+        // Activities are a family (Ascension, WorldCamp, WorldElite, ChestOrb,
+        // TimerCollectRun, ...) rather than one class, so they're matched by
+        // prefix and only in `entities`, where they actually live.
+        if (!cat && isEntities && cls.lastIndexOf("st.activity.", 0) === 0)
+            cat = "activity";
+        if (!cat) continue;
+        try {
+            if (e.add(OFF.State.removed).readU8()) continue;   // despawned
+            const x = e.add(OFF.Entity.posx).readDouble();
+            const y = e.add(OFF.Entity.posy).readDouble();
+            const dx = x - me.x, dy = y - me.y;
+            if (dx * dx + dy * dy > SWEEP_RADIUS * SWEEP_RADIUS) continue;
+            // Culled here rather than overlay-side so the payload stays small
+            // regardless of how crowded the zone is. Rounded for the same
+            // reason: sub-unit precision is invisible on a minimap.
+            const ent = { c: cat, x: Math.round(x), y: Math.round(y) };
+            if (cat === "hero") {
+                // Named so the overlay can ring party members. Party membership
+                // is matched by name against the group roster the meter already
+                // reads — one source of truth, not two.
+                const nm = hlStr(e.add(OFF.Hero.name).readPointer());
+                if (nm) ent.n = nm;
+            } else if (cat !== "foe" && cat !== "activity") {
+                // Reported, not filtered on: whether a looted chest clears this
+                // flag or leaves the array is a display decision, and keeping it
+                // here means finding out doesn't change the hook.
+                try { ent.e = e.add(OFF.Interactible.enabled).readU8() ? 1 : 0; }
+                catch (x) {}
+            }
+            out.push(ent);
+        } catch (x) {}
+    }
+}
+
+function sweepWorld() {
+    try {
+        if (!localHero || localHero.isNull() || !OFF.Entity || !OFF.ArrayObj) return;
+        const layer = localHero.add(OFF.Hero.layer).readPointer();
+        if (!layer || layer.isNull()) return;
+        const me = {
+            x: localHero.add(OFF.Entity.posx).readDouble(),
+            y: localHero.add(OFF.Entity.posy).readDouble(),
+            r: localHero.add(OFF.Entity.rotationZ).readDouble(),   // radians
+        };
+        const out = [], seen = {};
+        const G = OFF.GameLayer;
+        // Order matters with the dedupe: the narrow, purpose-built lists first,
+        // then `entities` last to pick up activities and anything the other two
+        // don't carry.
+        sweepArray(layer.add(G.units).readPointer(), out, me, false, seen);
+        sweepArray(layer.add(G.interactibles).readPointer(), out, me, false, seen);
+        sweepArray(layer.add(G.entities).readPointer(), out, me, true, seen);
+        send({ kind: "world", me: { x: Math.round(me.x), y: Math.round(me.y),
+                                    r: Math.round(me.r * 1000) / 1000 },
+               ents: out });
     } catch (e) {}
 }
 
@@ -395,6 +514,11 @@ function main() {
         send({ kind: "combat", state: state });
         checkRift();
     }, 400);
+
+    // The minimap wants a faster cadence than the combat heartbeat: at 400ms
+    // dots visibly step rather than move. The sweep costs ~1ms, so its own
+    // timer is cheaper than it looks.
+    setInterval(sweepWorld, WORLD_TICK_MS);
 
     const fi = DATA.count_targets["ent.Unit.onInflictDamage"];
     const daddr = base.add(fi * 8).readPointer();

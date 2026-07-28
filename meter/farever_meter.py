@@ -777,6 +777,37 @@ class PartySession:
             return duration, self.in_combat, [copy.copy(p) for p in rows]
 
 
+class WorldSnapshot:
+    """The latest sweep of nearby entities, for the minimap.
+
+    Deliberately last-wins rather than accumulating: this is a live picture of
+    where things are *now*, and a stale entity is worse than a missing one. The
+    hook has already culled to radius and dropped everything not worth drawing,
+    so this just holds what arrived."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.me = {"x": 0, "y": 0, "r": 0.0}
+        self.ents = []
+        self.stamp = 0.0
+
+    def update(self, payload):
+        with self._lock:
+            self.me = payload.get("me") or self.me
+            self.ents = payload.get("ents") or []
+            self.stamp = time.monotonic()
+
+    def read(self):
+        """A snapshot for the draw pass. Copied under the lock because the
+        overlay iterates it on the Tk thread while the hook thread replaces it."""
+        with self._lock:
+            return self.me, list(self.ents), self.stamp
+
+    def fresh(self, max_age=2.0):
+        with self._lock:
+            return self.stamp > 0 and (time.monotonic() - self.stamp) < max_age
+
+
 class GameUIState:
     """Which of the game's own UI windows are open, streamed by the hook.
 
@@ -1316,10 +1347,12 @@ class TrayIcon:
 # Overlay
 # ---------------------------------------------------------------------------
 class Overlay:
-    def __init__(self, session: PartySession, target_pid, ui_state=None):
+    def __init__(self, session: PartySession, target_pid, ui_state=None,
+                 world=None):
         self.session = session
         self.target_pid = target_pid
         self.ui_state = ui_state if ui_state is not None else GameUIState()
+        self.world = world if world is not None else WorldSnapshot()
         self.focus_player = None       # drilled-in player name (None => local)
         self.mode = "party"            # "party" (group only) or "all"
         # The overlay is click-through unless the game has freed the cursor for
@@ -3491,6 +3524,7 @@ def main():
     watch_for_quit_request()
     session = PartySession()
     ui_state = GameUIState()
+    world = WorldSnapshot()
 
     # Up before anything that can block. Attaching waits for the game to launch
     # and the hook's memory scan can run for minutes on a slow machine — with no
@@ -3500,7 +3534,7 @@ def main():
     tray = TrayIcon(request_stop)
     tray.start()
     try:
-        return _run(tray, session, ui_state)
+        return _run(tray, session, ui_state, world)
     finally:
         tray.stop()
         # Here as well as on the paths inside _run, which miss the early
@@ -3509,7 +3543,7 @@ def main():
         release_instance_lock()
 
 
-def _run(tray, session, ui_state):
+def _run(tray, session, ui_state, world):
     device = frida.get_local_device()
     proc = find_game_process(device)
     if proc is None:
@@ -3556,6 +3590,8 @@ def _run(tray, session, ui_state):
             session.record_heal(p)
         elif k == "combat":
             session.set_combat(p.get("state") or {})
+        elif k == "world":
+            world.update(p)
         elif k == "rift":
             state = bool(p.get("state"))
             ui_state.set_rift(state)
@@ -3689,7 +3725,7 @@ def _run(tray, session, ui_state):
           "menu (and to drag the windows / click a row to inspect). Only "
           "hotkey: Shift+\\ resets the encounter.", file=sys.stderr)
 
-    overlay = Overlay(session, pid, ui_state)
+    overlay = Overlay(session, pid, ui_state, world)
     # From here the overlay owns shutdown: it's the only thing that can return
     # from the mainloop and let the finally below unload the hook and detach.
     _OVERLAY["ref"] = overlay

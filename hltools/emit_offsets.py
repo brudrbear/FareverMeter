@@ -44,6 +44,11 @@ def main():
     group = offs("st.Group")
     base = offs("st.skill.BaseSkill")
     string = offs("String")
+    entity = offs("ent.Entity")
+    state = offs("st.State")
+    inter = offs("ent.Interactible")
+    activity = offs("st.Activity")
+    arrobj = offs("hl.types.ArrayObj")
 
     # skill display-name chain: BaseSkill.inf (virtual #963) -> texts (#973) -> name
     row = code.types[963]
@@ -70,7 +75,35 @@ def main():
         "GameLayer": {"isRift": layer["isRift"][0],
                       "mainActivity": layer["mainActivity"][0],
                       "worldEvents": layer["worldEvents"][0],
-                      "time": layer["_time"][0]},
+                      "time": layer["_time"][0],
+                      # Minimap: the layer keeps these lists built already, so
+                      # the sweep is a walk of three arrays rather than a
+                      # search. units = heroes + foes, interactibles = chests /
+                      # orbs / obelisks / respawn points, entities = the widest
+                      # net and the only place activities show up.
+                      "units": layer["units"][0],
+                      "interactibles": layer["interactibles"][0],
+                      "entities": layer["entities"][0]},
+        # Every drawable thing descends from ent.Entity, so one set of position
+        # offsets serves heroes, foes, interactibles and activities alike.
+        # rotationZ is radians (measured: observed values span ~2*pi).
+        "Entity": {"posx": entity["posx"][0], "posy": entity["posy"][0],
+                   "posz": entity["posz"][0],
+                   "rotationZ": entity["rotationZ"][0],
+                   "radius": entity["radius"][0]},
+        # Despawned-but-still-listed entries. Filtered out of the sweep.
+        "State": {"removed": state["removed"][0]},
+        # `enabled` is reported per interactible rather than filtered on, so
+        # whether a looted chest flips this flag or leaves the array entirely
+        # stays a display decision instead of an assumption baked into the hook.
+        "Interactible": {"enabled": inter["enabled"][0],
+                         "isOffScreen": inter["isOffScreen"][0]},
+        "Activity": {"kind": activity["kind"][0]},
+        # hl.types.ArrayObj: length, then a pointer to an hl_varray whose
+        # ELEMENTS START AT +24, past its (t, at, size, pad) header. Reading
+        # from +0 yields the header as your first entity and faults instantly.
+        "ArrayObj": {"length": arrobj["length"][0], "array": arrobj["array"][0],
+                     "data": 24},
         # Rift countdown: worldEvents.currentEvents is an hxbit proxy array
         # (same shape as Group.players), holding st.event.WorldEvent objects.
         # startTime and serverNow share the server clock.

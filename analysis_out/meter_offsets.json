@@ -38,7 +38,32 @@
     "isRift": 248,
     "mainActivity": 240,
     "worldEvents": 288,
-    "time": 200
+    "time": 200,
+    "units": 336,
+    "interactibles": 328,
+    "entities": 312
+  },
+  "Entity": {
+    "posx": 176,
+    "posy": 184,
+    "posz": 192,
+    "rotationZ": 200,
+    "radius": 288
+  },
+  "State": {
+    "removed": 8
+  },
+  "Interactible": {
+    "enabled": 592,
+    "isOffScreen": 608
+  },
+  "Activity": {
+    "kind": 464
+  },
+  "ArrayObj": {
+    "length": 8,
+    "array": 16,
+    "data": 24
   },
   "TimeState": {
     "serverNow": 184,
