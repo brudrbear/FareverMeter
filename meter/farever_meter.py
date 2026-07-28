@@ -260,13 +260,17 @@ MINIMAP_CONE_REACH = 0.55       # fraction of the map radius
 # Blended toward the theme's ACCENT, not toward MINIMAP_ME: the player marker
 # is the same colour as the panel body (it reads only by its dark outline), so
 # blending the body toward it produces the body colour and draws nothing.
-MINIMAP_CONE_MIX = 0.20         # wedge
-MINIMAP_CONE_LINE = 0.60        # centre line, stronger than the wedge
+MINIMAP_CONE_MIX = 0.10         # wedge — a hint of shading, not a shape
+MINIMAP_CONE_LINE = 0.60        # centre line, which carries the direction
 
-# The up/down caret is always black. It's a symbol rather than a shade of the
-# thing it's attached to, and the whole point of it is being legible on a
-# marker that has already been faded halfway into the background.
-MINIMAP_Z_MARK = "#000000"
+# The up/down caret is drawn in whichever of black or white stands out against
+# the panel — black on the Farever body, white on the rift theme's near-black
+# one. Chosen from the body's brightness rather than listed per theme, so it
+# stays right on its own if the palette is ever retuned. It's a symbol rather
+# than a shade of the marker it belongs to, and it has to read on something
+# already faded halfway into the background.
+MINIMAP_Z_MARK_DARK = "#000000"
+MINIMAP_Z_MARK_LIGHT = "#FFFFFF"
 MINIMAP_PARTY_RING = "#57C7FF"  # the ring that marks a group member
 
 # rotationZ is measured from +x (east), not +y (north) — established by the
@@ -682,6 +686,16 @@ def check_for_update():
             print(f"[update] up to date (running {VERSION}).", file=sys.stderr)
 
     threading.Thread(target=work, daemon=True, name="update-check").start()
+
+
+def _contrast_ink(bg, dark=MINIMAP_Z_MARK_DARK, light=MINIMAP_Z_MARK_LIGHT):
+    """Black or white, whichever is readable on `bg`. Rec. 601 luma, which is
+    close enough for picking between two extremes."""
+    try:
+        r, g, b = (int(bg[i:i + 2], 16) for i in (1, 3, 5))
+    except (ValueError, IndexError):
+        return dark
+    return dark if (0.299 * r + 0.587 * g + 0.114 * b) > 140 else light
 
 
 def _yaw(a):
@@ -2234,7 +2248,8 @@ class Overlay:
                 edge = _lerp_hex(body, BG_BORDER, 0.35 if far else 0.8)
                 self._map_glyph(c, x, y, r, style, fill, facing, edge)
                 if far:
-                    self._map_z_marker(c, x, y, r, e.get("z", mez) - mez)
+                    self._map_z_marker(c, x, y, r, e.get("z", mez) - mez,
+                                       _contrast_ink(body))
                 hits.append((x, y, r, cat, e.get("n"),
                              math.hypot(e.get("x", 0) - me.get("x", 0),
                                         e.get("y", 0) - me.get("y", 0)),
@@ -2284,7 +2299,15 @@ class Overlay:
         accent = self._theme.get("accent", ACCENT)
         c.create_polygon(*pts, fill=_lerp_hex(body, accent, MINIMAP_CONE_MIX),
                          outline="")
-        c.create_line(half, half, half + dx * reach, half + dy * reach,
+        # The centre line runs all the way out to the edge of the panel. The
+        # canvas is square, so the ray leaves through whichever side it reaches
+        # first — the smaller of the two axis crossings.
+        far = half
+        if abs(dx) > 1e-9:
+            far = min(far, half / abs(dx))
+        if abs(dy) > 1e-9:
+            far = min(far, half / abs(dy))
+        c.create_line(half, half, half + dx * far, half + dy * far,
                       fill=_lerp_hex(body, accent, MINIMAP_CONE_LINE),
                       width=max(1, int(self._ui_scale)))
 
@@ -2343,7 +2366,7 @@ class Overlay:
             c.create_polygon(x, y - r, x + r, y, x, y + r, x - r, y,
                              fill=fill, outline="")
 
-    def _map_z_marker(self, c, x, y, r, dz):
+    def _map_z_marker(self, c, x, y, r, dz, ink):
         """A caret above or below a faded marker saying which way it is.
 
         The fade alone only tells you something is on another floor; this says
@@ -2355,7 +2378,7 @@ class Overlay:
             pts = (x - s, y - gap, x + s, y - gap, x, y - gap - s)
         else:
             pts = (x - s, y + gap, x + s, y + gap, x, y + gap + s)
-        c.create_polygon(*pts, fill=MINIMAP_Z_MARK, outline="")
+        c.create_polygon(*pts, fill=ink, outline="")
 
     def _draw_me_arrow(self, c, half, dx, dy):
         """You, at the centre. `dx, dy` is the way you're pointing in SCREEN
