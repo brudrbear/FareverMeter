@@ -257,8 +257,16 @@ MINIMAP_ME = "#F2E1CB"          # the player arrow — brightest thing on the ma
 # rather than as another object on the map.
 MINIMAP_CONE_DEG = 30.0         # half-angle
 MINIMAP_CONE_REACH = 0.55       # fraction of the map radius
-MINIMAP_CONE_MIX = 0.34         # how much of MINIMAP_ME survives the blend
-MINIMAP_CONE_LINE = 0.5         # centre line, a little stronger than the wedge
+# Blended toward the theme's ACCENT, not toward MINIMAP_ME: the player marker
+# is the same colour as the panel body (it reads only by its dark outline), so
+# blending the body toward it produces the body colour and draws nothing.
+MINIMAP_CONE_MIX = 0.20         # wedge
+MINIMAP_CONE_LINE = 0.60        # centre line, stronger than the wedge
+
+# The up/down caret is always black. It's a symbol rather than a shade of the
+# thing it's attached to, and the whole point of it is being legible on a
+# marker that has already been faded halfway into the background.
+MINIMAP_Z_MARK = "#000000"
 MINIMAP_PARTY_RING = "#57C7FF"  # the ring that marks a group member
 
 # rotationZ is measured from +x (east), not +y (north) — established by the
@@ -2179,11 +2187,11 @@ class Overlay:
         heading = _yaw(cam if cam is not None else (me.get("r", 0.0) or 0.0))
         rot = ((math.cos(heading), math.sin(heading))
                if self._map_mode == "Rotating" else None)
-        # The arrow shows the CHARACTER's facing while the map follows the
-        # camera, so you can see at a glance how far your character is turned
-        # away from where you're looking.
-        me_dir = self._facing_screen(_yaw(me.get("r", 0.0) or 0.0), heading,
-                                     rot is not None)
+        # The marker shows where the CAMERA is pointing, nothing else. In
+        # rotating mode that is the top of the map by construction, so it's a
+        # constant rather than a rotation that has to agree with one.
+        me_dir = ((0.0, -1.0) if rot is not None
+                  else (math.cos(heading), -math.sin(heading)))
 
         # The minimap always shows everyone nearby, regardless of the meter's
         # party/all mode — a map that hid the player standing next to you would
@@ -2226,7 +2234,7 @@ class Overlay:
                 edge = _lerp_hex(body, BG_BORDER, 0.35 if far else 0.8)
                 self._map_glyph(c, x, y, r, style, fill, facing, edge)
                 if far:
-                    self._map_z_marker(c, x, y, r, e.get("z", mez) - mez, fill)
+                    self._map_z_marker(c, x, y, r, e.get("z", mez) - mez)
                 hits.append((x, y, r, cat, e.get("n"),
                              math.hypot(e.get("x", 0) - me.get("x", 0),
                                         e.get("y", 0) - me.get("y", 0)),
@@ -2273,10 +2281,11 @@ class Overlay:
         for i in range(steps + 1):
             a = base - spread + (2 * spread) * i / steps
             pts += [half + math.cos(a) * reach, half + math.sin(a) * reach]
-        c.create_polygon(*pts, fill=_lerp_hex(body, MINIMAP_ME, MINIMAP_CONE_MIX),
+        accent = self._theme.get("accent", ACCENT)
+        c.create_polygon(*pts, fill=_lerp_hex(body, accent, MINIMAP_CONE_MIX),
                          outline="")
         c.create_line(half, half, half + dx * reach, half + dy * reach,
-                      fill=_lerp_hex(body, MINIMAP_ME, MINIMAP_CONE_LINE),
+                      fill=_lerp_hex(body, accent, MINIMAP_CONE_LINE),
                       width=max(1, int(self._ui_scale)))
 
     def _on_map_hover(self, event):
@@ -2334,7 +2343,7 @@ class Overlay:
             c.create_polygon(x, y - r, x + r, y, x, y + r, x - r, y,
                              fill=fill, outline="")
 
-    def _map_z_marker(self, c, x, y, r, dz, fill):
+    def _map_z_marker(self, c, x, y, r, dz):
         """A caret above or below a faded marker saying which way it is.
 
         The fade alone only tells you something is on another floor; this says
@@ -2346,7 +2355,7 @@ class Overlay:
             pts = (x - s, y - gap, x + s, y - gap, x, y - gap - s)
         else:
             pts = (x - s, y + gap, x + s, y + gap, x, y + gap + s)
-        c.create_polygon(*pts, fill=fill, outline="")
+        c.create_polygon(*pts, fill=MINIMAP_Z_MARK, outline="")
 
     def _draw_me_arrow(self, c, half, dx, dy):
         """You, at the centre. `dx, dy` is the way you're pointing in SCREEN
