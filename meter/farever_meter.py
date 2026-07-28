@@ -227,14 +227,18 @@ MINIMAP_RANGE_MIN, MINIMAP_RANGE_MAX = 80, 600
 # How each category is drawn: colour, radius in pixels, and shape. Kept in one
 # table so the legend, the draw pass and any future re-skin can't disagree.
 # Drawn in list order, so the things you most need to see land on top.
+# Tuned for a DARK panel, which both themes now use — a map is easier to read
+# when the markers are the bright thing on it rather than the background being
+# brightest. The meter's own body colour is deliberately not reused here: the
+# damage tables want to look like parchment and a map does not.
 MINIMAP_STYLE = (
-    ("activity", {"fill": "#E8C15A", "r": 4.0, "shape": "diamond"}),
-    ("obelisk",  {"fill": "#B07BD8", "r": 3.5, "shape": "square"}),
-    ("respawn",  {"fill": "#7FD8C0", "r": 3.0, "shape": "square"}),
-    ("chest",    {"fill": "#E0A33C", "r": 3.5, "shape": "square"}),
-    ("orb",      {"fill": "#6FC9E8", "r": 3.5, "shape": "dot"}),
-    ("foe",      {"fill": "#C0392B", "r": 3.0, "shape": "dot"}),
-    ("hero",     {"fill": "#5279B5", "r": 4.2, "shape": "chevron"}),
+    ("activity", {"fill": "#FFD95E", "r": 4.0, "shape": "diamond"}),
+    ("obelisk",  {"fill": "#C48CFF", "r": 3.5, "shape": "square"}),
+    ("respawn",  {"fill": "#5FE3C0", "r": 3.0, "shape": "square"}),
+    ("chest",    {"fill": "#FF9E3D", "r": 3.5, "shape": "square"}),
+    ("orb",      {"fill": "#52D8F7", "r": 3.5, "shape": "dot"}),
+    ("foe",      {"fill": "#FF5348", "r": 3.0, "shape": "dot"}),
+    ("hero",     {"fill": "#5FAEFF", "r": 4.2, "shape": "chevron"}),
 )
 MINIMAP_STYLE_MAP = dict(MINIMAP_STYLE)
 MINIMAP_ORDER = [k for k, _ in MINIMAP_STYLE]
@@ -251,7 +255,15 @@ MINIMAP_LABELS = {
     "obelisk": "Obelisk", "respawn": "Respawn point", "activity": "Activity",
 }
 
-MINIMAP_ME = "#F2E1CB"          # the player arrow — brightest thing on the map
+MINIMAP_ME = "#FFFFFF"          # the player arrow — brightest thing on the map
+
+# The map panel gets its own background ("map_body" on each theme) rather than
+# the meter's parchment body — the damage tables want to look like parchment
+# and a map does not. Everything else on the panel (rings, the hover strip, the
+# up/down carets) is DERIVED from that one colour rather than listed per theme,
+# so a re-tint is a one-line change and can't leave a stale colour behind. That
+# has bitten this file before: the view cone spent a release invisible because
+# it was blended toward a constant that happened to equal the background.
 # The view cone out of the player marker. Drawn under everything else and
 # blended toward the panel, so it reads as a hint of where you're looking
 # rather than as another object on the map.
@@ -271,7 +283,7 @@ MINIMAP_CONE_LINE = 0.60        # centre line, which carries the direction
 # already faded halfway into the background.
 MINIMAP_Z_MARK_DARK = "#000000"
 MINIMAP_Z_MARK_LIGHT = "#FFFFFF"
-MINIMAP_PARTY_RING = "#57C7FF"  # the ring that marks a group member
+MINIMAP_PARTY_RING = "#9BE8FF"  # the ring that marks a group member
 
 # Angles from the game need no correction at all, which took a while to
 # establish and two wrong guesses along the way.
@@ -410,6 +422,7 @@ THEME_DEFAULT = {
     "fg_text": FG_TEXT, "fg_value": FG_VALUE, "fg_dim": FG_DIM,
     "accent": ACCENT, "dmg": DMG_BAR, "heal": HEAL_BAR,
     "header_off": "#4A4441",
+    "map_body": "#121C30",
 }
 THEME_RIFT = {
     "border": RIFT_EDGE, "body": RIFT_BODY, "soft": "#3D0F28",
@@ -422,6 +435,7 @@ THEME_RIFT = {
     "fg_text": "#FFC9E4", "fg_value": "#FFFFFF", "fg_dim": "#C77AA0",
     "accent": RIFT_TITLE, "dmg": DMG_BAR, "heal": HEAL_BAR,
     "header_off": "#3B3036",
+    "map_body": RIFT_BODY,
 }
 
 ELEMENT_COLORS = {
@@ -2107,7 +2121,9 @@ class Overlay:
         at ~40 entities it's a few dozen canvas items, and tracking item
         identity across ticks — entities appear, move and despawn constantly —
         costs more in bookkeeping than it saves in redraws."""
-        self.map_border = tk.Frame(self.mapwin, bg=BG_BORDER, padx=2, pady=2)
+        self.map_border = tk.Frame(
+            self.mapwin, bg=_lerp_hex(THEME_DEFAULT["map_body"], "#000000", 0.45),
+            padx=2, pady=2)
         self.map_border.pack(fill="both", expand=True)
         self.map_header = tk.Frame(self.map_border, bg=BG_HEADER)
         self.map_header.pack(fill="x")
@@ -2119,14 +2135,16 @@ class Overlay:
                                   fg=FG_HEADER_DIM, font=self.fonts["ui_tiny_i"],
                                   anchor="e", padx=6, pady=2)
         self.map_count.pack(side="right")
-        self.map_canvas = tk.Canvas(self.map_border, bg=BG_BODY,
+        _mb = THEME_DEFAULT["map_body"]
+        self.map_canvas = tk.Canvas(self.map_border, bg=_mb,
                                     highlightthickness=0, bd=0,
                                     width=MINIMAP_SIZE, height=MINIMAP_SIZE)
         self.map_canvas.pack()
         # Hover readout. Always present rather than appearing on hover, so the
         # panel doesn't change height under the cursor and shove the map about.
         self.map_tip = tk.Label(self.map_border, text=MINIMAP_TIP_IDLE,
-                                bg=BG_BODY_SOFT, fg=FG_DIM,
+                                bg=_lerp_hex(_mb, "#000000", 0.35),
+                                fg=_lerp_hex(_mb, "#FFFFFF", 0.55),
                                 font=self.fonts["ui_tiny_i"], anchor="w",
                                 padx=6, pady=2)
         self.map_tip.pack(fill="x")
@@ -2173,19 +2191,24 @@ class Overlay:
         half = size / 2.0
         scale = half / float(self._map_range)
 
+        c.configure(bg=self._theme.get("map_body", BG_BODY))
         if not self.world.fresh():
             # Say so rather than showing an empty box: a blank map and a map of
             # an empty area look identical, and only one of them is a problem.
             c.create_text(half, half, text="waiting for the game",
-                          fill=FG_DIM, font=self.fonts["ui_tiny_i"])
+                          fill=_lerp_hex(self._theme.get("map_body", BG_BODY),
+                                         "#FFFFFF", 0.45),
+                          font=self.fonts["ui_tiny_i"])
             self.map_count.config(text="")
             self._map_hits = []
             return
 
         theme = self._theme
-        body = theme.get("body", BG_BODY)
+        body = theme.get("map_body", BG_BODY)
         c.configure(bg=body)
-        track = theme.get("track", BG_BAR_TRACK)
+        # Rings lifted off the panel rather than taken from the meter's palette,
+        # which is tuned against parchment and vanishes on a dark map.
+        track = _lerp_hex(body, "#FFFFFF", 0.22)
         mez = me.get("z", 0)
         # Range rings at a third and two thirds, so distances are readable
         # without a scale bar taking up room.
@@ -3172,7 +3195,14 @@ class Overlay:
         self.map_header.config(bg=t["header"])
         self.map_title.config(bg=t["header"], fg=t["fg_header"])
         self.map_count.config(bg=t["header"], fg=t["fg_header_dim"])
-        self.map_tip.config(bg=t["soft"], fg=t["fg_dim"])
+        mb = t.get("map_body", BG_BODY)
+        self.map_tip.config(bg=_lerp_hex(mb, "#000000", 0.35),
+                            fg=_lerp_hex(mb, "#FFFFFF", 0.55))
+        self.map_canvas.config(bg=mb)
+        # Also from the map colour: the meter's brown edge goes muddy against
+        # navy. The header still carries the theme, so the panel stays
+        # recognisably part of the same overlay.
+        self.map_border.config(bg=_lerp_hex(mb, "#000000", 0.45))
         # Force the header tint to be re-pushed: its guard compares against the
         # last colour applied, which belongs to the theme we just left.
         self._header_bg = None

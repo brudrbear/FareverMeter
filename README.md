@@ -265,10 +265,16 @@ you can read which way a group is heading; group members get a blue ring.
 The map turns with the **camera**, and so does the marker in the middle — a
 cone and centre line show where you're looking.
 
-**Anything on a different floor is drawn faded**, with a small black caret above
-or below it for which way you'd have to go — a mob in the tunnel below you is not
+The panel is dark on both themes so the markers are the bright thing on it,
+which is easier to read at a glance than icons on a pale background.
+
+**Anything on a different floor is drawn faded**, with a small caret above or
+below it for which way you'd have to go — a mob in the tunnel below you is not
 the same news as one you can walk to, and on a flat map they'd look identical.
-Pets and summons are left off entirely.
+**Enemies more than 60 units up or down are dropped entirely**, since in the
+very vertical zones they can't reach you and there are a lot of them. Chests,
+obelisks and the rest are kept however far above or below they are, because
+those are still somewhere to head for. Pets and summons never appear.
 
 While the game's `Esc` menu is open — the only time you have a cursor —
 **hovering a marker names it** and gives its ground distance and how far up or

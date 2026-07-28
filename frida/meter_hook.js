@@ -290,6 +290,17 @@ function checkRift() {
 // `entities`, which is why all three are read.
 const SWEEP_RADIUS = 600;        // world units; generous, to leave zoom headroom
 const SWEEP_MAX = 400;           // hard cap on entities reported, worst case
+// Foes this far above or below are dropped outright rather than sent and
+// faded. In the vertical zones this is for, a mob two floors down is not
+// something you can fight or avoid, and there can be a great many of them —
+// so this also stops them crowding chests and obelisks out of SWEEP_MAX.
+// Measured elevations: your own floor lands within ~12 units (slopes and
+// ledges) and a genuinely different level at 150+, so anything in between
+// separates the two. The overlay fades from 30 (MINIMAP_Z_FADE); between that
+// and this, a foe is dimmed rather than hidden.
+// Deliberately foes only: a chest or obelisk below you is still somewhere to
+// head for, and dropping those would cost navigation rather than clean it up.
+const SWEEP_Z_CULL = 60;
 let worldTickMs = 150;           // replaced by the host's Refresh setting
 let worldTimer = null;
 
@@ -397,6 +408,8 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
             const y = e.add(OFF.Entity.posy).readDouble();
             const dx = x - me.x, dy = y - me.y;
             if (dx * dx + dy * dy > SWEEP_RADIUS * SWEEP_RADIUS) continue;
+            const z = e.add(OFF.Entity.posz).readDouble();
+            if (cat === "foe" && Math.abs(z - me.z) > SWEEP_Z_CULL) continue;
             // Culled here rather than overlay-side so the payload stays small
             // regardless of how crowded the zone is. Rounded for the same
             // reason: sub-unit precision is invisible on a minimap.
@@ -404,7 +417,7 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
             // floor: a mob directly below you is not the same news as one you
             // can walk to, and on the flat map they look identical.
             const ent = { c: cat, x: Math.round(x), y: Math.round(y),
-                          z: Math.round(e.add(OFF.Entity.posz).readDouble()) };
+                          z: Math.round(z) };
             if (cat === "hero") {
                 // Named so the overlay can ring party members. Party membership
                 // is matched by name against the group roster the meter already
