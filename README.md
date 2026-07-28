@@ -53,11 +53,26 @@ Farever is a **HashLink JIT** game: `Farever.exe` runs `hlboot.dat` (bytecode,
 
 ## Requirements
 
+Python 3.10+. Windows. Farever must be running and logged in.
+
+> ### ⚠️ When installing Python, tick **"Add python.exe to PATH"**
+>
+> It's the checkbox at the **bottom of the first installer screen**, and it is
+> **off by default**. Miss it and `python` won't work — not because Python is
+> broken, but because Windows ships zero-byte stubs called `python.exe` and
+> `python3.exe` that open the Microsoft Store instead. That's what "I installed
+> Python and it still doesn't work" almost always turns out to be.
+>
+> **Already installed it without ticking?** Re-run the same installer →
+> **Modify** → Next → tick **"Add Python to environment variables"** → Install.
+> Nothing is reinstalled and no reboot is needed — just open a *new* terminal
+> afterwards, since an already-open one keeps the old PATH.
+
+Then install the one dependency:
+
 ```
 pip install frida
 ```
-
-Python 3.10+. Windows. Farever must be running and logged in.
 
 ## Run
 
@@ -73,6 +88,20 @@ before you can read it, so reach for a terminal when something's wrong.
 If Farever isn't running yet, the meter waits for it to launch. If several
 Farever processes are running it asks which one to attach to, and if it can't
 find your `hlboot.dat` it asks for your install folder.
+
+### If it won't start
+
+| What you see | What it means | Fix |
+|---|---|---|
+| The Microsoft Store opens, or `Python was not found; run without arguments to install from the Microsoft Store` | `python` is hitting Windows' zero-byte alias stub — PATH was never set | Tick **Add to PATH** (see Requirements), or use `py meter/farever_meter.py`, or just double-click the `.py` |
+| `'python' is not recognized as an internal or external command` | Same cause, or the terminal predates the install | Same fix — and open a **new** terminal |
+| `ModuleNotFoundError: No module named 'frida'` | Python is fine, the dependency isn't installed | `pip install frida` |
+| `[!] permission denied attaching` | Farever is running as administrator | Run the meter from an elevated terminal too |
+| `[meter] could not initialise the hook after 3 attempts` | A previous run was force-killed and left a half-attached agent | Fully close Farever, reopen it, then start the meter — and stop it with `Ctrl+C` in future, not by closing the window |
+
+`py` works even when `python` doesn't: the launcher installs to its own folder
+and is registered separately. Double-clicking the `.py` sidesteps PATH entirely,
+since that goes through the file association.
 
 **Stop it with `Ctrl+C` in the console, not by closing the window.** Closing the
 console terminates the process outright, skipping the unload/detach — and a
@@ -125,12 +154,13 @@ again.
 | Section | Button | Does |
 |---|---|---|
 | Options | Show all players / Show party only | switches between your group and everyone nearby; resets the encounter |
-| Options | Reset encounter data (`Shift+\`) | the same reset the hotkey fires — the label carries the keybind because that's the one you want mid-fight, when the escape menu isn't an option |
-| Options | Reset window positions | snaps all three windows back to their defaults and clears the saved positions |
-| Show / hide | Damage meter / Breakdown / Healing columns | hides that piece of the overlay (the control menu stays, so you can bring it back) |
+| Options | Theme | `Dynamic` (default) follows the game — rift colours inside a rift, Farever colours everywhere else. `Farever` and `Rift` pin it either way. |
+| Show / hide | Damage meter / Breakdown / Healing columns / Rift timer | hides that piece of the overlay (the control menu stays, so you can bring it back) |
 | Show / hide | Hide out of combat | fades both windows away a few seconds after the fighting stops |
 | Actions | 60s Parse Mode | see below |
 | Actions | Parse Screenshots | opens `parses/` in Explorer (created on the spot if you haven't run one yet) |
+| Reset | Reset encounter data (`Shift+\`) | the same reset the hotkey fires — the label carries the keybind because that's the one you want mid-fight, when the escape menu isn't an option |
+| Reset | Reset window positions | snaps every window back to its default and clears the saved positions |
 
 ### 60s Parse Mode
 
@@ -186,13 +216,34 @@ hero (`ent.Hero` inherits `st.State.layer`), so it's plain memory reads on the
 heartbeat timer rather than an HL call that would have to ride inside the damage
 hook. That matters: you enter a rift well before you hit anything in it.
 
-On entering one, a prompt appears in the middle of the game window asking
-**"Enable 'View All Players'?"**. While it's up it is the *only* overlay window
+While you're inside a rift the meter and breakdown **re-skin themselves** into
+the rift palette — same widget tree, only the colours swap, so it's safe
+mid-combat. That's the `Dynamic` theme; the control menu can pin it to `Farever`
+or `Rift` instead. The damage and healing bars keep their blue and green, since those
+carry meaning the theme shouldn't overwrite.
+
+Entering one raises a rift-styled prompt in the middle of the game window asking
+**"Enable 'View All Players'?"**, and leaving raises the mirror of it —
+**"Return to viewing party members only?"** — so the wide view you switched on
+for the rift doesn't quietly follow you back outside. While it's up it is the *only* overlay window
 on screen — meter, breakdown and control menu all fade out. **Yes** switches to
 all-players and resets the encounter (the mode button does the same; party-only
 and all-players numbers can't share one encounter without the percentages
 lying). **No** just dismisses it. It re-arms when you leave the rift, and closes
 itself if the rift ends before you answer.
+
+A **rift countdown** floats separately, styled after the rifts rather than the
+meter — drag it anywhere, its position is remembered, and it's toggled under
+Show / hide. Rifts open on the hour, so it simply counts down the wall clock; for
+the first 6 minutes past the hour it reads "No rift upcoming", since the rift
+that just opened is the current one. It hides while you're inside a rift, and
+it's the one element out-of-combat hiding leaves alone — a countdown you can
+only see mid-fight would be useless.
+
+(The game does carry its own schedule in `GameLayer.worldEvents.currentEvents`
+as `st.event.WorldEvent` records with `creationTime` / `startTime` / `stopTime`.
+Reading it reported the *running* event rather than the next one, and a pending
+rift didn't appear there at all, so the clock is both simpler and more accurate.)
 
 The prompt takes clicks even while the overlay is otherwise click-through. If
 the game still owns the cursor when it appears, press `Esc` to free it — the
