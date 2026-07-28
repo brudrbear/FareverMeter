@@ -516,12 +516,14 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
                     const st = hlStr(e.add(OFF.Element.stateId).readPointer());
                     const vis = hlStr(
                         e.add(OFF.Element.currentVisualState).readPointer());
-                    // BOTH are checked, because they don't agree and neither
-                    // alone is enough. A collected orb keeps stateId
-                    // "Enabled" and flips currentVisualState to "Disabled" —
-                    // measured by diffing an orb's memory through a pickup,
-                    // after guessing at stateId got it wrong.
-                    if (SPENT_STATES[st] || SPENT_STATES[vis]) continue;
+                    // currentVisualState means different things per element
+                    // and is only trustworthy for orbs, where a pickup flips
+                    // it to "Disabled" while stateId stays "Enabled". On a
+                    // chest or an obelisk it reads "Opened" while the thing is
+                    // plainly shut — measured, on every one of them — so
+                    // consulting it there hides the entire category.
+                    if (SPENT_STATES[st]) continue;
+                    if (cat === "orb" && SPENT_STATES[vis]) continue;
                     if (st) ent.s = st;
                     if (vis && vis !== st) ent.v = vis;
                     const k = elemKind ||
