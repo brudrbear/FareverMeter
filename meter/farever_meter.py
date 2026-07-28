@@ -252,11 +252,25 @@ MINIMAP_LABELS = {
 }
 
 MINIMAP_ME = "#F2E1CB"          # the player arrow — brightest thing on the map
+# The view cone out of the player marker. Drawn under everything else and
+# blended toward the panel, so it reads as a hint of where you're looking
+# rather than as another object on the map.
+MINIMAP_CONE_DEG = 30.0         # half-angle
+MINIMAP_CONE_REACH = 0.55       # fraction of the map radius
+MINIMAP_CONE_MIX = 0.34         # how much of MINIMAP_ME survives the blend
+MINIMAP_CONE_LINE = 0.5         # centre line, a little stronger than the wedge
 MINIMAP_PARTY_RING = "#57C7FF"  # the ring that marks a group member
 
 # rotationZ is measured from +x (east), not +y (north) — established by the
 # arrow pointing 90 degrees off the player's real facing until it was corrected.
-# So the facing vector is (cos r, sin r), and screen-up corresponds to r = pi/2.
+#
+# ...and it increases the opposite way round to the screen convention, which
+# showed up as the map turning right when the camera turned left. Every angle
+# from the game goes through _yaw() so the map, the player arrow and the other
+# players' chevrons all flip together; they have to agree or the arrow ends up
+# pointing somewhere the map disagrees with. Flip this one constant if the
+# rotation ever reads backwards again.
+MINIMAP_YAW_SIGN = -1.0
 
 # A flat map can't tell you that a mob is on the gantry above you or in the
 # tunnel below, and those are very different news. Anything further than this
@@ -653,6 +667,11 @@ def check_for_update():
             print(f"[update] up to date (running {VERSION}).", file=sys.stderr)
 
     threading.Thread(target=work, daemon=True, name="update-check").start()
+
+
+def _yaw(a):
+    """A game yaw as the geometry here expects it. See MINIMAP_YAW_SIGN."""
+    return float(a or 0.0) * MINIMAP_YAW_SIGN
 
 
 def _pretty_id(sid: str) -> str:
@@ -2150,14 +2169,21 @@ class Overlay:
         # until the camera hook has seen a frame, and the character's own facing
         # is the fallback rather than snapping the map to zero.
         cam = me.get("c")
-        heading = float(cam if cam is not None else (me.get("r", 0.0) or 0.0))
+        heading = _yaw(cam if cam is not None else (me.get("r", 0.0) or 0.0))
         rot = ((math.cos(heading), math.sin(heading))
                if self._map_mode == "Rotating" else None)
+        # The arrow shows the CHARACTER's facing while the map follows the
+        # camera, so you can see at a glance how far your character is turned
+        # away from where you're looking.
+        me_dir = self._facing_screen(_yaw(me.get("r", 0.0) or 0.0), heading,
+                                     rot is not None)
 
         # The minimap always shows everyone nearby, regardless of the meter's
         # party/all mode — a map that hid the player standing next to you would
         # be misleading. Group members are marked with a ring instead.
         local, roster = self.world.who()
+
+        self._draw_view_cone(c, half, me_dir[0], me_dir[1], body)
 
         drawn = 0
         hits = []
@@ -2186,10 +2212,14 @@ class Overlay:
                 # keep their world heading while the map turned under them.
                 facing = None
                 if cat == "hero" and e.get("r") is not None:
-                    a = float(e["r"]) - (heading - math.pi / 2 if rot is not None
-                                         else 0.0)
-                    facing = (math.cos(a), -math.sin(a))
-                self._map_glyph(c, x, y, r, style, fill, facing)
+                    facing = self._facing_screen(_yaw(e["r"]), heading,
+                                                 rot is not None)
+                # Outlined against the panel, not black: on the rift theme a
+                # hard black edge on a dark body reads as a hole.
+                edge = _lerp_hex(body, BG_BORDER, 0.35 if far else 0.8)
+                self._map_glyph(c, x, y, r, style, fill, facing, edge)
+                if far:
+                    self._map_z_marker(c, x, y, r, e.get("z", mez) - mez, fill)
                 hits.append((x, y, r, cat, e.get("n"),
                              math.hypot(e.get("x", 0) - me.get("x", 0),
                                         e.get("y", 0) - me.get("y", 0)),
@@ -2205,15 +2235,41 @@ class Overlay:
                                   outline=ring, width=2)
                 drawn += 1
 
-        # Rotating mode already turned the world, so the arrow points at the
-        # top of the map. Fixed mode turns the arrow instead: facing is
-        # (cos r, sin r) in world, and screen y is inverted.
-        if rot is not None:
-            self._draw_me_arrow(c, half, 0.0, -1.0)
-        else:
-            self._draw_me_arrow(c, half, math.cos(heading), -math.sin(heading))
+        self._draw_me_arrow(c, half, me_dir[0], me_dir[1])
         self.map_count.config(text=f"{drawn}  ·  {int(self._map_range)}u")
         self._map_hits = hits
+
+    def _facing_screen(self, world_angle, heading, rotating):
+        """A world heading as a screen-space unit vector.
+
+        Facing is (cos a, sin a) in world terms. Fixed mode only has to flip y,
+        since screen y grows downward. Rotating mode also has to take the angle
+        relative to the camera, because the map itself has already turned by
+        that much — otherwise everything would keep its world heading while the
+        ground moved under it."""
+        if rotating:
+            d = world_angle - heading
+            return (-math.sin(d), -math.cos(d))
+        return (math.cos(world_angle), -math.sin(world_angle))
+
+    def _draw_view_cone(self, c, half, dx, dy, body):
+        """A wedge and centre line out of the player marker, showing where the
+        character is looking. Drawn before the entities so it never hides one."""
+        reach = half * MINIMAP_CONE_REACH
+        spread = math.radians(MINIMAP_CONE_DEG)
+        base = math.atan2(dy, dx)
+        pts = [half, half]
+        # A few segments rather than a flat-ended triangle, so the far edge is
+        # curved like a real field of view.
+        steps = 8
+        for i in range(steps + 1):
+            a = base - spread + (2 * spread) * i / steps
+            pts += [half + math.cos(a) * reach, half + math.sin(a) * reach]
+        c.create_polygon(*pts, fill=_lerp_hex(body, MINIMAP_ME, MINIMAP_CONE_MIX),
+                         outline="")
+        c.create_line(half, half, half + dx * reach, half + dy * reach,
+                      fill=_lerp_hex(body, MINIMAP_ME, MINIMAP_CONE_LINE),
+                      width=max(1, int(self._ui_scale)))
 
     def _on_map_hover(self, event):
         """Name whatever is under the cursor, and say how far away it is.
@@ -2247,12 +2303,12 @@ class Overlay:
         except tk.TclError:
             pass
 
-    def _map_glyph(self, c, x, y, r, style, fill, facing=None):
+    def _map_glyph(self, c, x, y, r, style, fill, facing=None, edge=None):
         shape = style["shape"]
         if shape == "chevron" and facing is not None:
-            # Same arrow as the player marker, smaller and without the outline.
-            # Drawn from a screen-space direction, so the caller has already
-            # resolved whatever the current orientation mode implies.
+            # Same arrow as the player marker, smaller. The outline is what
+            # keeps a stack of players readable: several chevrons on the same
+            # spot merge into one unreadable blob without it.
             dx, dy = facing
             px, py = -dy, dx
             c.create_polygon(
@@ -2260,7 +2316,7 @@ class Overlay:
                 x - dx * r + px * 0.85 * r, y - dy * r + py * 0.85 * r,
                 x - dx * 0.35 * r, y - dy * 0.35 * r,
                 x - dx * r - px * 0.85 * r, y - dy * r - py * 0.85 * r,
-                fill=fill, outline="")
+                fill=fill, outline=edge or "", width=1)
             return
         if shape in ("dot", "chevron"):
             c.create_oval(x - r, y - r, x + r, y + r, fill=fill, outline="")
@@ -2269,6 +2325,20 @@ class Overlay:
         else:   # diamond
             c.create_polygon(x, y - r, x + r, y, x, y + r, x - r, y,
                              fill=fill, outline="")
+
+    def _map_z_marker(self, c, x, y, r, dz, fill):
+        """A caret above or below a faded marker saying which way it is.
+
+        The fade alone only tells you something is on another floor; this says
+        whether you need to go up or down to reach it, which is the part you
+        act on."""
+        s = r * 0.8
+        gap = r + 2.0 * self._ui_scale
+        if dz > 0:
+            pts = (x - s, y - gap, x + s, y - gap, x, y - gap - s)
+        else:
+            pts = (x - s, y + gap, x + s, y + gap, x, y + gap + s)
+        c.create_polygon(*pts, fill=fill, outline="")
 
     def _draw_me_arrow(self, c, half, dx, dy):
         """You, at the centre. `dx, dy` is the way you're pointing in SCREEN
