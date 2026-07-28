@@ -37,6 +37,7 @@ import tempfile
 import threading
 import time
 import tkinter as tk
+from tkinter import font as tkfont
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -90,6 +91,13 @@ HIDE_OOC_LINGER_SECS = 5.0
 # mid-fight reads as a crash. FADE_SECS is the full 0 -> OVERLAY_ALPHA travel;
 # the driver ticks every FADE_STEP_MS on its own timer, not on the 250 ms
 # refresh, which would be far too coarse to look like a fade.
+# Vertical stack for the floating text over the top of the game window. The
+# game draws the zone name across the very top, so everything starts below it —
+# the keybind hint used to sit at +24 and land right on top of it.
+TOP_STRIP_HINT = 96
+TOP_STRIP_PARSE = 140
+TOP_STRIP_RIFT = 190
+
 OVERLAY_ALPHA = 0.94
 FADE_SECS = 0.45
 # The control menu and its hint answer to a keypress, so they want to feel
@@ -114,7 +122,20 @@ TOGGLEABLE_ELEMENTS = (
     ("meter", "Damage meter"),
     ("detail", "Breakdown"),
     ("healing", "Healing columns"),
+    ("rift", "Rift timer"),
 )
+
+# Elements the out-of-combat rule doesn't touch. The rift countdown is most use
+# exactly when you're standing around between pulls, so hiding it out of combat
+# would hide it for its whole useful life.
+OOC_EXEMPT = ("rift",)
+
+# Rifts open on the hour. The countdown is just the wall clock — reading the
+# game's own world-event schedule turned out to report the running event rather
+# than the next one, and this needs no hook at all. For the first few minutes
+# past the hour the rift that just opened is the current one, so there's nothing
+# to count down to yet.
+RIFT_QUIET_MINS = 6
 
 # ---- palette (Farever-style, matches original meter) ----
 BG_BORDER = "#2C1A0E"
@@ -132,10 +153,92 @@ FG_TEXT = "#3D2817"
 FG_VALUE = "#1F1208"
 FG_DIM = "#7B5A3A"
 FG_WARN = "#A32B1C"         # red that still reads on the cream body
+
+# ---- rift palette (matches the rifts themselves: hot magenta rim, near-black
+# maroon interior) — deliberately nothing like the rest of the overlay, so the
+# countdown reads as belonging to the game's event rather than to the meter.
+RIFT_EDGE = "#FF2E92"
+RIFT_GLOW = "#8A1048"
+RIFT_BODY = "#2C0A1E"
+RIFT_TITLE = "#FF7BC0"
+RIFT_TIME = "#FFE0F0"
+RIFT_PEAK = "#FFB3D9"       # the top of the pulse, a hotter rim
+# The countdown pulses once it's close, so it catches the eye without needing to
+# be read. Its own timer, because the 250 ms refresh would make it a stutter.
+RIFT_PULSE_SECS = 300       # start pulsing at 5 minutes left
+RIFT_STYLE_SECS = 900       # ...and turn the box rift-coloured at 15
+RIFT_PULSE_PERIOD = 1.4     # seconds per full pulse
+RIFT_PULSE_MS = 40
+RIFT_RIPPLE_MARGIN = 26     # transparent room around the panel for it
+RIFT_RIPPLE_FADEOUT = 0.8   # ripple is gone by this much of the cycle
+
+# Big mono while counting; smaller and quieter for the idle placeholder, which
+# is only ever on screen so the window can be dragged into place.
+
 ACCENT = "#3D7C7C"
 DMG_BAR = "#5279B5"       # blue — damage bars
 HEAL_BAR = "#5E9C4A"      # green — healing bars
 TRANSPARENT_KEY = "#010101"
+
+# The countdown box escalates as the rift approaches: ordinary Farever colours
+# while it's far off, rift colours inside 15 minutes, then pulsing inside 5.
+RIFT_BOX_FAR = {"glow": BG_BORDER, "edge": BG_BORDER, "body": BG_BODY,
+                "title": ACCENT, "time": FG_VALUE}
+RIFT_BOX_NEAR = {"glow": RIFT_GLOW, "edge": RIFT_EDGE, "body": RIFT_BODY,
+                 "title": RIFT_TITLE, "time": RIFT_TIME}
+
+# The meter and breakdown re-skin themselves while you're inside a rift, so the
+# overlay matches what's on screen around it. Same widget tree either way — only
+# the colours are swapped, by _apply_theme.
+# Theme choices offered in the control menu. "Dynamic" is the interesting one:
+# it follows the game, so the overlay matches whatever you're standing in.
+THEME_MODES = ("Dynamic", "Farever", "Rift")
+
+# Every font in the overlay is a *named* Tk font. That's what makes the scale
+# slider possible: reconfiguring a named font resizes every widget using it and
+# triggers a relayout, with no rebuild and no hunting down font tuples.
+FONT_SPECS = {
+    "ui_sm_b":    ("Segoe UI", 8, "bold"),
+    "ui_b":       ("Segoe UI", 10, "bold"),
+    "ui":         ("Segoe UI", 9),
+    "ui_10":      ("Segoe UI", 10),
+    "ui_tiny_i":  ("Segoe UI", 7, "italic"),
+    "ui_lg_b":    ("Segoe UI", 13, "bold"),
+    "ui_hint_b":  ("Segoe UI", 11, "bold"),
+    "ui_parse_b": ("Segoe UI", 15, "bold"),
+    "ui_idle_i":  ("Segoe UI", 10, "italic"),
+    "mono":       ("Consolas", 9),
+    "mono_10":    ("Consolas", 10),
+    "mono_sm":    ("Consolas", 8),
+    "mono_xl_b":  ("Consolas", 18, "bold"),
+}
+UI_SCALE_MIN, UI_SCALE_MAX = 75, 175      # percent
+# Minimum widths, at 100%. They're pixel values, so the scale slider has to
+# scale them too or scaling down just hits the floor and nothing moves.
+MIN_W = {"meter": 360, "detail": 320, "menu": 230, "prompt": 320}
+WARN_WRAP = 460                            # the red banner's wrap, at 100%
+
+THEME_DEFAULT = {
+    "border": BG_BORDER, "body": BG_BODY, "soft": BG_BODY_SOFT,
+    "header": BG_HEADER, "header_combat": BG_HEADER_COMBAT,
+    "header_unlocked": BG_HEADER_UNLOCKED, "track": BG_BAR_TRACK,
+    "fg_header": FG_HEADER, "fg_header_dim": FG_HEADER_DIM,
+    "fg_text": FG_TEXT, "fg_value": FG_VALUE, "fg_dim": FG_DIM,
+    "accent": ACCENT, "dmg": DMG_BAR, "heal": HEAL_BAR,
+    "header_off": "#4A4441",
+}
+THEME_RIFT = {
+    "border": RIFT_EDGE, "body": RIFT_BODY, "soft": "#3D0F28",
+    "header": RIFT_GLOW, "header_combat": "#C41E6E",
+    # Green still means "unlocked", and it reads fine on the dark body — the
+    # bars keep their meanings too (blue damage, green healing) rather than
+    # being recoloured into the theme and losing what they stand for.
+    "header_unlocked": BG_HEADER_UNLOCKED, "track": "#4A1030",
+    "fg_header": RIFT_TIME, "fg_header_dim": "#F0A8CC",
+    "fg_text": "#FFC9E4", "fg_value": "#FFFFFF", "fg_dim": "#C77AA0",
+    "accent": RIFT_TITLE, "dmg": DMG_BAR, "heal": HEAL_BAR,
+    "header_off": "#3B3036",
+}
 
 ELEMENT_COLORS = {
     "Physical": "#B68A4E", "Magic": "#5279B5", "Fire": "#C9612A",
@@ -616,6 +719,8 @@ class Overlay:
         self._heal_cols_shown = True   # last healing layout pushed to the widgets
         self._combat_seen_at = 0.0     # last moment a tracked player was fighting
         self._header_bg = BG_HEADER    # last tint pushed to the header bars
+        self._theme = THEME_DEFAULT    # what's painted right now
+        self._theme_mode = THEME_MODES[0]   # what the player asked for
         self._action_q = []
         self._q_lock = threading.Lock()
         self._last_epoch = session.epoch
@@ -626,10 +731,21 @@ class Overlay:
         # Rift prompt: modal, and the only overlay window on screen while it's
         # up. _rift_seen is the edge detector — one prompt per rift entry.
         self._prompt_open = False
+        self._prompt_kind = "enter"
+        self._rift_pulse = False
+        self._pulse_job = None
+        self._rift_box = None      # which palette the box is wearing
         self._rift_seen = False
 
         pos = self._load_positions()
         self.root = tk.Tk()
+        self._ui_scale = 1.0
+        self.fonts = {}
+        for key, (family, size, *style) in FONT_SPECS.items():
+            self.fonts[key] = tkfont.Font(
+                root=self.root, family=family, size=size,
+                weight="bold" if "bold" in style else "normal",
+                slant="italic" if "italic" in style else "roman")
         self.root.title("Farever+ Party Meter")
         self.detail = tk.Toplevel(self.root)
         self.detail.title("Farever+ Breakdown")
@@ -641,8 +757,10 @@ class Overlay:
         self.parsewin.title("Farever+ Parse")
         self.promptwin = tk.Toplevel(self.root)
         self.promptwin.title("Farever+ Prompt")
+        self.riftwin = tk.Toplevel(self.root)
+        self.riftwin.title("Farever+ Rift Timer")
         for win in (self.root, self.detail, self.menu, self.hintwin,
-                    self.parsewin, self.promptwin):
+                    self.parsewin, self.promptwin, self.riftwin):
             win.overrideredirect(True)
             win.attributes("-topmost", True)
             win.configure(bg=TRANSPARENT_KEY)
@@ -654,21 +772,23 @@ class Overlay:
             # rebuilds a toplevel's Windows wrapper as it applies the wm
             # attributes above, and the DWM setting dies with the old hwnd.
             win.bind("<Map>", self._on_map_round, add="+")
-        for win in (self.root, self.detail, self.menu):
+        for win in (self.root, self.detail, self.menu, self.riftwin):
             win.attributes("-alpha", OVERLAY_ALPHA)
         # Keys must match TOGGLEABLE_ELEMENTS.
-        self._element_win = {"meter": self.root, "detail": self.detail}
+        self._element_win = {"meter": self.root, "detail": self.detail,
+                             "rift": self.riftwin}
         # Every window that fades: the two toggleable ones, plus the control
         # menu and its hint, which follow the game's escape menu.
         self._fade_win = dict(self._element_win, menu=self.menu,
                               hint=self.hintwin, prompt=self.promptwin)
         self._shown["menu"] = self._shown["hint"] = False
         self._shown["prompt"] = False
+        self._shown["rift"] = False     # nothing to show until a timer arrives
         # Live opacity of each faded window, driven by _step_fade. The menu pair
         # starts at zero: they're withdrawn until the escape menu opens.
         self._alpha = {k: OVERLAY_ALPHA for k in self._fade_win}
         self._alpha["menu"] = self._alpha["hint"] = 0.0
-        self._alpha["prompt"] = 0.0
+        self._alpha["prompt"] = self._alpha["rift"] = 0.0
         self._fade_secs = {k: FADE_SECS for k in self._fade_win}
         self._fade_secs["menu"] = self._fade_secs["hint"] = MENU_FADE_SECS
         self._fade_secs["prompt"] = MENU_FADE_SECS
@@ -680,6 +800,7 @@ class Overlay:
         self._build_hint()
         self._build_parse()
         self._build_prompt()
+        self._build_rift()
         self.root.update_idletasks()
         self._place_windows(pos)
         # The control menu and its hint only exist while the game's escape menu
@@ -690,6 +811,7 @@ class Overlay:
         self.hintwin.withdraw()
         self.parsewin.withdraw()
         self.promptwin.withdraw()
+        self.riftwin.withdraw()
         self.root.after(60, self._apply_clickthrough)
         self._install_hotkeys()
 
@@ -707,7 +829,7 @@ class Overlay:
             except Exception:
                 return {}
         out = {}
-        for key in ("meter", "detail", "menu"):
+        for key in ("meter", "detail", "menu", "rift"):
             try:
                 out[key] = (int(d[key]["x"]), int(d[key]["y"]))
             except Exception:
@@ -741,6 +863,11 @@ class Overlay:
             self.detail.geometry(f"+{d[0]}+{d[1]}")
         else:
             self._default_detail_pos()
+        rw = pos.get("rift")
+        if rw and self._pos_visible(*rw):
+            self.riftwin.geometry(f"+{rw[0]}+{rw[1]}")
+        else:
+            self._default_rift_pos()
         mn = pos.get("menu")
         if mn and self._pos_visible(*mn):
             self.menu.geometry(f"+{mn[0]}+{mn[1]}")
@@ -761,6 +888,14 @@ class Overlay:
         sw = self.root.winfo_screenwidth()
         w = max(self.root.winfo_reqwidth(), self.root.winfo_width(), 380)
         self.root.geometry(f"+{sw - w - 12}+12")
+
+    def _default_rift_pos(self):
+        """Bottom of the top-centre stack, under the parse banner. Draggable
+        from there like everything else, and remembered."""
+        self.riftwin.update_idletasks()
+        l, t, r, _b = self._game_rect()
+        w = max(self.riftwin.winfo_reqwidth(), self.riftwin.winfo_width(), 120)
+        self.riftwin.geometry(f"+{l + ((r - l) - w) // 2}+{t + TOP_STRIP_RIFT}")
 
     def _default_detail_pos(self):
         # Just below the meter, left-aligned with it. The meter is usually
@@ -784,7 +919,7 @@ class Overlay:
         self.hintwin.update_idletasks()
         l, t, r, _b = self._game_rect()
         w = max(self.hintwin.winfo_reqwidth(), self.hintwin.winfo_width(), 10)
-        self.hintwin.geometry(f"+{l + ((r - l) - w) // 2}+{t + 24}")
+        self.hintwin.geometry(f"+{l + ((r - l) - w) // 2}+{t + TOP_STRIP_HINT}")
 
     def _save_pos(self):
         try:
@@ -793,65 +928,68 @@ class Overlay:
                 "detail": {"x": self.detail.winfo_x(),
                            "y": self.detail.winfo_y()},
                 "menu": {"x": self.menu.winfo_x(), "y": self.menu.winfo_y()},
+                "rift": {"x": self.riftwin.winfo_x(),
+                         "y": self.riftwin.winfo_y()},
             }))
         except OSError:
             pass
 
     # ---- UI ----
     def _build_meter(self):
-        border = tk.Frame(self.root, bg=BG_BORDER, padx=2, pady=2)
+        self.m_border = border = tk.Frame(self.root, bg=BG_BORDER, padx=2, pady=2)
         border.pack(fill="both", expand=True)
 
         self.header = tk.Frame(border, bg=BG_HEADER)
         self.header.pack(fill="x")
         self.title_lbl = tk.Label(self.header, text="Farever+ Party Meter",
                                   bg=BG_HEADER, fg=FG_HEADER,
-                                  font=("Segoe UI", 10, "bold"), anchor="w",
+                                  font=self.fonts["ui_b"], anchor="w",
                                   padx=8, pady=4)
         self.title_lbl.pack(side="left")
         self.timer_lbl = tk.Label(self.header, text="", bg=BG_HEADER, fg=FG_HEADER,
-                                  font=("Consolas", 9), padx=8)
+                                  font=self.fonts["mono"], padx=8)
         self.timer_lbl.pack(side="right")
         self._bind_drag(self.root, (self.header, self.title_lbl))
 
-        body = tk.Frame(border, bg=BG_BODY, padx=8, pady=6)
+        self.m_body = body = tk.Frame(border, bg=BG_BODY, padx=8, pady=6)
         body.pack(fill="both", expand=True)
 
         self.overview_title = tk.Label(body, text="PARTY", bg=BG_BODY,
-                                       fg=ACCENT, font=("Segoe UI", 8, "bold"),
+                                       fg=ACCENT, font=self.fonts["ui_sm_b"],
                                        anchor="w")
         self.overview_title.pack(fill="x")
         # Same font/size as the rows so the monospace columns line up exactly.
         self.cols_lbl = tk.Label(
             body, text=self._meter_cols_text(),
-            bg=BG_BODY, fg=FG_DIM, font=("Consolas", 10), anchor="w")
+            bg=BG_BODY, fg=FG_DIM, font=self.fonts["mono_10"], anchor="w")
         self.cols_lbl.pack(fill="x", pady=(2, 0))
-        rows_box = tk.Frame(body, bg=BG_BODY)
+        self.rows_box = rows_box = tk.Frame(body, bg=BG_BODY)
         rows_box.pack(fill="x", pady=(1, 2))
         # pack stops managing a container the moment its last slave is forgotten
         # — it keeps whatever size it last asked for. Without this 1 px keeper
         # the meter would stay as tall as the biggest party it ever showed once
         # a reset empties the rows. Packed to the bottom so row order is
         # untouched.
-        tk.Frame(rows_box, bg=BG_BODY, height=1, width=1).pack(side="bottom")
-        self.player_rows = [PlayerRow(rows_box, self._on_row_click)
+        self.rows_keeper = tk.Frame(rows_box, bg=BG_BODY, height=1, width=1)
+        self.rows_keeper.pack(side="bottom")
+        self.player_rows = [PlayerRow(rows_box, self._on_row_click, self.fonts)
                             for _ in range(MAX_PLAYER_ROWS)]
 
-        self.root.minsize(360, 0)
+        self.root.minsize(MIN_W["meter"], 0)
 
     def _meter_cols_text(self):
         head = f"  #  {'NAME':<12}{'DMG':>9} {'DPS':>6} {'%':>4}"
         return head + (f"{'HEAL':>9}" if self._show["healing"] else "")
 
     def _build_detail(self):
-        border = tk.Frame(self.detail, bg=BG_BORDER, padx=2, pady=2)
+        self.d_border = border = tk.Frame(self.detail, bg=BG_BORDER, padx=2, pady=2)
         border.pack(fill="both", expand=True)
 
         self.d_header = tk.Frame(border, bg=BG_HEADER)
         self.d_header.pack(fill="x")
         self.d_title = tk.Label(self.d_header, text="Breakdown",
                                 bg=BG_HEADER, fg=FG_HEADER,
-                                font=("Segoe UI", 10, "bold"), anchor="w",
+                                font=self.fonts["ui_b"], anchor="w",
                                 padx=8, pady=4)
         self.d_title.pack(side="left")
         # Sits in the header rather than the body so it reads as a caption on
@@ -859,31 +997,31 @@ class Overlay:
         self.d_tip = tk.Label(self.d_header,
                               text="Click a player in the meter to view details",
                               bg=BG_HEADER, fg=FG_HEADER_DIM,
-                              font=("Segoe UI", 7, "italic"), anchor="e", padx=8)
+                              font=self.fonts["ui_tiny_i"], anchor="e", padx=8)
         self.d_tip.pack(side="right")
         self._bind_drag(self.detail, (self.d_header, self.d_title, self.d_tip))
 
-        body = tk.Frame(border, bg=BG_BODY, padx=8, pady=6)
+        self.d_body = body = tk.Frame(border, bg=BG_BODY, padx=8, pady=6)
         body.pack(fill="both", expand=True)
         self.stats_lbl = tk.Label(body, text="", bg=BG_BODY, fg=FG_TEXT,
-                                  font=("Consolas", 9), anchor="w")
+                                  font=self.fonts["mono"], anchor="w")
         self.stats_lbl.pack(fill="x")
 
-        cols = tk.Frame(body, bg=BG_BODY)
+        self.d_cols = cols = tk.Frame(body, bg=BG_BODY)
         cols.pack(fill="x", pady=(3, 2))
-        self.dmg_col = SkillColumn(cols, "DAMAGE", DMG_BAR)
+        self.dmg_col = SkillColumn(cols, "DAMAGE", DMG_BAR, self.fonts)
         self.dmg_col.f.pack(side="left", anchor="n")
         # Kept as attributes so the healing toggle can unpack them; re-packing
         # in this order puts them back to the right of the damage column.
         self.col_sep = tk.Frame(cols, bg=BG_BODY_SOFT, width=1)
         self.col_sep.pack(side="left", fill="y", padx=6)
-        self.heal_col = SkillColumn(cols, "HEALING", HEAL_BAR)
+        self.heal_col = SkillColumn(cols, "HEALING", HEAL_BAR, self.fonts)
         self.heal_col.f.pack(side="left", anchor="n")
 
         self.elem_lbl = tk.Label(body, text="", bg=BG_BODY, fg=FG_DIM,
-                                 font=("Consolas", 8), anchor="w", justify="left")
+                                 font=self.fonts["mono_sm"], anchor="w", justify="left")
         self.elem_lbl.pack(fill="x", pady=(3, 0))
-        self.detail.minsize(320, 0)
+        self.detail.minsize(MIN_W["detail"], 0)
 
     def _build_menu(self):
         """The control menu: what used to be hotkeys, as buttons. Only on screen
@@ -898,7 +1036,7 @@ class Overlay:
         self.m_header.pack(fill="x")
         self.m_title = tk.Label(self.m_header, text="Farever+ Controls",
                                 bg=BG_HEADER_UNLOCKED, fg=FG_HEADER,
-                                font=("Segoe UI", 10, "bold"), anchor="w",
+                                font=self.fonts["ui_b"], anchor="w",
                                 padx=8, pady=4)
         self.m_title.pack(side="left")
         self._bind_drag(self.menu, (self.m_header, self.m_title))
@@ -910,19 +1048,39 @@ class Overlay:
         # process before it can unload the hook and detach, which is what
         # destabilises the game across relaunches. Worth shouting about — it's
         # the one way to break things that looks like a normal way to quit.
-        tk.Label(body, text=SHUTDOWN_WARNING, bg=BG_BODY, fg=FG_WARN,
-                 font=("Segoe UI", 8, "bold"), anchor="w", justify="left",
-                 wraplength=250).pack(fill="x", pady=(0, 8))
+        self.warn_lbl = tk.Label(body, text=SHUTDOWN_WARNING, bg=BG_BODY,
+                                 fg=FG_WARN, font=self.fonts["ui_sm_b"],
+                                 anchor="w", justify="left",
+                                 wraplength=WARN_WRAP)
+        self.warn_lbl.pack(fill="x", pady=(0, 8))
         tk.Frame(body, bg=BG_BAR_TRACK, height=1).pack(fill="x", pady=(0, 2))
 
-        def section(text, first=False):
-            tk.Label(body, text=text, bg=BG_BODY, fg=ACCENT,
-                     font=("Segoe UI", 8, "bold"), anchor="w").pack(
-                         fill="x", pady=(0 if first else 9, 3))
+        # Two columns rather than one long strip: the menu had grown tall enough
+        # to be a scroll, and the scale slider can only make that worse.
+        cols = tk.Frame(body, bg=BG_BODY)
+        cols.pack(fill="both", expand=True)
+        left = tk.Frame(cols, bg=BG_BODY)
+        left.pack(side="left", fill="both", expand=True, anchor="n")
+        tk.Frame(cols, bg=BG_BAR_TRACK, width=1).pack(side="left", fill="y",
+                                                      padx=10)
+        right = tk.Frame(cols, bg=BG_BODY)
+        right.pack(side="left", fill="both", expand=True, anchor="n")
 
-        def button(cmd):
-            b = tk.Button(body, text="", command=cmd, anchor="w",
-                          font=("Segoe UI", 9), bg=BG_BODY_SOFT, fg=FG_TEXT,
+        def section(parent, text, first=False, note=None):
+            row = tk.Frame(parent, bg=BG_BODY)
+            row.pack(fill="x", pady=(0 if first else 9, 3))
+            tk.Label(row, text=text, bg=BG_BODY, fg=ACCENT,
+                     font=self.fonts["ui_sm_b"], anchor="w").pack(side="left")
+            if note:
+                # Quieter than the heading it hangs off: it's a note about how
+                # the section behaves, not another thing to read every time.
+                tk.Label(row, text=note, bg=BG_BODY, fg=FG_DIM,
+                         font=self.fonts["ui_tiny_i"],
+                         anchor="e").pack(side="right")
+
+        def button(parent, cmd):
+            b = tk.Button(parent, text="", command=cmd, anchor="w",
+                          font=self.fonts["ui"], bg=BG_BODY_SOFT, fg=FG_TEXT,
                           activebackground=BG_BAR_TRACK, activeforeground=FG_VALUE,
                           relief="flat", bd=0, padx=10, pady=5,
                           highlightthickness=1, highlightbackground=BG_BAR_TRACK,
@@ -930,93 +1088,288 @@ class Overlay:
             b.pack(fill="x", pady=2)
             return b
 
+        def field(parent, label):
+            """A labelled control row, for the things that aren't buttons."""
+            row = tk.Frame(parent, bg=BG_BODY)
+            row.pack(fill="x", pady=2)
+            tk.Label(row, text=label, bg=BG_BODY, fg=FG_TEXT,
+                     font=self.fonts["ui"], anchor="w", padx=2).pack(side="left")
+            return row
+
         # Commands are queued rather than run inline: they mutate overlay state
         # the refresh loop also touches, and _drain runs them on the Tk thread.
-        section("OPTIONS", first=True)
-        self.btn_mode = button(self._enqueue(self._toggle_mode))
-        # Exactly what the hotkey fires, so the two can't diverge. Labelled with
-        # the keybind because the hotkey is the one that's useful mid-fight,
-        # when the escape menu (and so this button) isn't an option.
-        self.btn_reset_data = button(self._enqueue(self.session.reset))
-        self.btn_reset_data.config(
-            text=f"Reset encounter data   ({RESET_HOTKEY_KEYS})")
-        self.btn_reset_pos = button(self._enqueue(self._reset_pos))
-        self.btn_reset_pos.config(text="Reset window positions")
+        section(left, "OPTIONS", first=True)
+        self.btn_mode = button(left, self._enqueue(self._toggle_mode))
 
-        section("SHOW / HIDE")
+        row = field(left, "Theme")
+        self._theme_var = tk.StringVar(value=self._theme_mode)
+        self.opt_theme = tk.OptionMenu(row, self._theme_var, *THEME_MODES,
+                                       command=self._on_theme_pick)
+        self.opt_theme.config(
+            bg=BG_BODY_SOFT, fg=FG_TEXT, activebackground=BG_BAR_TRACK,
+            activeforeground=FG_VALUE, relief="flat", bd=0, anchor="w",
+            padx=10, pady=3, font=self.fonts["ui"], cursor="hand2",
+            highlightthickness=1, highlightbackground=BG_BAR_TRACK,
+            direction="right")
+        self.opt_theme["menu"].config(
+            bg=BG_BODY, fg=FG_TEXT, activebackground=BTN_ON_BG,
+            activeforeground=FG_HEADER, bd=0, relief="flat",
+            font=self.fonts["ui"])
+        self.opt_theme.pack(side="right", expand=True, fill="x", padx=(8, 0))
+
+        # Every font in the overlay is a named Tk font, so dragging this resizes
+        # the lot. Released rather than live: repainting the whole tree on each
+        # pixel of drag is visibly slow.
+        row = field(left, "Scale")
+        self._scale_var = tk.IntVar(value=100)
+        self.scl_ui = tk.Scale(
+            row, from_=UI_SCALE_MIN, to=UI_SCALE_MAX, resolution=5,
+            orient="horizontal", variable=self._scale_var, showvalue=True,
+            bg=BG_BODY, fg=FG_DIM, troughcolor=BG_BAR_TRACK,
+            activebackground=BTN_ON_BG, highlightthickness=0, bd=0,
+            sliderrelief="flat", font=self.fonts["ui_tiny_i"], length=130,
+            cursor="hand2")
+        self.scl_ui.bind("<ButtonRelease-1>", self._on_scale_pick)
+        self.scl_ui.pack(side="right", expand=True, fill="x", padx=(8, 0))
+
+        section(left, "SHOW / HIDE", note="Always visible when Esc is open")
         self.element_btns = {
-            key: button(self._enqueue(lambda k=key: self._toggle_element(k)))
+            key: button(left, self._enqueue(lambda k=key: self._toggle_element(k)))
             for key, _label in TOGGLEABLE_ELEMENTS
         }
         # Last in this section rather than under OPTIONS: it hides the same
         # windows the checkboxes above do, just on a condition instead of a
         # click.
-        self.btn_hide_ooc = button(self._enqueue(self._toggle_hide_ooc))
+        self.btn_hide_ooc = button(left, self._enqueue(self._toggle_hide_ooc))
 
-        section("ACTIONS")
-        self.btn_parse = button(self._enqueue(self._toggle_parse))
-        self.btn_parses = button(self._enqueue(self._open_parses))
+        section(right, "ACTIONS", first=True)
+        self.btn_parse = button(right, self._enqueue(self._toggle_parse))
+        self.btn_parses = button(right, self._enqueue(self._open_parses))
         self.btn_parses.config(text="Parse Screenshots")
-        self.menu.minsize(230, 0)
+
+        # Last, and on their own: both throw work away, so they want distance
+        # from the settings you click casually.
+        section(right, "RESET")
+        # Exactly what the hotkey fires, so the two can't diverge. Labelled with
+        # the keybind because the hotkey is the one that's useful mid-fight,
+        # when the escape menu (and so this button) isn't an option.
+        self.btn_reset_data = button(right, self._enqueue(self.session.reset))
+        self.btn_reset_data.config(
+            text=f"Reset encounter data   ({RESET_HOTKEY_KEYS})")
+        self.btn_reset_pos = button(right, self._enqueue(self._reset_pos))
+        self.btn_reset_pos.config(text="Reset window positions")
+        self.menu.minsize(MIN_W["menu"], 0)
 
     def _build_hint(self):
         """The one remaining keybind, as free-floating text over the game — no
         panel, no border, just a drop-shadowed line so it stays readable on
         whatever is behind it."""
-        from tkinter import font as tkfont
-        f = tkfont.Font(family="Segoe UI", size=11, weight="bold")
+        self.hint_canvas = tk.Canvas(self.hintwin, bg=TRANSPARENT_KEY,
+                                     highlightthickness=0, bd=0)
+        self.hint_canvas.pack()
+        self._draw_hint()
+
+    def _draw_hint(self):
+        """Re-measured rather than sized once, so the scale slider moves it."""
+        f, c = self.fonts["ui_hint_b"], self.hint_canvas
         pad, off = 6, 2
         w = f.measure(RESET_HOTKEY_TEXT) + pad * 2 + off
         h = f.metrics("linespace") + pad * 2 + off
-        c = tk.Canvas(self.hintwin, width=w, height=h, bg=TRANSPARENT_KEY,
-                      highlightthickness=0, bd=0)
-        c.pack()
+        c.config(width=w, height=h)
+        c.delete("all")
         c.create_text(pad + off, pad + off, text=RESET_HOTKEY_TEXT, font=f,
                       fill=BG_BORDER, anchor="nw")
         c.create_text(pad, pad, text=RESET_HOTKEY_TEXT, font=f,
                       fill=BG_BODY, anchor="nw")
 
-    def _build_prompt(self):
-        """The rift prompt: a modal box in the middle of the game window. It is
-        the only overlay window on screen while it's up, so there's nothing to
-        read or click except the question."""
-        border = tk.Frame(self.promptwin, bg=BG_BORDER, padx=2, pady=2)
-        border.pack(fill="both", expand=True)
-        header = tk.Frame(border, bg=BG_HEADER_UNLOCKED)
-        header.pack(fill="x")
-        tk.Label(header, text="Farever+", bg=BG_HEADER_UNLOCKED, fg=FG_HEADER,
-                 font=("Segoe UI", 10, "bold"), anchor="w",
-                 padx=10, pady=5).pack(side="left")
+    def _build_rift(self):
+        """The next-rift countdown. Styled after the rifts themselves rather
+        than the meter — hot magenta rim over a near-black maroon interior — so
+        it reads as belonging to the game's event, not to the damage meter.
 
-        body = tk.Frame(border, bg=BG_BODY, padx=16, pady=14)
+        The panel sits on a canvas with RIFT_RIPPLE_MARGIN of transparent space
+        around it, which is where the pulse's expanding square is drawn. Canvas
+        items render behind embedded windows, so the panel covers the middle of
+        the ripple and only the part outside it shows."""
+        self.rift_canvas = tk.Canvas(self.riftwin, bg=TRANSPARENT_KEY,
+                                     highlightthickness=0, bd=0)
+        self.rift_canvas.pack()
+        m = RIFT_RIPPLE_MARGIN
+        self.rift_glow = glow = tk.Frame(self.rift_canvas, bg=RIFT_GLOW,
+                                         padx=1, pady=1)
+        self.rift_edge = edge = tk.Frame(glow, bg=RIFT_EDGE, padx=2, pady=2)
+        edge.pack(fill="both", expand=True)
+        self.rift_body = body = tk.Frame(edge, bg=RIFT_BODY,
+                                         padx=14, pady=8)
         body.pack(fill="both", expand=True)
-        tk.Label(body, text="You have entered a rift", bg=BG_BODY, fg=FG_VALUE,
-                 font=("Segoe UI", 12, "bold"), anchor="w").pack(fill="x")
-        tk.Label(body, text="Enable 'View All Players'?", bg=BG_BODY,
-                 fg=FG_TEXT, font=("Segoe UI", 10), anchor="w",
-                 pady=6).pack(fill="x")
 
-        btns = tk.Frame(body, bg=BG_BODY)
-        btns.pack(fill="x", pady=(8, 0))
+        self.rift_title = tk.Label(body, text="NEXT RIFT", bg=RIFT_BODY,
+                                   fg=RIFT_TITLE, font=self.fonts["ui_sm_b"],
+                                   anchor="w")
+        self.rift_title.pack(fill="x")
+        self.rift_lbl = tk.Label(body, text="No rift upcoming", bg=RIFT_BODY,
+                                 fg=RIFT_TIME, font=self.fonts["ui_idle_i"],
+                                 anchor="w")
+        self.rift_lbl.pack(fill="x")
+        self.rift_canvas.create_window(m, m, anchor="nw", window=glow)
+        self._rift_panel = (0, 0)          # last panel size the canvas was cut to
+        self._sync_rift_canvas()
+        self._bind_drag(self.riftwin, (self.rift_canvas, glow, edge, body,
+                                       self.rift_title, self.rift_lbl))
+
+    def _sync_rift_canvas(self):
+        """Keep the canvas exactly panel + margin. The panel changes width with
+        the text ("No rift upcoming" is far wider than a countdown) and with the
+        scale slider, so this is checked rather than set once."""
+        self.rift_glow.update_idletasks()
+        w = self.rift_glow.winfo_reqwidth()
+        h = self.rift_glow.winfo_reqheight()
+        if (w, h) == self._rift_panel:
+            return
+        self._rift_panel = (w, h)
+        m = RIFT_RIPPLE_MARGIN
+        self.rift_canvas.config(width=w + m * 2, height=h + m * 2)
+
+    def _tick_rift_timer(self):
+        """Count down to the top of the hour, which is when rifts open. For the
+        first RIFT_QUIET_MINS past it, the rift that just opened is the current
+        one — counting 59 minutes to the *next* one then would be misleading."""
+        now = time.localtime()
+        into_hour = now.tm_min * 60 + now.tm_sec
+        if into_hour < RIFT_QUIET_MINS * 60:
+            self.rift_title.config(text="RIFT TIMER")
+            self.rift_lbl.config(text="No rift upcoming",
+                                 font=self.fonts["ui_idle_i"])
+            self._set_rift_box(RIFT_BOX_FAR)
+            self._set_pulsing(False)
+            return
+        left = 3600 - into_hour
+        mins, secs = divmod(left, 60)
+        self.rift_title.config(text="NEXT RIFT")
+        self.rift_lbl.config(text=f"{mins:02d}:{secs:02d}",
+                             font=self.fonts["mono_xl_b"])
+        # Three stages: ordinary while it's far off, rift-coloured inside 15
+        # minutes, pulsing inside 5. Each one is a bigger nudge than the last.
+        self._set_rift_box(RIFT_BOX_NEAR if left <= RIFT_STYLE_SECS
+                           else RIFT_BOX_FAR)
+        self._set_pulsing(left <= RIFT_PULSE_SECS)
+
+    def _set_rift_box(self, style):
+        """Repaint the countdown box. Guarded on the current style: this runs
+        every tick and reconfiguring five widgets each time is pure waste."""
+        if style is self._rift_box:
+            return
+        self._rift_box = style
+        self.rift_glow.config(bg=style["glow"])
+        self.rift_edge.config(bg=style["edge"])
+        self.rift_body.config(bg=style["body"])
+        self.rift_title.config(bg=style["body"], fg=style["title"])
+        self.rift_lbl.config(bg=style["body"], fg=style["time"])
+
+    def _set_pulsing(self, on):
+        self._rift_pulse = on
+        if on and self._pulse_job is None:
+            self._pulse_job = self.root.after(RIFT_PULSE_MS, self._step_pulse)
+
+    def _step_pulse(self):
+        """Ramp the rim colour up and back on a cosine, so it breathes rather
+        than blinks. Stops itself once the countdown is far enough out again, or
+        the window isn't on screen to pulse."""
+        self._pulse_job = None
+        if not self._rift_pulse or not self._shown["rift"]:
+            style = self._rift_box or RIFT_BOX_NEAR
+            self.rift_glow.config(bg=style["glow"])
+            self.rift_edge.config(bg=style["edge"])
+            self.rift_title.config(fg=style["title"])
+            self.rift_canvas.delete("ripple")
+            return
+        phase = (time.monotonic() % RIFT_PULSE_PERIOD) / RIFT_PULSE_PERIOD
+        k = (1 - math.cos(phase * 2 * math.pi)) / 2
+        self.rift_edge.config(bg=_lerp_hex(RIFT_EDGE, RIFT_PEAK, k))
+        self.rift_glow.config(bg=_lerp_hex(RIFT_GLOW, RIFT_EDGE, k))
+        self.rift_title.config(fg=_lerp_hex(RIFT_TITLE, "#FFFFFF", k))
+        self._draw_ripple(phase)
+        self._pulse_job = self.root.after(RIFT_PULSE_MS, self._step_pulse)
+
+    def _draw_ripple(self, phase):
+        """One square, expanding out of the panel's edge and thinning as it
+        goes. Tk canvas has no alpha, so the fade is done with `outlinestipple`
+        — progressively sparser dither patterns let more of the game through,
+        which over a transparent-key canvas reads as fading out."""
+        self._sync_rift_canvas()
+        c, m = self.rift_canvas, RIFT_RIPPLE_MARGIN
+        c.delete("ripple")
+        pw, ph = self._rift_panel
+        if not pw:
+            return
+        # It has to be gone *before* it reaches the canvas edge. Run it to the
+        # boundary and Tk clips the outline into a hard rectangle sitting on the
+        # window's rim, which reads as a permanent border the ripple flies out
+        # to rather than something dissipating.
+        if phase > RIFT_RIPPLE_FADEOUT:
+            return
+        travel = phase / RIFT_RIPPLE_FADEOUT      # 0..1 over the visible part
+        out = (m - 3) * travel
+        x0, y0 = m - out, m - out
+        x1, y1 = m + pw + out, m + ph + out
+        stipple = ("", "gray75", "gray50", "gray25", "gray12")[
+            min(4, int(travel * 5))]
+        c.create_rectangle(x0, y0, x1, y1, outline=RIFT_PEAK, width=2,
+                           outlinestipple=stipple, tags="ripple")
+
+    def _build_prompt(self):
+        """The rift prompts. Styled like the rifts rather than the meter — they
+        only ever appear because of one, and the colour is what tells you at a
+        glance which of the two questions you're being asked isn't a meter
+        setting."""
+        glow = tk.Frame(self.promptwin, bg=RIFT_GLOW, padx=1, pady=1)
+        glow.pack(fill="both", expand=True)
+        border = tk.Frame(glow, bg=RIFT_EDGE, padx=2, pady=2)
+        border.pack(fill="both", expand=True)
+        header = tk.Frame(border, bg=RIFT_GLOW)
+        header.pack(fill="x")
+        tk.Label(header, text="RIFT", bg=RIFT_GLOW, fg=RIFT_TIME,
+                 font=self.fonts["ui_b"], anchor="w",
+                 padx=12, pady=6).pack(side="left")
+
+        body = tk.Frame(border, bg=RIFT_BODY, padx=18, pady=16)
+        body.pack(fill="both", expand=True)
+        self.prompt_title = tk.Label(body, text="", bg=RIFT_BODY, fg=RIFT_TIME,
+                                     font=self.fonts["ui_lg_b"], anchor="w")
+        self.prompt_title.pack(fill="x")
+        self.prompt_question = tk.Label(body, text="", bg=RIFT_BODY,
+                                        fg=RIFT_TITLE, font=self.fonts["ui_10"],
+                                        anchor="w", pady=8)
+        self.prompt_question.pack(fill="x")
+
+        btns = tk.Frame(body, bg=RIFT_BODY)
+        btns.pack(fill="x", pady=(10, 0))
 
         def answer_button(text, on, yes):
-            b = tk.Button(btns, text=text, command=on, font=("Segoe UI", 10, "bold"),
-                          bg=BTN_ON_BG if yes else BG_BODY_SOFT,
-                          fg=FG_HEADER if yes else FG_TEXT,
-                          activebackground=BTN_ON_BG_ACTIVE if yes else BG_BAR_TRACK,
-                          activeforeground=FG_HEADER if yes else FG_VALUE,
-                          relief="flat", bd=0, padx=26, pady=7,
+            b = tk.Button(btns, text=text, command=on,
+                          font=self.fonts["ui_b"],
+                          bg=RIFT_EDGE if yes else RIFT_BODY,
+                          fg="#2C0A1E" if yes else RIFT_TITLE,
+                          activebackground=RIFT_TITLE if yes else RIFT_GLOW,
+                          activeforeground="#2C0A1E" if yes else RIFT_TIME,
+                          relief="flat", bd=0, padx=30, pady=8,
                           highlightthickness=1, cursor="hand2",
-                          highlightbackground=BTN_ON_BG_ACTIVE if yes
-                          else BG_BAR_TRACK)
-            b.pack(side="left", expand=True, fill="x", padx=3)
+                          highlightbackground=RIFT_EDGE)
+            b.pack(side="left", expand=True, fill="x", padx=4)
             return b
 
         answer_button("Yes", self._enqueue(lambda: self._answer_rift(True)), True)
         answer_button("No", self._enqueue(lambda: self._answer_rift(False)), False)
-        self.promptwin.minsize(300, 0)
+        self.promptwin.minsize(MIN_W["prompt"], 0)
 
-    def _open_rift_prompt(self):
+    def _open_rift_prompt(self, kind):
+        self._prompt_kind = kind
+        if kind == "enter":
+            self.prompt_title.config(text="You have entered a rift")
+            self.prompt_question.config(text="Enable 'View All Players'?")
+        else:
+            self.prompt_title.config(text="You have left the rift")
+            self.prompt_question.config(text="Return to viewing party members only?")
         self._prompt_open = True
         self.promptwin.update_idletasks()
         l, t, r, b = self._game_rect()
@@ -1025,19 +1378,21 @@ class Overlay:
         self.promptwin.geometry(f"+{l + ((r - l) - w) // 2}+{t + ((b - t) - h) // 2}")
         self._apply_clickthrough()      # the prompt has to be clickable
         self._refresh_visibility()
-        print("[meter] entered a rift — asking about View All Players.",
-              file=sys.stderr)
+        print(f"[meter] {'entered' if kind == 'enter' else 'left'} a rift — "
+              "asking about the player view.", file=sys.stderr)
 
     def _close_rift_prompt(self):
         self._prompt_open = False
         self._refresh_visibility()
 
     def _answer_rift(self, yes):
-        """Yes switches to all-players. That resets the encounter the same way
-        the mode button does — party-only and all-players numbers can't share
-        one encounter without the percentages lying."""
-        if yes and self.mode != "all":
-            self.mode = "all"
+        """Yes switches the view — to all-players on entering a rift, back to
+        party-only on leaving. Either way that resets the encounter, the same
+        as the mode button: the two views can't share one encounter without the
+        percentages lying."""
+        want = "all" if self._prompt_kind == "enter" else "party"
+        if yes and self.mode != want:
+            self.mode = want
             self.focus_player = None
             self.session.reset()
         self._close_rift_prompt()
@@ -1050,18 +1405,19 @@ class Overlay:
         in_rift = self.ui_state.in_rift()
         if in_rift and not self._rift_seen:
             self._rift_seen = True
-            self._open_rift_prompt()
-        elif not in_rift:
+            self._open_rift_prompt("enter")
+        elif not in_rift and self._rift_seen:
+            # Leaving replaces the question rather than just dismissing it: the
+            # all-players view you switched on for the rift is the wrong one to
+            # be left holding once you're back outside.
             self._rift_seen = False
-            if self._prompt_open:
-                self._close_rift_prompt()
+            self._open_rift_prompt("leave")
 
     def _build_parse(self):
         """The parse banner — the same drop-shadowed floating text as the
         keybind hint, but its content changes every second, so the canvas and
         the window are re-measured on each update instead of sized once."""
-        from tkinter import font as tkfont
-        self._parse_font = tkfont.Font(family="Segoe UI", size=15, weight="bold")
+        self._parse_font = self.fonts["ui_parse_b"]
         self._parse_canvas = tk.Canvas(self.parsewin, bg=TRANSPARENT_KEY,
                                        highlightthickness=0, bd=0)
         self._parse_canvas.pack()
@@ -1085,9 +1441,9 @@ class Overlay:
         c.create_text(pad, pad, text=text, font=f, fill=fill, anchor="nw")
         self.parsewin.update_idletasks()
         l, t, r, _b = self._game_rect()
-        # Below the keybind hint, which owns the strip at t+24 whenever the
-        # escape menu is open — and it is, for the first few seconds of a parse.
-        self.parsewin.geometry(f"+{l + ((r - l) - w) // 2}+{t + 64}")
+        # Below the keybind hint, which shares this strip whenever the escape
+        # menu is open — and it is, for the first few seconds of a parse.
+        self.parsewin.geometry(f"+{l + ((r - l) - w) // 2}+{t + TOP_STRIP_PARSE}")
 
     def _hide_parse_banner(self):
         self._parse_text = None
@@ -1278,12 +1634,19 @@ class Overlay:
         # reasserting. Child widgets bubble their own <Map> here, so only act
         # on the toplevel's.
         win = event.widget
-        if isinstance(win, (tk.Tk, tk.Toplevel)):
-            self._round_win_corners(win)
+        if not isinstance(win, (tk.Tk, tk.Toplevel)):
+            return
+        # Not the rift timer: its window is mostly transparent canvas around a
+        # much smaller panel, so DWM's rounding has nothing to round — it just
+        # leaves a faint border floating out where the ripple ends. The panel
+        # draws its own edges.
+        if win is self.riftwin:
+            return
+        self._round_win_corners(win)
 
     def _apply_clickthrough(self):
         locked = self._is_locked()
-        for win in (self.root, self.detail):
+        for win in (self.root, self.detail, self.riftwin):
             self._set_win_clickthrough(win, locked)
         # The control menu is always interactive (it is only ever shown while
         # the cursor is free); the floating hint and parse banner are text over
@@ -1342,6 +1705,33 @@ class Overlay:
         self._show[key] = not self._show[key]
         self._refresh_visibility()
 
+    def _on_scale_pick(self, _event=None):
+        self._enqueue(lambda: self._set_ui_scale(self._scale_var.get() / 100))()
+
+    def _set_ui_scale(self, factor):
+        """Resize every named font, which resizes every window that packs to its
+        content. The two canvas-drawn banners measure their text at draw time,
+        so they're re-drawn rather than left at the old size."""
+        if abs(factor - self._ui_scale) < 0.001:
+            return
+        self._ui_scale = factor
+        for key, (_family, size, *_style) in FONT_SPECS.items():
+            self.fonts[key].configure(size=max(6, round(size * factor)))
+        self._parse_text = None          # force the parse banner to re-measure
+        self._draw_hint()
+        # Pixel floors and wrap widths don't come along for free.
+        for win, key in ((self.root, "meter"), (self.detail, "detail"),
+                         (self.menu, "menu"), (self.promptwin, "prompt")):
+            win.minsize(int(MIN_W[key] * factor), 0)
+        self.warn_lbl.config(wraplength=int(WARN_WRAP * factor))
+        self.root.update_idletasks()
+        print(f"[meter] UI scale {factor:.2f}x", file=sys.stderr)
+
+    def _on_theme_pick(self, value):
+        # Queued like every other menu action: it mutates state the refresh
+        # loop reads, and Tk isn't thread-safe.
+        self._enqueue(lambda: self._set_theme_mode(value))()
+
     def _toggle_hide_ooc(self):
         self._hide_ooc = not self._hide_ooc
         self._refresh_visibility()
@@ -1370,17 +1760,61 @@ class Overlay:
         # The rift prompt is modal: while it's up nothing else is on screen, not
         # even the control menu. That's deliberate — it leaves Esc free to hand
         # the cursor back so the question can actually be clicked.
-        hidden = ooc_hidden or menu_hidden or self._prompt_open
+        blanket = menu_hidden or self._prompt_open
         changed = False
         for key in self._element_win:
-            changed |= self._want_visible(
-                key, (self._show[key] or self._menu_unlock) and not hidden)
+            hidden = blanket or (ooc_hidden and key not in OOC_EXEMPT)
+            want = (self._show[key] or self._menu_unlock) and not hidden
+            # No countdown while you're inside a rift: you're in the thing it
+            # was counting down to.
+            if key == "rift" and self.ui_state.in_rift():
+                want = False
+            changed |= self._want_visible(key, want)
         menu_visible = self._menu_unlock and not self._prompt_open
         changed |= self._want_visible("menu", menu_visible)
         changed |= self._want_visible("hint", menu_visible)
         changed |= self._want_visible("prompt", self._prompt_open)
         if changed:
             self._start_fade()
+
+    def _pick_theme(self):
+        """Dynamic follows the game; the other two are pinned. Either way the
+        escape menu wins: the control menu is Farever-styled and the meter sits
+        right next to it, so matching that beats matching a rift you can't
+        currently see."""
+        if self._menu_unlock:
+            return THEME_DEFAULT
+        if self._theme_mode == "Farever":
+            return THEME_DEFAULT
+        if self._theme_mode == "Rift":
+            return THEME_RIFT
+        return THEME_RIFT if self.ui_state.in_rift() else THEME_DEFAULT
+
+    def _set_theme_mode(self, mode):
+        self._theme_mode = mode
+
+    def _apply_theme(self, t):
+        """Repaint the meter and breakdown into `t`. Same widget tree either
+        way — nothing is rebuilt, so this is safe to call mid-combat."""
+        self._theme = t
+        for w in (self.m_border, self.d_border):
+            w.config(bg=t["border"])
+        for w in (self.m_body, self.rows_box, self.rows_keeper, self.d_body,
+                  self.d_cols):
+            w.config(bg=t["body"])
+        self.overview_title.config(bg=t["body"], fg=t["accent"])
+        self.cols_lbl.config(bg=t["body"], fg=t["fg_dim"])
+        self.stats_lbl.config(bg=t["body"], fg=t["fg_text"])
+        self.elem_lbl.config(bg=t["body"], fg=t["fg_dim"])
+        self.col_sep.config(bg=t["soft"])
+        for row in self.player_rows:
+            row.theme = t
+            row.set_theme(t)
+        for col in (self.dmg_col, self.heal_col):
+            col.set_theme(t)
+        # Force the header tint to be re-pushed: its guard compares against the
+        # last colour applied, which belongs to the theme we just left.
+        self._header_bg = None
 
     def _want_visible(self, key, visible):
         """Point one faded window at a target state, returning whether that
@@ -1431,6 +1865,7 @@ class Overlay:
         self._default_meter_pos()
         self._default_detail_pos()
         self._default_menu_pos()
+        self._default_rift_pos()
 
     def _toggle_mode(self):
         self.mode = "all" if self.mode == "party" else "party"
@@ -1519,6 +1954,7 @@ class Overlay:
         # itself, and syncs _last_epoch so that isn't mistaken for the player
         # resetting back out of parse mode.
         self._tick_rift()
+        self._tick_rift_timer()
         self._tick_parse()
         # Ahead of _refresh_menu, so a reset that drops parse mode is reflected
         # in the button on the same tick rather than the next one.
@@ -1549,14 +1985,27 @@ class Overlay:
         # game's escape menu is open), orange = in combat, teal = idle. Unlocked
         # wins over combat: it's the transient one, and combat is already
         # obvious from the running timer.
+        theme = self._pick_theme()
+        if theme is not self._theme:
+            self._apply_theme(theme)
         unlocked = not self._is_locked()
-        want_bg = (BG_HEADER_UNLOCKED if unlocked
-                   else BG_HEADER_COMBAT if in_combat else BG_HEADER)
-        if want_bg != self._header_bg:
-            for w in (self.header, self.title_lbl, self.timer_lbl,
-                      self.d_header, self.d_title, self.d_tip):
-                w.config(bg=want_bg)
-            self._header_bg = want_bg
+        live_bg = (theme["header_unlocked"] if unlocked
+                   else theme["header_combat"] if in_combat else theme["header"])
+        # A window you've ticked off still shows while the escape menu is open,
+        # which makes "off" hard to see. Greying its header is the tell — it's
+        # the only part of the window that carries state anyway.
+        want = tuple(theme["header_off"] if not self._show[k] else live_bg
+                     for k in ("meter", "detail"))
+        if want != self._header_bg:
+            meter_bg, detail_bg = want
+            for w in (self.header, self.title_lbl, self.timer_lbl):
+                w.config(bg=meter_bg)
+            for w in (self.d_header, self.d_title, self.d_tip):
+                w.config(bg=detail_bg)
+            for w in (self.title_lbl, self.timer_lbl, self.d_title):
+                w.config(fg=theme["fg_header"])
+            self.d_tip.config(fg=theme["fg_header_dim"])
+            self._header_bg = want
 
         mins, secs = divmod(int(duration), 60)
         party_total = sum(p.total for p in rows)
@@ -1633,6 +2082,14 @@ class Overlay:
         self.root.mainloop()
 
 
+def _lerp_hex(a, b, t):
+    """Blend two #rrggbb colours, t in 0..1."""
+    av = tuple(int(a[i:i + 2], 16) for i in (1, 3, 5))
+    bv = tuple(int(b[i:i + 2], 16) for i in (1, 3, 5))
+    return "#%02X%02X%02X" % tuple(
+        int(round(x + (y - x) * t)) for x, y in zip(av, bv))
+
+
 def _clamp01(v):
     return min(1.0, max(0.0, v))
 
@@ -1641,10 +2098,12 @@ class PlayerRow:
     """One meter line (rank, name, damage, dps, %, healing) over a stacked
     bar pair: damage (blue, top) and healing (green, bottom)."""
 
-    def __init__(self, parent, on_click):
+    def __init__(self, parent, on_click, fonts, theme=None):
+        self.fonts = fonts
+        self.theme = theme or THEME_DEFAULT
         self.f = tk.Frame(parent, bg=BG_BODY)
         self.line = tk.Label(self.f, text="", bg=BG_BODY, fg=FG_TEXT,
-                             font=("Consolas", 10), anchor="w")
+                             font=self.fonts["mono_10"], anchor="w")
         self.line.pack(fill="x")
         self.dmg_track = tk.Frame(self.f, bg=BG_BAR_TRACK, height=5)
         self.dmg_track.pack(fill="x")
@@ -1659,6 +2118,16 @@ class PlayerRow:
         self._packed = False
         self._heal_packed = True
         self._name = None
+        self._is_me = False
+
+    def set_theme(self, t):
+        self.f.config(bg=t["body"])
+        self.line.config(bg=t["body"],
+                         fg=t["fg_value"] if self._is_me else t["fg_text"])
+        self.dmg_track.config(bg=t["track"])
+        self.dmg_bar.config(bg=t["dmg"])
+        self.heal_track.config(bg=t["track"])
+        self.heal_bar.config(bg=t["heal"])
 
     def show(self, rank, p, dps, pct, focused, dmg_frac, heal_frac,
              show_heal=True):
@@ -1672,7 +2141,10 @@ class PlayerRow:
                 f"{dps:>6.0f} {pct:>3.0f}%")
         if show_heal:
             line += f"{int(p.heal_total):>9}"
-        self.line.config(text=line, fg=FG_VALUE if p.is_me else FG_TEXT)
+        self._is_me = p.is_me
+        self.line.config(text=line,
+                         fg=self.theme["fg_value"] if p.is_me
+                         else self.theme["fg_text"])
         self.dmg_bar.place_configure(relwidth=_clamp01(dmg_frac))
         if show_heal != self._heal_packed:
             self._heal_packed = show_heal
@@ -1697,22 +2169,34 @@ class SkillColumn:
     healing; bars scale to the column's biggest entry). Rows are shown as a
     prefix of a fixed pool, so pack order is stable."""
 
-    def __init__(self, parent, title, bar_color):
+    def __init__(self, parent, title, bar_color, fonts):
+        self.fonts = fonts
         self.f = tk.Frame(parent, bg=BG_BODY)
-        tk.Label(self.f, text=title, bg=BG_BODY, fg=ACCENT,
-                 font=("Segoe UI", 8, "bold"), anchor="w").pack(fill="x")
+        self.bar_key = "heal" if bar_color == HEAL_BAR else "dmg"
+        self.title_lbl = tk.Label(self.f, text=title, bg=BG_BODY, fg=ACCENT,
+                                  font=self.fonts["ui_sm_b"], anchor="w")
+        self.title_lbl.pack(fill="x")
         self.rows = []
         for _ in range(MAX_SKILL_ROWS):
             rf = tk.Frame(self.f, bg=BG_BODY)
             lbl = tk.Label(rf, text="", bg=BG_BODY, fg=FG_TEXT,
-                           font=("Consolas", 9), anchor="w")
+                           font=self.fonts["mono"], anchor="w")
             lbl.pack(fill="x")
             track = tk.Frame(rf, bg=BG_BAR_TRACK, height=4)
             track.pack(fill="x", pady=(0, 1))
             bar = tk.Frame(track, bg=bar_color, height=4)
             bar.place(relwidth=0.0, relheight=1.0)
-            self.rows.append((rf, lbl, bar))
+            self.rows.append((rf, lbl, bar, track))
         self._shown = 0
+
+    def set_theme(self, t):
+        self.f.config(bg=t["body"])
+        self.title_lbl.config(bg=t["body"], fg=t["accent"])
+        for rf, lbl, bar, track in self.rows:
+            rf.config(bg=t["body"])
+            lbl.config(bg=t["body"], fg=t["fg_text"])
+            track.config(bg=t["track"])
+            bar.config(bg=t[self.bar_key])
 
     def show(self, entries, denom):
         """entries: [(label, total, hits, crits)] sorted desc; denom is the
@@ -1729,7 +2213,7 @@ class SkillColumn:
         for i in range(n):
             label, tot, hits, _crits = entries[i]
             pct = (tot / denom * 100) if denom else 0.0
-            _rf, lbl, bar = self.rows[i]
+            _rf, lbl, bar, _track = self.rows[i]
             lbl.config(text=f"{label[:16]:<16}{int(tot):>8} {pct:>3.0f}% {hits:>3}h")
             bar.place_configure(relwidth=_clamp01(tot / top))
 
