@@ -249,7 +249,8 @@ MINIMAP_STYLE = (
     ("obelisk",  {"fill": "#C48CFF", "r": 3.5, "shape": "square"}),
     ("respawn",  {"fill": "#5FE3C0", "r": 3.0, "shape": "square"}),
     ("chest",    {"fill": "#FF9E3D", "r": 3.5, "shape": "square"}),
-    ("orb",      {"fill": "#52D8F7", "r": 3.5, "shape": "dot"}),
+    ("orb",      {"fill": "#FFD400", "r": 3.6, "shape": "dot",
+                  "ring": "#A24BE0"}),
     ("foe",      {"fill": "#FF5348", "r": 3.0, "shape": "dot"}),
     ("hero",     {"fill": "#5FAEFF", "r": 4.2, "shape": "chevron"}),
 )
@@ -275,7 +276,19 @@ MINIMAP_TIP_MAXLEN = 22
 # States that just mean "normal, still there" — not worth saying out loud.
 # Anything else (Locked, or something we haven't seen) is shown, which is also
 # how an unfamiliar state makes itself known instead of passing as ordinary.
-MINIMAP_PLAIN_STATES = ("Closed", "Enabled", "Idle", "Active")
+MINIMAP_PLAIN_STATES = ()
+
+# Short class tags for the meter. The game's own names come off ent.Unit.kind,
+# which for a hero is its class rather than a creature id.
+CLASS_ABBR = {"Warrior": "War", "Mage": "Mag", "Priest": "Pst", "Rogue": "Rog"}
+
+
+def _class_tag(kind):
+    """(War) for Warrior. Anything unrecognised falls back to its first three
+    letters rather than disappearing — a new class should look odd, not absent."""
+    if not kind:
+        return ""
+    return CLASS_ABBR.get(kind) or kind[:3].title()
 
 MINIMAP_LABELS = {
     "hero": "Player", "foe": "Enemy", "chest": "Chest", "orb": "Orb",
@@ -989,12 +1002,21 @@ class WorldSnapshot:
         # can't, since that's only set when someone lands a hit.
         self.party = frozenset()
         self.local = None
+        # name -> class, harvested from the sweep. The meter's own rows come
+        # from damage events, which carry no class, so this is where it lives.
+        self.classes = {}
 
     def update(self, payload):
         with self._lock:
             self.me = payload.get("me") or self.me
             self.ents = payload.get("ents") or []
             self.stamp = time.monotonic()
+            for e in self.ents:
+                if e.get("c") == "hero" and e.get("n") and e.get("k"):
+                    # Kept rather than replaced wholesale: a player who walks
+                    # out of range shouldn't lose their tag on the meter while
+                    # their damage is still on it.
+                    self.classes[e["n"]] = e["k"]
 
     def set_hero(self, name, party):
         with self._lock:
@@ -1011,6 +1033,10 @@ class WorldSnapshot:
     def who(self):
         with self._lock:
             return self.local, self.party
+
+    def class_of(self, name):
+        with self._lock:
+            return self.classes.get(name)
 
     def fresh(self, max_age=2.0):
         with self._lock:
@@ -2031,7 +2057,7 @@ class Overlay:
         self.root.minsize(MIN_W["meter"], 0)
 
     def _meter_cols_text(self):
-        head = f"  #  {'NAME':<12}{'DMG':>9} {'DPS':>6} {'%':>4}"
+        head = f"  #  {'NAME':<17}{'DMG':>9} {'DPS':>6} {'%':>4}"
         return head + (f"{'HEAL':>9}" if self._show_heal else "")
 
     def _build_detail(self):
@@ -2655,6 +2681,14 @@ class Overlay:
                 fill=fill, outline=edge or "", width=1)
             return
         if shape in ("dot", "chevron"):
+            # `ring` is a second colour around the dot, for markers the game
+            # itself gives two — the orbs are a yellow core in a purple glow.
+            ring = style.get("ring")
+            if ring:
+                rr = r + 1.6 * self._scales["minimap"]
+                c.create_oval(x - rr, y - rr, x + rr, y + rr,
+                              outline=ring, fill="",
+                              width=max(1, int(round(self._scales["minimap"] * 2))))
             c.create_oval(x - r, y - r, x + r, y + r, fill=fill, outline="")
         elif shape == "square":
             c.create_rectangle(x - r, y - r, x + r, y + r, fill=fill, outline="")
@@ -3777,7 +3811,8 @@ class Overlay:
                 row.show(i + 1, p, dps, pct, focused=(focus == p.name),
                          dmg_frac=p.total / top_dmg,
                          heal_frac=p.heal_total / top_heal,
-                         show_heal=self._show_heal)
+                         show_heal=self._show_heal,
+                         cls_tag=_class_tag(self.world.class_of(p.name)))
             else:
                 row.hide()
 
@@ -3891,14 +3926,20 @@ class PlayerRow:
         self.heal_bar.config(bg=t["heal"])
 
     def show(self, rank, p, dps, pct, focused, dmg_frac, heal_frac,
-             show_heal=True):
+             show_heal=True, cls_tag=""):
         if not self._packed:
             self.f.pack(fill="x", pady=1)
             self._packed = True
         self._name = p.name
         tag = "▸ " if focused else "  "
         me = "*" if p.is_me else " "
-        line = (f"{tag}{rank}.{me}{p.name[:12]:<12}{int(p.total):>9} "
+        # Name and class share one column. The class is what tells you whether
+        # the number next to it is good — a Priest at the bottom of a damage
+        # meter is doing their job.
+        who = p.name[:11]
+        if cls_tag:
+            who = f"{who} ({cls_tag})"
+        line = (f"{tag}{rank}.{me}{who[:17]:<17}{int(p.total):>9} "
                 f"{dps:>6.0f} {pct:>3.0f}%")
         if show_heal:
             line += f"{int(p.heal_total):>9}"

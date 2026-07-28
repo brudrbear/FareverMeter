@@ -483,6 +483,13 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
                 // reads — one source of truth, not two.
                 const nm = hlStr(e.add(OFF.Hero.name).readPointer());
                 if (nm) ent.n = nm;
+                // A hero's Unit.kind is its class — "Warrior", "Mage". Same
+                // field that gives a foe its creature id, which is why it
+                // costs nothing extra to read.
+                if (OFF.Unit) {
+                    const cl = hlStr(e.add(OFF.Unit.kind).readPointer());
+                    if (cl) ent.k = cl;
+                }
                 // ...and their facing, so they can be drawn as chevrons that
                 // point where they're going rather than as anonymous dots.
                 ent.r = Math.round(
@@ -507,10 +514,16 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
                     // filtered on, so the hover line can show it and an
                     // unfamiliar value is visible rather than invisible.
                     const st = hlStr(e.add(OFF.Element.stateId).readPointer());
-                    if (st) {
-                        if (SPENT_STATES[st]) continue;   // opened / collected
-                        ent.s = st;
-                    }
+                    const vis = hlStr(
+                        e.add(OFF.Element.currentVisualState).readPointer());
+                    // BOTH are checked, because they don't agree and neither
+                    // alone is enough. A collected orb keeps stateId
+                    // "Enabled" and flips currentVisualState to "Disabled" —
+                    // measured by diffing an orb's memory through a pickup,
+                    // after guessing at stateId got it wrong.
+                    if (SPENT_STATES[st] || SPENT_STATES[vis]) continue;
+                    if (st) ent.s = st;
+                    if (vis && vis !== st) ent.v = vis;
                     const k = elemKind ||
                         hlStr(e.add(OFF.Element.kind).readPointer());
                     if (k) ent.k = k;

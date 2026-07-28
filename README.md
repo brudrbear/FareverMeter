@@ -145,8 +145,9 @@ meter still works fine.
 
 Two overlay windows appear top-right:
 
-* **Meter** — one line per player, sorted by damage done, with damage / DPS /
-  % / healing-done columns; your row is marked `*`. Under each line sit two
+* **Meter** — one line per player with their class in brackets — `Brodr (War)`,
+  `Snailz (Mag)`, `Ninger (Pst)`, `Goobert (Rog)` — sorted by damage done, with
+  damage / DPS / % / healing-done columns; your row is marked `*`. Under each line sit two
   bars: **blue = damage**, **green = healing**, each scaled against the
   biggest damage/healing number currently on the meter.
 * **Breakdown** — the inspected player's (default: you) per-skill damage and
@@ -252,8 +253,8 @@ finished parse would quietly append live hits to the numbers you were reading.
 A square map of what's around you, drawn from the game's own entity lists:
 **players** (group members ringed blue), **mobs**, **chests**, **orbs**,
 **obelisks**, **respawn points** and **activities**. Opened chests and
-collected orbs drop off the map, and a chest you can't open yet reads
-`Chest · Locked` on hover. Drag it by its header like
+collected orbs drop off the map, and hovering names the state — a chest you
+can't open yet reads `Chest · Locked`. Drag it by its header like
 the other windows; its position is remembered and it has a Show / hide tick.
 
 `Rotating` (the default) turns the map **with the camera**, so the top of the
