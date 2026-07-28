@@ -1,0 +1,15 @@
+{
+  "theme": "Dynamic",
+  "map_mode": "Rotating",
+  "map_rate": "High",
+  "mode": "party",
+  "hide_ooc": false,
+  "ui_scale": 1.0,
+  "show": {
+    "meter": true,
+    "detail": true,
+    "healing": true,
+    "rift": true,
+    "minimap": true
+  }
+}

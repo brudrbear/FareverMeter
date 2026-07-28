@@ -256,8 +256,8 @@ the other windows; its position is remembered and it has a Show / hide tick.
 `Rotating` (the default) turns the map **with the camera**, so the top of the
 map is whatever you're looking at — not where your character happens to be
 pointing, which changes constantly as it turns to face things. `Fixed` keeps the
-map still and turns the arrow instead. Two rings mark a third
-and two thirds of the range, which is 120 world units from the centre out.
+map still and turns the arrow instead. The range is 120 world units from the
+centre out.
 
 Other players are drawn as outlined chevrons pointing where they're facing, so
 you can read which way a group is heading; group members get a blue ring.
@@ -268,8 +268,8 @@ cone and centre line show where you're looking.
 The panel is dark on both themes so the markers are the bright thing on it,
 which is easier to read at a glance than icons on a pale background.
 
-**Anything on a different floor is drawn faded**, with a small caret above or
-below it for which way you'd have to go — a mob in the tunnel below you is not
+**Anything on a different floor gets a small caret** above or below it for which
+way you'd have to go, and **players and enemies are dimmed** as well — a mob in the tunnel below you is not
 the same news as one you can walk to, and on a flat map they'd look identical.
 **Enemies more than 60 units up or down are dropped entirely**, since in the
 very vertical zones they can't reach you and there are a lot of them. Chests,
@@ -277,8 +277,13 @@ obelisks and the rest are kept however far above or below they are, because
 those are still somewhere to head for. Pets and summons never appear.
 
 While the game's `Esc` menu is open — the only time you have a cursor —
-**hovering a marker names it** and gives its ground distance and how far up or
-down it is, in the strip along the bottom.
+**hovering a marker rings it in white** and names it in the box under the map,
+with its ground distance and how far up or down it is.
+
+**Your settings are remembered** — theme, minimap mode and refresh, UI scale,
+party/all, and every Show/hide tick. They live in `.meter_settings.json`,
+separately from window positions, so **Reset window positions** doesn't wipe
+them.
 
 It stays visible out of combat, since telling you what's nearby while you're
 travelling is most of the point.

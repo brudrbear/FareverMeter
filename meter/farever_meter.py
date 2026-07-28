@@ -86,6 +86,10 @@ SHIPPED_ANALYSIS = ROOT / "analysis_out"    # read-only: the JSON we ship with
 # bundle isn't (usefully). Seeded from SHIPPED_ANALYSIS on first run.
 ANALYSIS = (_WRITABLE / "analysis_out") if FROZEN else SHIPPED_ANALYSIS
 POSITION_CACHE = _WRITABLE / ".meter_position.json"
+# Settings live apart from window positions on purpose: "Reset window
+# positions" clears that file, and it has no business resetting your theme and
+# your Show/hide ticks along with it.
+SETTINGS_CACHE = _WRITABLE / ".meter_settings.json"
 PARSES_DIR = _WRITABLE / "parses"   # finished-parse images land here (gitignored)
 LOG_FILE = DATA_HOME / "meter.log"
 TARGET_PROCESS = "Farever.exe"
@@ -267,13 +271,11 @@ MINIMAP_ME = "#FFFFFF"          # the player arrow — brightest thing on the ma
 # The view cone out of the player marker. Drawn under everything else and
 # blended toward the panel, so it reads as a hint of where you're looking
 # rather than as another object on the map.
-MINIMAP_CONE_DEG = 30.0         # half-angle
-MINIMAP_CONE_REACH = 0.55       # fraction of the map radius
-# Blended toward the theme's ACCENT, not toward MINIMAP_ME: the player marker
-# is the same colour as the panel body (it reads only by its dark outline), so
-# blending the body toward it produces the body colour and draws nothing.
-MINIMAP_CONE_MIX = 0.10         # wedge — a hint of shading, not a shape
-MINIMAP_CONE_LINE = 0.60        # centre line, which carries the direction
+# The view line, blended toward the theme's ACCENT rather than toward
+# MINIMAP_ME — the player marker is near enough the panel colour that blending
+# toward it draws nothing, which is how the old view cone spent a release
+# invisible.
+MINIMAP_VIEW_LINE = 0.60
 
 # The up/down caret is drawn in whichever of black or white stands out against
 # the panel — black on the Farever body, white on the rift theme's near-black
@@ -1602,6 +1604,12 @@ class Overlay:
         self._rift_box = None      # which palette the box is wearing
         self._rift_seen = False
 
+        # Before any widget exists: the dropdowns and Show/hide ticks are built
+        # from these, so loading afterwards would leave the menu disagreeing
+        # with the state it is supposed to be showing.
+        self._pending_scale = None
+        self._load_settings()
+
         pos = self._load_positions()
         self.root = tk.Tk()
         self._ui_scale = 1.0
@@ -1672,6 +1680,13 @@ class Overlay:
         self._build_minimap()
         self.root.update_idletasks()
         self._place_windows(pos)
+        # A restored scale can only be applied now: it resizes the named fonts,
+        # which every window has already been packed against. The slider is set
+        # from it too, or the menu would show 100% while the UI is at 125.
+        if self._pending_scale and abs(self._pending_scale - 1.0) > 0.001:
+            self._scale_var.set(int(round(self._pending_scale * 100)))
+            self._set_ui_scale(self._pending_scale)
+        self._pending_scale = None
         # The control menu and its hint only exist while the game's escape menu
         # is up; _sync_game_ui maps them in. The parse banner is mapped by parse
         # mode itself, and deliberately answers to nothing else — a countdown
@@ -1802,6 +1817,60 @@ class Overlay:
         l, t, r, _b = self._game_rect()
         w = max(self.hintwin.winfo_reqwidth(), self.hintwin.winfo_width(), 10)
         self.hintwin.geometry(f"+{l + ((r - l) - w) // 2}+{t + TOP_STRIP_HINT}")
+
+    def _load_settings(self):
+        """Read the saved settings, before any widget is built from them.
+
+        Every value is validated against what the build actually offers rather
+        than trusted: a file written by a newer version, or hand-edited, should
+        cost you that one setting and not the meter."""
+        try:
+            data = json.loads(SETTINGS_CACHE.read_text())
+        except Exception:
+            return                      # absent or unreadable => defaults
+        if not isinstance(data, dict):
+            return
+        if data.get("theme") in THEME_MODES:
+            self._theme_mode = data["theme"]
+        if data.get("map_mode") in MINIMAP_MODES:
+            self._map_mode = data["map_mode"]
+        if data.get("map_rate") in MINIMAP_RATE_MS:
+            self._map_rate = data["map_rate"]
+        if data.get("mode") in ("party", "all"):
+            self.mode = data["mode"]
+        if isinstance(data.get("hide_ooc"), bool):
+            self._hide_ooc = data["hide_ooc"]
+        try:
+            scale = float(data.get("ui_scale", 1.0))
+            if UI_SCALE_MIN <= scale * 100 <= UI_SCALE_MAX:
+                self._pending_scale = scale
+        except (TypeError, ValueError):
+            pass
+        show = data.get("show")
+        if isinstance(show, dict):
+            for key, _label in TOGGLEABLE_ELEMENTS:
+                if isinstance(show.get(key), bool):
+                    self._show[key] = show[key]
+            self._shown = dict(self._show)
+
+    def _save_settings(self):
+        """Write the settings out. Called on every change rather than at exit —
+        the meter is normally stopped from the tray or displaced by a newer
+        instance, and neither is a good moment to be doing first-time IO."""
+        try:
+            SETTINGS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            SETTINGS_CACHE.write_text(json.dumps({
+                "theme": self._theme_mode,
+                "map_mode": self._map_mode,
+                "map_rate": self._map_rate,
+                "mode": self.mode,
+                "hide_ooc": self._hide_ooc,
+                "ui_scale": round(self._ui_scale, 3),
+                "show": {k: bool(self._show.get(k, True))
+                         for k, _label in TOGGLEABLE_ELEMENTS},
+            }, indent=2))
+        except OSError as e:
+            print(f"[meter] couldn't save settings: {e}", file=sys.stderr)
 
     def _save_pos(self):
         try:
@@ -2140,20 +2209,31 @@ class Overlay:
                                     highlightthickness=0, bd=0,
                                     width=MINIMAP_SIZE, height=MINIMAP_SIZE)
         self.map_canvas.pack()
-        # Hover readout. Always present rather than appearing on hover, so the
-        # panel doesn't change height under the cursor and shove the map about.
-        self.map_tip = tk.Label(self.map_border, text=MINIMAP_TIP_IDLE,
-                                bg=_lerp_hex(_mb, "#000000", 0.35),
+        # Hover readout: its own box under the map, always present rather than
+        # appearing on hover — otherwise the panel changes height under the
+        # cursor and shoves the map out from under you mid-read.
+        self.map_tipbox = tk.Frame(self.map_border,
+                                   bg=_lerp_hex(_mb, "#FFFFFF", 0.16),
+                                   padx=1, pady=1)
+        self.map_tipbox.pack(fill="x", pady=(3, 0))
+        self.map_tip = tk.Label(self.map_tipbox, text=MINIMAP_TIP_IDLE,
+                                bg=_lerp_hex(_mb, "#000000", 0.30),
                                 fg=_lerp_hex(_mb, "#FFFFFF", 0.55),
-                                font=self.fonts["ui_tiny_i"], anchor="w",
-                                padx=6, pady=2)
+                                font=self.fonts["ui"], anchor="w",
+                                padx=8, pady=5)
         self.map_tip.pack(fill="x")
         # Hit targets from the last draw: (x, y, radius, label, dist, dz).
         # Rebuilt every frame, which is also what keeps it honest — a stale
         # entry would describe something that has already moved.
         self._map_hits = []
+        # Where the pointer is over the canvas, or None. The hit test runs on
+        # every frame off this rather than only on mouse movement, so the ring
+        # and the readout follow an entity as it moves instead of describing
+        # where it used to be while the cursor sits still.
+        self._map_cursor = None
         self.map_canvas.bind("<Motion>", self._on_map_hover)
-        self.map_canvas.bind("<Leave>", lambda _e: self._clear_map_tip())
+        self.map_canvas.bind("<Leave>",
+                             lambda _e: self._clear_map_tip(drop_cursor=True))
         self._bind_drag(self.mapwin, (self.map_header, self.map_title,
                                       self.map_count))
         # Dragging the map body would fight with the click-to-inspect idea if
@@ -2206,20 +2286,7 @@ class Overlay:
         theme = self._theme
         body = theme.get("map_body", BG_BODY)
         c.configure(bg=body)
-        # Rings lifted off the panel rather than taken from the meter's palette,
-        # which is tuned against parchment and vanishes on a dark map.
-        track = _lerp_hex(body, "#FFFFFF", 0.22)
         mez = me.get("z", 0)
-        # Range rings at a third and two thirds, so distances are readable
-        # without a scale bar taking up room.
-        for frac in (0.34, 0.67):
-            r = half * frac
-            c.create_oval(half - r, half - r, half + r, half + r,
-                          outline=track, width=1)
-        # Rings only, no crosshair: the rings carry the distance information on
-        # their own, and in rotating mode a crosshair would have to turn with
-        # the map, which reads as the whole panel wobbling.
-
         # Rotating mode turns the world under a fixed arrow; fixed mode leaves
         # the world alone and turns the arrow instead.
         # Camera first: the map should turn with what you're looking at, not
@@ -2252,7 +2319,7 @@ class Overlay:
         # be misleading. Group members are marked with a ring instead.
         local, roster = self.world.who()
 
-        self._draw_view_cone(c, half, me_dir[0], me_dir[1], body)
+        self._draw_view_line(c, half, me_dir[0], me_dir[1], body)
 
         drawn = 0
         hits = []
@@ -2270,11 +2337,15 @@ class Overlay:
                 # The local player is drawn last, as an arrow, not a dot.
                 if cat == "hero" and e.get("n") and e["n"] == local:
                     continue
-                # Faded toward the background rather than hidden when it's on
-                # another floor: still there, but visibly not reachable.
+                # Off-level. Everything gets the up/down caret for it, but only
+                # players and enemies are dimmed: those matter because they can
+                # reach you, so "not on your floor" changes what they mean. A
+                # chest or obelisk is a place to go either way, and fading it
+                # just makes the thing you're navigating to harder to see.
                 far = abs(e.get("z", mez) - mez) > MINIMAP_Z_FADE
+                fade = far and cat in ("hero", "foe")
                 fill = style["fill"]
-                if far:
+                if fade:
                     fill = _lerp_hex(body, fill, MINIMAP_Z_DIM)
                 # Other players point where they're facing. In rotating mode
                 # that has to be taken relative to the camera, or everyone would
@@ -2285,7 +2356,7 @@ class Overlay:
                                                  rot is not None)
                 # Outlined against the panel, not black: on the rift theme a
                 # hard black edge on a dark body reads as a hole.
-                edge = _lerp_hex(body, BG_BORDER, 0.35 if far else 0.8)
+                edge = _lerp_hex(body, BG_BORDER, 0.35 if fade else 0.8)
                 self._map_glyph(c, x, y, r, style, fill, facing, edge)
                 if far:
                     self._map_z_marker(c, x, y, r, e.get("z", mez) - mez,
@@ -2300,7 +2371,7 @@ class Overlay:
                     # make a grouped player read as a different kind of thing.
                     rr = r + 2.5 * self._ui_scale
                     ring = (_lerp_hex(body, MINIMAP_PARTY_RING, MINIMAP_Z_DIM)
-                            if far else MINIMAP_PARTY_RING)
+                            if fade else MINIMAP_PARTY_RING)
                     c.create_oval(x - rr, y - rr, x + rr, y + rr,
                                   outline=ring, width=2)
                 drawn += 1
@@ -2308,6 +2379,13 @@ class Overlay:
         self._draw_me_arrow(c, half, me_dir[0], me_dir[1])
         self.map_count.config(text=f"{drawn}  ·  {int(self._map_range)}u")
         self._map_hits = hits
+        # Last, so the ring sits over everything including the player marker.
+        hit = self._update_map_tip()
+        if hit is not None:
+            hx, hy, hr = hit[0], hit[1], hit[2]
+            rr = hr + 4.0 * self._ui_scale
+            c.create_oval(hx - rr, hy - rr, hx + rr, hy + rr,
+                          outline="#FFFFFF", width=max(1, int(round(self._ui_scale * 2))))
 
     def _facing_screen(self, world_angle, heading, rotating):
         """A world heading as a screen-space unit vector.
@@ -2325,22 +2403,10 @@ class Overlay:
         return (MINIMAP_MIRROR_X * math.cos(world_angle),
                 -math.sin(world_angle))
 
-    def _draw_view_cone(self, c, half, dx, dy, body):
-        """A wedge and centre line out of the player marker, showing where the
-        character is looking. Drawn before the entities so it never hides one."""
-        reach = half * MINIMAP_CONE_REACH
-        spread = math.radians(MINIMAP_CONE_DEG)
-        base = math.atan2(dy, dx)
-        pts = [half, half]
-        # A few segments rather than a flat-ended triangle, so the far edge is
-        # curved like a real field of view.
-        steps = 8
-        for i in range(steps + 1):
-            a = base - spread + (2 * spread) * i / steps
-            pts += [half + math.cos(a) * reach, half + math.sin(a) * reach]
+    def _draw_view_line(self, c, half, dx, dy, body):
+        """A line out of the player marker to the edge of the panel, showing
+        where you're looking. Drawn before the entities so it never hides one."""
         accent = self._theme.get("accent", ACCENT)
-        c.create_polygon(*pts, fill=_lerp_hex(body, accent, MINIMAP_CONE_MIX),
-                         outline="")
         # The centre line runs all the way out to the edge of the panel. The
         # canvas is square, so the ray leaves through whichever side it reaches
         # first — the smaller of the two axis crossings.
@@ -2350,40 +2416,65 @@ class Overlay:
         if abs(dy) > 1e-9:
             far = min(far, half / abs(dy))
         c.create_line(half, half, half + dx * far, half + dy * far,
-                      fill=_lerp_hex(body, accent, MINIMAP_CONE_LINE),
+                      fill=_lerp_hex(body, accent, MINIMAP_VIEW_LINE),
                       width=max(1, int(self._ui_scale)))
 
     def _on_map_hover(self, event):
-        """Name whatever is under the cursor, and say how far away it is.
+        """Only reachable while the game's escape menu is open, because that's
+        the only time the overlay isn't click-through — which is also the only
+        time you have a cursor to hover with, so the two line up."""
+        self._map_cursor = (event.x, event.y)
+        self._update_map_tip()
 
-        Only reachable while the game's escape menu is open, because that's the
-        only time the overlay isn't click-through — which is also the only time
-        you have a cursor to hover with, so the two line up."""
+    def _map_hover_hit(self):
+        """The marker under the cursor, or None. Nearest wins, so a crowd
+        resolves to the one you're actually pointing at."""
+        if self._map_cursor is None:
+            return None
+        cx, cy = self._map_cursor
         best, best_d2 = None, None
         slack = MINIMAP_TIP_RADIUS * self._ui_scale
-        for hx, hy, r, cat, name, dist, dz in self._map_hits:
+        for hit in self._map_hits:
+            hx, hy, r = hit[0], hit[1], hit[2]
             reach = max(r, slack)
-            d2 = (event.x - hx) ** 2 + (event.y - hy) ** 2
+            d2 = (cx - hx) ** 2 + (cy - hy) ** 2
             if d2 <= reach * reach and (best_d2 is None or d2 < best_d2):
-                best, best_d2 = (cat, name, dist, dz), d2
-        if best is None:
+                best, best_d2 = hit, d2
+        return best
+
+    def _update_map_tip(self):
+        """Name whatever is under the cursor and say how far away it is.
+        Returns the hit so the draw pass can ring it."""
+        hit = self._map_hover_hit()
+        if hit is None:
             self._clear_map_tip()
-            return
-        cat, name, dist, dz = best
+            return None
+        _hx, _hy, _r, cat, name, dist, dz = hit
         label = name or MINIMAP_LABELS.get(cat, cat.title())
         # Ground distance and height are reported separately on purpose: a
         # chest 8 units away and 40 below you is not 8 units away in any sense
         # that helps, and one combined number would hide exactly that.
         updown = "level" if abs(dz) < 1 else (f"{abs(dz):.0f} up" if dz > 0
                                               else f"{abs(dz):.0f} down")
-        self.map_tip.config(text=f"{label}  ·  {dist:.0f}u away  ·  {updown}",
-                            fg=FG_TEXT)
+        self.map_tip.config(text=f"{label}   ·   {dist:.0f}u away   ·   {updown}",
+                            fg=self._map_ink(0.95))
+        return hit
 
-    def _clear_map_tip(self):
+    def _clear_map_tip(self, drop_cursor=False):
+        if drop_cursor:
+            self._map_cursor = None
         try:
-            self.map_tip.config(text=MINIMAP_TIP_IDLE, fg=FG_DIM)
+            self.map_tip.config(text=MINIMAP_TIP_IDLE, fg=self._map_ink(0.5))
         except tk.TclError:
             pass
+
+    def _map_ink(self, amount):
+        """Text for the map panel, lifted off its background by `amount`.
+
+        Derived rather than named, because the panel is dark on both themes now
+        and the meter's own FG_TEXT is a brown picked for parchment — which is
+        how the hover line ended up dark-on-dark."""
+        return _lerp_hex(self._theme.get("map_body", BG_BODY), "#FFFFFF", amount)
 
     def _map_glyph(self, c, x, y, r, style, fill, facing=None, edge=None):
         shape = style["shape"]
@@ -3050,6 +3141,7 @@ class Overlay:
         """Show/hide one overlay element. The control menu itself is never in
         TOGGLEABLE_ELEMENTS — it's how you get the others back."""
         self._show[key] = not self._show[key]
+        self._save_settings()
         self._refresh_visibility()
 
     def _on_scale_pick(self, _event=None):
@@ -3065,6 +3157,7 @@ class Overlay:
         for key, (_family, size, *_style) in FONT_SPECS.items():
             self.fonts[key].configure(size=max(6, round(size * factor)))
         self._parse_text = None          # force the parse banner to re-measure
+        self._save_settings()
         self._draw_hint()
         # Pixel floors and wrap widths don't come along for free.
         for win, key in ((self.root, "meter"), (self.detail, "detail"),
@@ -3081,7 +3174,11 @@ class Overlay:
 
     def _on_map_mode_pick(self, value):
         # Queued for the same reason as the theme pick: the draw pass reads it.
-        self._enqueue(lambda: setattr(self, "_map_mode", value))()
+        self._enqueue(lambda: self._set_map_mode(value))()
+
+    def _set_map_mode(self, value):
+        self._map_mode = value
+        self._save_settings()
 
     def _on_map_rate_pick(self, value):
         self._enqueue(lambda: self._set_map_rate(value))()
@@ -3094,6 +3191,7 @@ class Overlay:
         if value not in MINIMAP_RATE_MS:
             return
         self._map_rate = value
+        self._save_settings()
         ms = MINIMAP_RATE_MS[value]
         print(f"[meter] minimap refresh {value} ({ms}ms)", file=sys.stderr)
         try:
@@ -3104,6 +3202,7 @@ class Overlay:
 
     def _toggle_hide_ooc(self):
         self._hide_ooc = not self._hide_ooc
+        self._save_settings()
         self._refresh_visibility()
 
     def _refresh_visibility(self):
@@ -3168,6 +3267,7 @@ class Overlay:
 
     def _set_theme_mode(self, mode):
         self._theme_mode = mode
+        self._save_settings()
 
     def _apply_theme(self, t):
         """Repaint the meter and breakdown into `t`. Same widget tree either
@@ -3196,7 +3296,8 @@ class Overlay:
         self.map_title.config(bg=t["header"], fg=t["fg_header"])
         self.map_count.config(bg=t["header"], fg=t["fg_header_dim"])
         mb = t.get("map_body", BG_BODY)
-        self.map_tip.config(bg=_lerp_hex(mb, "#000000", 0.35),
+        self.map_tipbox.config(bg=_lerp_hex(mb, "#FFFFFF", 0.16))
+        self.map_tip.config(bg=_lerp_hex(mb, "#000000", 0.30),
                             fg=_lerp_hex(mb, "#FFFFFF", 0.55))
         self.map_canvas.config(bg=mb)
         # Also from the map colour: the meter's brown edge goes muddy against
@@ -3260,6 +3361,7 @@ class Overlay:
 
     def _toggle_mode(self):
         self.mode = "all" if self.mode == "party" else "party"
+        self._save_settings()
         self.focus_player = None
         self.session.reset()
 
