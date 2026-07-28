@@ -259,7 +259,10 @@ MINIMAP_ORDER = [k for k, _ in MINIMAP_STYLE]
 # What the hover strip says with nothing under the cursor. It doubles as the
 # hint that hovering does anything, which is why it isn't blank.
 # Two lines even when idle, so the box never changes height under the cursor.
-MINIMAP_TIP_IDLE = "hover a marker\nfor details"
+# The second line says how to get a cursor at all: the map only takes the mouse
+# once the game has let go of it, which isn't something you'd guess.
+MINIMAP_TIP_IDLE = ("hover a marker for details\n"
+                    "Press L-ALT or ESC to enable free mouse")
 MINIMAP_TIP_RADIUS = 9          # px of slack around a marker, at 100% scale
 # Names are elided rather than allowed to set the panel width. A long one
 # ("Fragrant Garlic Seedling") otherwise stretches the whole minimap sideways
@@ -427,6 +430,10 @@ FONT_SPECS = {
 }
 UI_SCALE_MIN, UI_SCALE_MAX = 75, 175      # percent
 # The independently-scaled window groups, in the order the menu lists them.
+# Wide enough for the longest label in the menu ("Damage meter"), so the label
+# column is uniform and every control lines up under it.
+FIELD_LABEL_CHARS = 13
+
 SCALE_GROUPS = (
     ("meter", "Meter"),
     ("detail", "Breakdown"),
@@ -1186,13 +1193,10 @@ UPDATE = {"latest": None, "url": REPO_URL}
 
 QUIT_LABEL = "Stop the meter"
 
-# What the top of the control menu says about shutting down, which depends on
-# what there is to shut down *with*. Run from a console there's still a window
-# someone can close — force-killing the process before it can unload the hook —
-# so that build keeps the warning. The installed build has no console to close
-# and two proper exits instead, so it gets told where they are.
-SHUTDOWN_WARNING = ("ALWAYS CLOSE FAREVER+ BY CTRL+C "
-                    "NOT BY CLOSING THE COMMAND WINDOW")
+# The top line of the control menu. It used to shout about Ctrl+C, from when
+# the only way to run the meter was a console you could close out from under
+# it. The shipped build has no console and two proper exits, so the line just
+# says where they are — and doubles as the slot the update notice takes over.
 SHUTDOWN_HINT = ("To stop the meter, use the Stop button below — or right-click "
                  "the Farever+ icon in the notification area by the clock.")
 
@@ -2087,17 +2091,11 @@ class Overlay:
         body = tk.Frame(border, bg=BG_BODY, padx=8, pady=8)
         body.pack(fill="both", expand=True)
 
-        # Top of the menu, above everything. From a console this is a warning:
-        # closing that window kills the process before it can unload the hook and
-        # detach, which is what destabilises the game across relaunches, and it's
-        # the one way to break things that looks like a normal way to quit. From
-        # the installed build there's no such window, so the same line is used to
-        # point at the two clean exits instead.
-        self.warn_lbl = tk.Label(body,
-                                 text=SHUTDOWN_WARNING if HAS_CONSOLE
-                                 else SHUTDOWN_HINT,
-                                 bg=BG_BODY,
-                                 fg=FG_WARN if HAS_CONSOLE else FG_DIM,
+        # Top of the menu: how to stop the meter, quietly. Both exits unload
+        # the hook and detach, so there's nothing left to warn about — and when
+        # a new version is out this line becomes the notice for it.
+        self.warn_lbl = tk.Label(body, text=SHUTDOWN_HINT,
+                                 bg=BG_BODY, fg=FG_DIM,
                                  font=self.fonts_m["ui_sm_b"],
                                  anchor="w", justify="left",
                                  wraplength=WARN_WRAP)
@@ -2138,11 +2136,21 @@ class Overlay:
             return b
 
         def field(parent, label):
-            """A labelled control row, for the things that aren't buttons."""
+            """A labelled control row, for the things that aren't buttons.
+
+            The label column is a fixed width so every control in it starts at
+            the same x and ends up the same length. Left to size themselves,
+            "Meter" and "Breakdown" hand their sliders different amounts of
+            leftover row, and four sliders that should read identically at 100%
+            end up visibly different lengths with their handles in different
+            places."""
             row = tk.Frame(parent, bg=BG_BODY)
             row.pack(fill="x", pady=2)
+            # `width` on a Label is authoritative — it's a requested size in
+            # average character widths, and longer text doesn't grow it.
             tk.Label(row, text=label, bg=BG_BODY, fg=FG_TEXT,
-                     font=self.fonts_m["ui"], anchor="w", padx=2).pack(side="left")
+                     font=self.fonts_m["ui"], anchor="w", padx=2,
+                     width=FIELD_LABEL_CHARS).pack(side="left")
             return row
 
         # Commands are queued rather than run inline: they mutate overlay state

@@ -206,8 +206,7 @@ again.
 
 Above the buttons sits a single line of text: normally a reminder of how to stop
 the meter, replaced by a clickable notice when a [newer version](#updating) is
-out. (From a source run it's the `Ctrl+C` warning instead, since that build
-still has a console window someone can close.)
+out.
 
 ### 60s Parse Mode
 
