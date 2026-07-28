@@ -287,9 +287,20 @@ MINIMAP_PARTY_RING = "#57C7FF"  # the ring that marks a group member
 # which is why it never quite made sense to look at: on a mirrored map every
 # turn goes the wrong way and no single fix ever makes it right.
 #
-# Worth stating plainly, because it reads as a bug and isn't: a rotating
-# minimap ALWAYS counter-rotates. Turn the camera left and the world on the map
-# sweeps right, because the map is showing the world relative to your view.
+# The game's ground plane is the opposite handedness to the screen's, so with
+# forward drawn up, the player's right-hand side comes out on the LEFT. Found
+# the honest way: an enemy standing to the left was being drawn to the right.
+#
+# Mirroring the horizontal axis once, here, is the whole fix. It is also what
+# the two earlier "corrections" in this file were flailing at — a yaw sign flip
+# and a half-turn offset, both of which rotate rather than mirror, and no
+# amount of rotation turns a mirrored map the right way round. That is why
+# every fix moved the problem somewhere else instead of ending it.
+#
+# One consequence worth noting, since it reads as a bug either way: on the
+# correct map, turning the camera left sweeps the world left. The map shows the
+# world relative to you, and both axes have to agree about which way that is.
+MINIMAP_MIRROR_X = -1.0
 
 # A flat map can't tell you that a mob is on the gantry above you or in the
 # tunnel below, and those are very different news. Anything further than this
@@ -2148,7 +2159,7 @@ class Overlay:
         if rot is not None:
             ca, sa = rot
             dx, dy = dx * sa - dy * ca, dx * ca + dy * sa
-        return half + dx * scale, half - dy * scale
+        return half + MINIMAP_MIRROR_X * dx * scale, half - dy * scale
 
     def _draw_minimap(self):
         if not self._shown.get("minimap"):
@@ -2211,7 +2222,7 @@ class Overlay:
         # rotating mode that is the top of the map by construction, so it's a
         # constant rather than a rotation that has to agree with one.
         me_dir = ((0.0, -1.0) if rot is not None
-                  else (math.cos(heading), -math.sin(heading)))
+                  else self._facing_screen(heading, heading, False))
 
         # The minimap always shows everyone nearby, regardless of the meter's
         # party/all mode — a map that hid the player standing next to you would
@@ -2283,10 +2294,13 @@ class Overlay:
         relative to the camera, because the map itself has already turned by
         that much — otherwise everything would keep its world heading while the
         ground moved under it."""
+        # Mirrored on the same axis as the positions, or a marker would point
+        # somewhere the map disagrees with.
         if rotating:
             d = world_angle - heading
-            return (-math.sin(d), -math.cos(d))
-        return (math.cos(world_angle), -math.sin(world_angle))
+            return (MINIMAP_MIRROR_X * -math.sin(d), -math.cos(d))
+        return (MINIMAP_MIRROR_X * math.cos(world_angle),
+                -math.sin(world_angle))
 
     def _draw_view_cone(self, c, half, dx, dy, body):
         """A wedge and centre line out of the player marker, showing where the
