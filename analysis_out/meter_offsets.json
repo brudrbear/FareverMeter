@@ -60,6 +60,11 @@
   "Activity": {
     "kind": 464
   },
+  "Element": {
+    "kind": 616,
+    "stateId": 656,
+    "currentVisualState": 672
+  },
   "Camera": {
     "direction": 208,
     "curDirection": 256,

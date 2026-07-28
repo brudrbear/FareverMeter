@@ -406,6 +406,20 @@ const SWEEP_CLASS = {
     "ent.interactible.RespawnPoint": "respawn",
 };
 
+// The collectible orbs are NOT ent.interactible.InstanceOrb — that class
+// exists but isn't what's scattered around the world. They're plain
+// ent.Element with an id like "RedOrb_World_140", which the allowlist
+// otherwise skips as scenery, since most ent.Element is exactly that.
+const ORB_KIND = /orb/i;
+
+// ent.Element.stateId, measured on the live game:
+//   chests  Closed | Locked        obelisks  Closed        orbs  Enabled
+// A state on this list means the thing is spent and not worth drawing. Kept as
+// a list rather than "anything but the known-good value", so an unfamiliar
+// state still shows on the map instead of silently vanishing from it.
+const SPENT_STATES = { "Opened": 1, "Disabled": 1, "Collected": 1,
+                       "Used": 1, "Empty": 1, "Done": 1 };
+
 // Runtime type names are resolved through typeName(), which caches by type
 // pointer — a zone holds hundreds of entities but only a couple of dozen
 // distinct classes, so classification is a map hit after the first of each.
@@ -434,6 +448,11 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
         // prefix and only in `entities`, where they actually live.
         if (!cat && isEntities && cls.lastIndexOf("st.activity.", 0) === 0)
             cat = "activity";
+        let elemKind = null;
+        if (!cat && cls === "ent.Element" && OFF.Element) {
+            elemKind = hlStr(e.add(OFF.Element.kind).readPointer());
+            if (elemKind && ORB_KIND.test(elemKind)) cat = "orb";
+        }
         if (!cat) continue;
         try {
             if (e.add(OFF.State.removed).readU8()) continue;   // despawned
@@ -480,11 +499,22 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
                     else queueUnitName(kind, e);
                 }
             } else if (cat !== "activity") {
-                // Reported, not filtered on: whether a looted chest clears this
-                // flag or leaves the array is a display decision, and keeping it
-                // here means finding out doesn't change the hook.
                 try { ent.e = e.add(OFF.Interactible.enabled).readU8() ? 1 : 0; }
                 catch (x) {}
+                if (OFF.Element) {
+                    // The state machine is what actually says whether a chest
+                    // is still shut or an orb still there. Sent as well as
+                    // filtered on, so the hover line can show it and an
+                    // unfamiliar value is visible rather than invisible.
+                    const st = hlStr(e.add(OFF.Element.stateId).readPointer());
+                    if (st) {
+                        if (SPENT_STATES[st]) continue;   // opened / collected
+                        ent.s = st;
+                    }
+                    const k = elemKind ||
+                        hlStr(e.add(OFF.Element.kind).readPointer());
+                    if (k) ent.k = k;
+                }
             }
             out.push(ent);
         } catch (x) {}

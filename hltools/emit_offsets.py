@@ -51,6 +51,7 @@ def main():
     arrobj = offs("hl.types.ArrayObj")
     foe = offs("ent.Foe")
     unit = offs("ent.Unit")
+    elem = offs("ent.Element")
     cam = offs("client.BaseCamera")
 
     # skill display-name chain: BaseSkill.inf (virtual #963) -> texts (#973) -> name
@@ -102,6 +103,13 @@ def main():
         "Interactible": {"enabled": inter["enabled"][0],
                          "isOffScreen": inter["isOffScreen"][0]},
         "Activity": {"kind": activity["kind"][0]},
+        # Every placed world object is an ent.Element. `kind` is its id
+        # ("Z1_World_Greenlands_WorldChest_60", "RedOrb_World_140") and
+        # `stateId` its state machine — measured: chests read Closed or Locked,
+        # obelisks Closed, orbs Enabled. currentVisualState is NOT the same
+        # thing: it reads "Opened" on chests that are plainly shut.
+        "Element": {"kind": elem["kind"][0], "stateId": elem["stateId"][0],
+                    "currentVisualState": elem["currentVisualState"][0]},
         # curDirection is the camera yaw actually being rendered; `direction`
         # is the value it is easing towards. Following the eased one would make
         # the minimap lead the view it is supposed to match.

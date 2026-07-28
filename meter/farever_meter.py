@@ -272,6 +272,11 @@ MINIMAP_TIP_MAXLEN = 22
 
 # Hover labels. Separate from the style table because these are prose for a
 # human, not drawing instructions.
+# States that just mean "normal, still there" — not worth saying out loud.
+# Anything else (Locked, or something we haven't seen) is shown, which is also
+# how an unfamiliar state makes itself known instead of passing as ordinary.
+MINIMAP_PLAIN_STATES = ("Closed", "Enabled", "Idle", "Active")
+
 MINIMAP_LABELS = {
     "hero": "Player", "foe": "Enemy", "chest": "Chest", "orb": "Orb",
     "obelisk": "Obelisk", "respawn": "Respawn point", "activity": "Activity",
@@ -1996,7 +2001,8 @@ class Overlay:
         self.timer_lbl = tk.Label(self.header, text="", bg=BG_HEADER, fg=FG_HEADER,
                                   font=self.fonts["mono"], padx=8)
         self.timer_lbl.pack(side="right")
-        self._bind_drag(self.root, (self.header, self.title_lbl))
+        self._bind_drag(self.root, (self.header, self.title_lbl),
+                        unlocked=self._mouse_available)
 
         self.m_body = body = tk.Frame(border, bg=BG_BODY, padx=8, pady=6)
         body.pack(fill="both", expand=True)
@@ -2357,7 +2363,7 @@ class Overlay:
                              lambda _e: self._clear_map_tip(drop_cursor=True))
         self._bind_drag(self.mapwin, (self.map_header, self.map_title,
                                       self.map_count),
-                        unlocked=self._map_interactive)
+                        unlocked=self._mouse_available)
         # Dragging the map body would fight with the click-to-inspect idea if
         # that ever lands, so only the header moves it — same as the meter.
         self._map_range = MINIMAP_RANGE
@@ -2609,7 +2615,13 @@ class Overlay:
             # the internal id, prettified, so a foe is never just "Enemy".
             nm = (name or "").strip() or _pretty_id(e.get("k") or "")
             return f"{self._elide(nm)} (Enemy)" if nm else "Enemy"
-        return MINIMAP_LABELS.get(cat, cat.title())
+        label = MINIMAP_LABELS.get(cat, cat.title())
+        state = (e.get("s") or "").strip()
+        if state and state not in MINIMAP_PLAIN_STATES:
+            # e.g. "Chest · Locked" — the bit you'd want to know before walking
+            # over to it.
+            label = f"{label} · {state}"
+        return label
 
     def _clear_map_tip(self, drop_cursor=False):
         if drop_cursor:
@@ -3139,11 +3151,14 @@ class Overlay:
         except Exception:
             return False
 
-    def _map_interactive(self):
-        """The minimap takes the mouse whenever there is one to take — the
-        escape menu, or Alt. Deliberately narrower than the overlay-wide
-        unlock: freeing the cursor shouldn't summon the control menu over the
-        game, it should just let you point at the map."""
+    def _mouse_available(self):
+        """There's a pointer to use: the escape menu is open, or the game has
+        released the mouse (Alt).
+
+        Deliberately narrower than the overlay-wide unlock — freeing the cursor
+        lets you point at things, it doesn't summon the control menu over the
+        game. Only the windows you'd want to click answer to it: the meter, for
+        picking a player, and the minimap."""
         return self._menu_unlock or self._cursor_free
 
     def _refocus_game(self):
@@ -3170,7 +3185,9 @@ class Overlay:
             pass
 
     def _on_row_click(self, name):
-        if not self._is_locked() and name:
+        # Same rule as the window's click-through, or the row would be
+        # clickable-looking and inert while the mouse is free.
+        if self._mouse_available() and name:
             self.focus_player = name
 
     def _set_win_clickthrough(self, win, enabled):
@@ -3212,11 +3229,14 @@ class Overlay:
         # always-on-top window over the game, so Windows draws a cursor over it
         # even while the game has the pointer captured, and a click that lands
         # on it goes to Tk instead of the game.
-        for win in (self.root, self.detail, self.riftwin):
+        for win in (self.detail, self.riftwin):
             self._set_win_clickthrough(win, locked)
-        # The minimap answers to the cursor rather than to the escape menu, so
-        # it can be hovered whenever the game has released the mouse.
-        self._set_win_clickthrough(self.mapwin, not self._map_interactive())
+        # These two answer to the cursor rather than to the escape menu, so they
+        # can be pointed at whenever the game has released the mouse: the meter
+        # to click a player's row, the minimap to hover a marker.
+        pointable = not self._mouse_available()
+        self._set_win_clickthrough(self.root, pointable)
+        self._set_win_clickthrough(self.mapwin, pointable)
         # The control menu is always interactive (it is only ever shown while
         # the cursor is free); the floating hint and parse banner are text over
         # the game and must never take a click.
@@ -3368,11 +3388,20 @@ class Overlay:
         self._parse_text = None          # force the parse banner to re-measure
         self._save_settings()
         self._draw_hint()
-        # Pixel floors and wrap widths don't come along for free.
-        for win, key in ((self.root, "meter"), (self.detail, "detail"),
-                         (self.menu, "menu"), (self.promptwin, "prompt")):
-            win.minsize(int(MIN_W[key] * factor), 0)
-        self.warn_lbl.config(wraplength=int(WARN_WRAP * factor))
+        # Pixel floors and wrap widths don't come along for free — and each
+        # belongs to ITS OWN group's scale, not to whichever slider happened to
+        # move. Applying `factor` to all four made every window jump whenever
+        # any one of them was resized. Recomputed from scratch rather than
+        # patched for the group that changed, so they can't drift apart.
+        for win, key, group_of in ((self.root, "meter", "meter"),
+                                   (self.detail, "detail", "detail"),
+                                   (self.menu, "menu", "menu"),
+                                   # The rift prompt is drawn with the meter's
+                                   # fonts, so it scales with the meter.
+                                   (self.promptwin, "prompt", "meter")):
+            win.minsize(int(MIN_W[key] * self._scales[group_of]), 0)
+        self.warn_lbl.config(
+            wraplength=int(WARN_WRAP * self._scales["menu"]))
         self.root.update_idletasks()
         print(f"[meter] {group} scale {factor:.2f}x", file=sys.stderr)
 

@@ -251,7 +251,9 @@ finished parse would quietly append live hits to the numbers you were reading.
 
 A square map of what's around you, drawn from the game's own entity lists:
 **players** (group members ringed blue), **mobs**, **chests**, **orbs**,
-**obelisks**, **respawn points** and **activities**. Drag it by its header like
+**obelisks**, **respawn points** and **activities**. Opened chests and
+collected orbs drop off the map, and a chest you can't open yet reads
+`Chest · Locked` on hover. Drag it by its header like
 the other windows; its position is remembered and it has a Show / hide tick.
 
 `Rotating` (the default) turns the map **with the camera**, so the top of the
@@ -277,8 +279,9 @@ very vertical zones they can't reach you and there are a lot of them. Chests,
 obelisks and the rest are kept however far above or below they are, because
 those are still somewhere to head for. Pets and summons never appear.
 
-Whenever the game hands the mouse back — **Alt**, or the `Esc` menu —
-**hovering a marker rings it in white** and names it in the box under the map,
+Whenever the game hands the mouse back — **Alt**, or the `Esc` menu — the map
+and the meter both take the pointer: you can **click a player's row** on the
+meter to inspect them, and **hovering a marker rings it in white** and names it in the box under the map,
 with its ground distance and how far up or down it is. Players read as
 `Name (Party)` or `Name (Player)`, and enemies by their actual name —
 `Rice Seedling (Enemy)` — since a name on its own doesn't tell you what
