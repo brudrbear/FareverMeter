@@ -1323,6 +1323,18 @@ class WNDCLASSW(ctypes.Structure):
                 ("lpszClassName", wintypes.LPCWSTR)]
 
 
+class POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+class CURSORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
+                ("hCursor", ctypes.c_void_p), ("ptScreenPos", POINT)]
+
+
+CURSOR_SHOWING = 0x1
+
+
 class GUID(ctypes.Structure):
     _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
                 ("Data3", wintypes.WORD), ("Data4", ctypes.c_byte * 8)]
@@ -1599,6 +1611,7 @@ class Overlay:
         self._map_rate = "High"        # Ultra exists but is opt-in
         self._map_scale = 1.0          # minimap only; independent of UI scale
         self._game_hwnd = None         # cached; re-resolved if it goes stale
+        self._cursor_free = False      # game has released the mouse (Alt, menus)
         self._last_cam = None          # last camera heading seen; see _draw_minimap
         # True while the countdown has nothing to count down to. The window is
         # hidden in that state unless the escape menu is open, so it isn't
@@ -2276,7 +2289,8 @@ class Overlay:
         self.map_canvas.bind("<Leave>",
                              lambda _e: self._clear_map_tip(drop_cursor=True))
         self._bind_drag(self.mapwin, (self.map_header, self.map_title,
-                                      self.map_count))
+                                      self.map_count),
+                        unlocked=self._map_interactive)
         # Dragging the map body would fight with the click-to-inspect idea if
         # that ever lands, so only the header moves it — same as the meter.
         self._map_range = MINIMAP_RANGE
@@ -2989,19 +3003,23 @@ class Overlay:
         (its escape menu). The game's UI state is the only input."""
         return not self._menu_unlock
 
-    def _bind_drag(self, win, widgets):
-        """Drag any of `widgets` to move `win` (while unlocked)."""
+    def _bind_drag(self, win, widgets, unlocked=None):
+        """Drag any of `widgets` to move `win` (while unlocked).
+
+        `unlocked` overrides what counts as unlocked, for windows that don't
+        follow the overlay-wide rule — the minimap answers to the cursor."""
         state = {}
+        free = unlocked or (lambda: not self._is_locked())
 
         def start(e):
-            if self._is_locked():
+            if not free():
                 return
             state["dx"] = e.x_root - win.winfo_x()
             state["dy"] = e.y_root - win.winfo_y()
             state["on"] = True
 
         def move(e):
-            if self._is_locked() or not state.get("on"):
+            if not free() or not state.get("on"):
                 return
             win.geometry(f"+{e.x_root - state['dx']}+{e.y_root - state['dy']}")
 
@@ -3014,6 +3032,42 @@ class Overlay:
             w.bind("<Button-1>", start)
             w.bind("<B1-Motion>", move)
             w.bind("<ButtonRelease-1>", end)
+
+    def _cursor_is_free(self):
+        """Has the game let go of the mouse?
+
+        Farever frees the cursor on Alt, and the overlay should be usable when
+        it does. Detected from the OS cursor being visible rather than from the
+        key: measured, GetAsyncKeyState never sees that Alt — the game takes it
+        — and it behaves as a toggle rather than a hold, so watching the key
+        would have been wrong twice over. Reading the cursor also covers every
+        other way the game hands the mouse back, including its own menus.
+
+        Gated on the game being frontmost, or alt-tabbing away would leave the
+        minimap eating clicks meant for whatever you switched to."""
+        if sys.platform != "win32" or not self.target_pid:
+            return False
+        try:
+            u = ctypes.windll.user32
+            ci = CURSORINFO()
+            ci.cbSize = ctypes.sizeof(CURSORINFO)
+            if not u.GetCursorInfo(ctypes.byref(ci)):
+                return False
+            if not (ci.flags & CURSOR_SHOWING):
+                return False
+            fg = u.GetForegroundWindow()
+            pid = wintypes.DWORD()
+            u.GetWindowThreadProcessId(fg, ctypes.byref(pid))
+            return pid.value == self.target_pid
+        except Exception:
+            return False
+
+    def _map_interactive(self):
+        """The minimap takes the mouse whenever there is one to take — the
+        escape menu, or Alt. Deliberately narrower than the overlay-wide
+        unlock: freeing the cursor shouldn't summon the control menu over the
+        game, it should just let you point at the map."""
+        return self._menu_unlock or self._cursor_free
 
     def _refocus_game(self):
         """Hand keyboard focus back to Farever.
@@ -3081,8 +3135,11 @@ class Overlay:
         # always-on-top window over the game, so Windows draws a cursor over it
         # even while the game has the pointer captured, and a click that lands
         # on it goes to Tk instead of the game.
-        for win in (self.root, self.detail, self.riftwin, self.mapwin):
+        for win in (self.root, self.detail, self.riftwin):
             self._set_win_clickthrough(win, locked)
+        # The minimap answers to the cursor rather than to the escape menu, so
+        # it can be hovered whenever the game has released the mouse.
+        self._set_win_clickthrough(self.mapwin, not self._map_interactive())
         # The control menu is always interactive (it is only ever shown while
         # the cursor is free); the floating hint and parse banner are text over
         # the game and must never take a click.
@@ -3524,6 +3581,14 @@ class Overlay:
     def _refresh(self):
         self._drain()
         self._apply_update_notice()
+        # Cheap (two user32 calls) and only acted on when it changes, so the
+        # click-through style isn't rewritten four times a second.
+        free = self._cursor_is_free()
+        if free != self._cursor_free:
+            self._cursor_free = free
+            self._apply_clickthrough()
+            if not free:
+                self._clear_map_tip(drop_cursor=True)
         # Before the epoch check below: starting a parse resets the session
         # itself, and syncs _last_epoch so that isn't mistaken for the player
         # resetting back out of parse mode.

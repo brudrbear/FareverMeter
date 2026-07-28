@@ -278,12 +278,15 @@ very vertical zones they can't reach you and there are a lot of them. Chests,
 obelisks and the rest are kept however far above or below they are, because
 those are still somewhere to head for. Pets and summons never appear.
 
-While the game's `Esc` menu is open — the only time you have a cursor —
+Whenever the game hands the mouse back — **Alt**, or the `Esc` menu —
 **hovering a marker rings it in white** and names it in the box under the map,
 with its ground distance and how far up or down it is. Players read as
 `Name (Party)` or `Name (Player)`, and enemies by their actual name —
 `Rice Seedling (Enemy)` — since a name on its own doesn't tell you what
-kind of thing you're pointing at.
+kind of thing you're pointing at. You can drag the map by its header then too.
+
+Only the minimap does this. Freeing the mouse with Alt won't put the control
+menu on screen — that still waits for `Esc`.
 
 **Your settings are remembered** — theme, minimap mode and refresh, UI scale,
 party/all, and every Show/hide tick. They live in `.meter_settings.json`,
