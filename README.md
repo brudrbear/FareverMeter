@@ -442,7 +442,9 @@ positions survive it, and survive upgrades.
 ## Running from source
 
 You don't need this to *use* the meter; the installer is the supported route.
-It's here for hacking on it.
+It's here for hacking on it — see **[TESTING.md](TESTING.md)** for how the
+pieces fit together, how to probe the running game, and the field names that
+mean the opposite of what they say.
 
 ```
 pip install frida pillow
