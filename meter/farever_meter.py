@@ -272,6 +272,13 @@ MINIMAP_PARTY_RING = "#57C7FF"  # the ring that marks a group member
 # rotation ever reads backwards again.
 MINIMAP_YAW_SIGN = -1.0
 
+# ...and rotationZ points the opposite way to the model's actual forward, so a
+# marker drawn straight from it comes out facing backwards. Applied to FACINGS
+# ONLY — the player arrow and the other players' chevrons — never to the camera
+# heading that turns the map, which is correct as it stands. Half a turn, so
+# the sign above doesn't matter to it.
+MINIMAP_FACING_OFFSET = math.pi
+
 # A flat map can't tell you that a mob is on the gantry above you or in the
 # tunnel below, and those are very different news. Anything further than this
 # in elevation is drawn faded toward the background rather than hidden, so it
@@ -2247,10 +2254,11 @@ class Overlay:
         relative to the camera, because the map itself has already turned by
         that much — otherwise everything would keep its world heading while the
         ground moved under it."""
+        a = world_angle + MINIMAP_FACING_OFFSET
         if rotating:
-            d = world_angle - heading
+            d = a - heading
             return (-math.sin(d), -math.cos(d))
-        return (math.cos(world_angle), -math.sin(world_angle))
+        return (math.cos(a), -math.sin(a))
 
     def _draw_view_cone(self, c, half, dx, dy, body):
         """A wedge and centre line out of the player marker, showing where the
