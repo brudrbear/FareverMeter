@@ -256,7 +256,10 @@ MINIMAP_STYLE = (
     # will happily bury the one chest you were looking for. The map is for
     # finding things in the world; the people are the part already on screen.
     ("hero",     {"fill": "#5FAEFF", "r": 5.5, "shape": "chevron"}),
-    ("activity", {"fill": "#FFD95E", "r": 4.0, "shape": "diamond"}),
+    # Teal. Close to the respawn point's mint on a colour wheel, which would
+    # matter if they shared a shape — a diamond against a small square is the
+    # thing telling them apart, and this one is bluer and much more saturated.
+    ("activity", {"fill": "#25D0D0", "r": 4.0, "shape": "diamond"}),
     # Half again the size of the rest. An obelisk is a fixed landmark you
     # navigate by rather than something you might walk past, and the monolith
     # silhouette — a tall block with a dark eye — is the one glyph here that
@@ -268,14 +271,45 @@ MINIMAP_STYLE = (
     # learned the legend. Purple enough to sit near the obelisk's lavender, so
     # the two are told apart by SHAPE — a shard against a standing stone.
     ("soulstone", {"fill": "#FF3DC4", "r": 4.6, "shape": "shard"}),
-    ("respawn",  {"fill": "#5FE3C0", "r": 3.0, "shape": "square"}),
+    # Dark blue, but only as dark as the panel allows: the Dark themes draw on
+    # a deep navy, and a respawn point any deeper than this stops being a
+    # marker and becomes a hole in the map. Measured against that body it still
+    # comes out about three times its brightness. Distinct from the players'
+    # light blue by being far darker, and from everything else by shape.
+    ("respawn",  {"fill": "#2B5FD9", "r": 3.0, "shape": "square"}),
+    # A plain square. It briefly had a black cross through it to separate it
+    # from the respawn point, which is also a square — at nine pixels that read
+    # as busy rather than as a chest, and the two are told apart by colour
+    # perfectly well.
     ("chest",    {"fill": "#FF9E3D", "r": 3.5, "shape": "square"}),
     ("orb",      {"fill": "#FFD400", "r": 3.6, "shape": "dot",
                   "ring": "#A24BE0"}),
-    ("foe",      {"fill": "#FF5348", "r": 3.0, "shape": "dot"}),
+    # The smallest thing on the map, and drawn last so it sits on top of
+    # everything. There are far more of these than anything else — a pack is a
+    # dozen dots on one spot — so size is what keeps them from swamping the
+    # markers you navigate by. Hovering one still works: the hit test has its
+    # own slack (MINIMAP_TIP_RADIUS) and doesn't shrink with the dot.
+    ("foe",      {"fill": "#FF5348", "r": 2.4, "shape": "dot"}),
 )
 MINIMAP_STYLE_MAP = dict(MINIMAP_STYLE)
 MINIMAP_ORDER = [k for k, _ in MINIMAP_STYLE]
+
+# The minimap's own show/hide, grouped the way you'd think about them rather
+# than one tick per sweep category: nobody wants orbs without chests.
+#
+# Obelisks, respawn points and soulstones are deliberately absent and always
+# drawn. They're the landmarks you navigate BY — there are a handful in a zone,
+# they never move, and they're the least likely thing anyone wants gone. A tick
+# each would be four more rows of menu for a problem nobody has.
+MINIMAP_FILTERS = (
+    ("collect",    "Collectibles", ("orb", "chest")),
+    ("players",    "Players",      ("hero",)),
+    ("enemies",    "Enemies",      ("foe",)),
+    ("activities", "Activities",   ("activity",)),
+)
+# category -> which tick governs it, built once rather than searched per marker.
+MINIMAP_FILTER_OF = {cat: key for key, _label, cats in MINIMAP_FILTERS
+                     for cat in cats}
 # Every marker on the MAP is drawn this much larger than the table says. One
 # multiplier rather than eight edited radii, so the relative sizes above — which
 # are tuned against each other, not against the panel — survive a resize. The
@@ -471,6 +505,26 @@ MINIMAP_MIRROR_X = -1.0
 # elevation (slopes and ledges), and everything genuinely on another level at
 # 154-173. Anywhere in that gap gives the same answer, so this sits clear of
 # terrain rather than close to it.
+# Smoothing for the game's own streaming churn — see WorldSnapshot._steady.
+# A marker is drawn once it has been present ACROSS this long, which at any
+# refresh rate means at least two sweeps and so never a single-frame flash.
+#
+# 0.25 rather than a round 0.30 because the default sweep is 150ms and 0.30 is
+# exactly two of them: the third sighting then spans the threshold to within
+# float error (measured 0.2999999999999545 >= 0.30 == False) and the marker
+# waits an extra tick. A threshold that lands on a multiple of the tick rate is
+# a coin flip; this one sits between two.
+MARKER_SHOW_SECS = 0.25
+# ...and kept this long after it stops arriving. Sized from the measured
+# dropouts, which ran to 2.1s; under that and the marker still blinks, well
+# over it and a looted chest sits on the map for no reason.
+MARKER_KEEP_SECS = 2.5
+# World units of player movement between sweeps that means "somewhere else
+# entirely" — a teleport, a rift, a zone change. Held markers are wrong rather
+# than late after one of those, so the tracker is dropped. Well above anything
+# running or mounted covers in a sweep, and well below a zone hop.
+MARKER_RESET_JUMP = 300.0
+
 MINIMAP_Z_FADE = 30.0       # world units of elevation before dimming kicks in
 MINIMAP_Z_DIM = 0.4         # how much of the original colour survives
 
@@ -1159,13 +1213,29 @@ class WorldSnapshot:
     Deliberately last-wins rather than accumulating: this is a live picture of
     where things are *now*, and a stale entity is worse than a missing one. The
     hook has already culled to radius and dropped everything not worth drawing,
-    so this just holds what arrived."""
+    so this just holds what arrived.
+
+    ...with one exception, which is what `_steady` below is for. The game's own
+    entity lists churn at distance, and it shows up on the map as markers
+    blinking. Measured over 191 frames (28.7s):
+
+      * five entities — a chest and three orbs in one distant cluster —
+        appeared in a SINGLE frame and were never seen again, and
+      * four distant markers (838-1240u) vanished together for 8 and then 14
+        frames, about 1.2s and 2.1s, before coming back.
+
+    Both are the game streaming, not the sweep: they arrive and leave in
+    clusters, and nothing here can stop it. So the picture is smoothed on the
+    way in — see MARKER_SHOW_SECS and MARKER_KEEP_SECS."""
 
     def __init__(self):
         self._lock = threading.Lock()
         self.me = {"x": 0, "y": 0, "r": 0.0}
         self.ents = []
         self.stamp = 0.0
+        # key -> [entity, first_seen, last_seen]. Only what the game sends is
+        # ever in here; this decides WHEN it's drawn, never what.
+        self._tracked = {}
         # Both come from the hook's `hero` message, which already carries the
         # group roster it reads for the meter's party filter. Reusing it means
         # "who is in my group" has one answer, and it covers group members who
@@ -1177,11 +1247,78 @@ class WorldSnapshot:
         # from damage events, which carry no class, so this is where it lives.
         self.classes = {}
 
+    @staticmethod
+    def _key(e):
+        """A stable identity for an entity across frames, or None to pass it
+        straight through unsmoothed.
+
+        Static things are keyed by where they are — the sweep rounds positions
+        to whole units and scenery doesn't move, so this is exact. Players are
+        keyed by name, which follows them as they run. Foes get no key on
+        purpose: they move, they're unnamed until the CDB lookup lands, and
+        they're the one category where a delay would matter — a mob appearing
+        late is worse than a mob flickering."""
+        cat = e.get("c")
+        if cat == "hero":
+            return ("hero", e.get("n")) if e.get("n") else None
+        if cat == "foe":
+            return None
+        return (cat, e.get("x"), e.get("y"), e.get("z"))
+
+    def _steady(self, ents, now):
+        """The entities worth drawing, given what's been seen recently.
+
+        Two rules, one for each way the game's churn shows up:
+
+        * nothing is drawn until it has been present for MARKER_SHOW_SECS, which
+          is what kills the single-frame flashes, and
+        * something that stops arriving is kept for MARKER_KEEP_SECS, which
+          bridges the multi-second dropouts.
+
+        The cost of the second rule is that a chest you just looted lingers for
+        a moment. That's the right side to err on: the alternative is the map
+        twitching at you while you're trying to read it."""
+        fresh = {}
+        for e in ents:
+            key = self._key(e)
+            if key is None:
+                continue
+            fresh[key] = e
+        # Age out what hasn't been seen in a while, and refresh what has.
+        for key, ent in fresh.items():
+            row = self._tracked.get(key)
+            if row is None:
+                self._tracked[key] = [ent, now, now]
+            else:
+                row[0], row[2] = ent, now
+        for key in [k for k, r in self._tracked.items()
+                    if now - r[2] > MARKER_KEEP_SECS]:
+            del self._tracked[key]
+        out = [e for e in ents if self._key(e) is None]     # foes, unsmoothed
+        for _key, (ent, first, last) in self._tracked.items():
+            # Seen ACROSS at least that long — not "first seen that long ago".
+            # A one-frame flash has last == first and never qualifies; were this
+            # measured against now, the flash would sit in its grace period
+            # quietly ageing until it passed the test, which is the exact
+            # marker this exists to suppress.
+            if last - first >= MARKER_SHOW_SECS:
+                out.append(ent)
+        return out
+
     def update(self, payload):
         with self._lock:
-            self.me = payload.get("me") or self.me
-            self.ents = payload.get("ents") or []
-            self.stamp = time.monotonic()
+            me = payload.get("me") or self.me
+            now = time.monotonic()
+            # A big jump means a teleport, a rift or a zone change, and every
+            # marker being held over from the last place is then wrong rather
+            # than merely late. Cheaper and more reliable than watching for the
+            # events that cause it, since it catches all of them.
+            if math.hypot(me.get("x", 0) - self.me.get("x", 0),
+                          me.get("y", 0) - self.me.get("y", 0)) > MARKER_RESET_JUMP:
+                self._tracked.clear()
+            self.me = me
+            self.ents = self._steady(payload.get("ents") or [], now)
+            self.stamp = now
             for e in self.ents:
                 if e.get("c") == "hero" and e.get("n") and e.get("k"):
                     # Kept rather than replaced wholesale: a player who walks
@@ -1829,6 +1966,8 @@ class Overlay:
         self._quit_armed = False       # the Quit button's second-click window
         self._update_shown = False     # the update notice is applied once
         self._map_mode = MINIMAP_MODES[0]   # "Rotating" — you always face up
+        # Per-category minimap ticks; everything on until told otherwise.
+        self._map_filters = {key: True for key, _label, _cats in MINIMAP_FILTERS}
         self._map_rate = "High"        # Ultra exists but is opt-in
         # One scale per window group. Each window wants a size that suits its
         # job — the meter one that suits reading numbers, the map one that
@@ -2132,6 +2271,13 @@ class Overlay:
             self._map_mode = data["map_mode"]
         if data.get("map_rate") in MINIMAP_RATE_MS:
             self._map_rate = data["map_rate"]
+        # Per-key rather than wholesale, so a file written before a category
+        # existed leaves that one at its default instead of dropping the lot.
+        saved_filters = data.get("map_filters")
+        if isinstance(saved_filters, dict):
+            for key, _label, _cats in MINIMAP_FILTERS:
+                if isinstance(saved_filters.get(key), bool):
+                    self._map_filters[key] = saved_filters[key]
         if data.get("mode") in ("party", "all"):
             self.mode = data["mode"]
         if isinstance(data.get("hide_ooc"), bool):
@@ -2183,6 +2329,8 @@ class Overlay:
                 "theme": self._theme_mode,
                 "map_mode": self._map_mode,
                 "map_rate": self._map_rate,
+                "map_filters": {k: bool(self._map_filters.get(k, True))
+                                for k, _label, _cats in MINIMAP_FILTERS},
                 "mode": self.mode,
                 "hide_ooc": self._hide_ooc,
                 "scales": {g: round(self._scales[g], 3)
@@ -2487,7 +2635,15 @@ class Overlay:
         # choice.
         self.btn_hide_ooc = button(left, self._enqueue(self._toggle_hide_ooc))
 
-        section(right, "ACTIONS", first=True)
+        # Above ACTIONS: it's a setting you leave alone for hours, and the
+        # buttons below it are the ones you came here to press.
+        section(right, "MINIMAP", first=True)
+        self.btn_map_filter = {}
+        for key, label, _cats in MINIMAP_FILTERS:
+            self.btn_map_filter[key] = button(
+                right, self._enqueue(lambda k=key: self._toggle_map_filter(k)))
+
+        section(right, "ACTIONS")
         self.btn_parse = button(right, self._enqueue(self._toggle_parse))
         self.btn_parses = button(right, self._enqueue(self._open_parses))
         self.btn_parses.config(text="Parse Screenshots")
@@ -2677,6 +2833,11 @@ class Overlay:
         for e in ents:
             by_cat.setdefault(e.get("c"), []).append(e)
         for cat in MINIMAP_ORDER:
+            # Whole categories can be ticked off in the control menu. Skipped
+            # here rather than filtered out of the snapshot, because the compass
+            # reads the same snapshot and these ticks are the MAP's.
+            if not self._map_filters.get(MINIMAP_FILTER_OF.get(cat), True):
+                continue
             style = MINIMAP_STYLE_MAP[cat]
             for e in by_cat.get(cat, ()):
                 x, y = self._minimap_px(e.get("x", 0), e.get("y", 0), me,
@@ -3960,6 +4121,12 @@ class Overlay:
             print(f"[meter] couldn't push the refresh rate: {e}",
                   file=sys.stderr)
 
+    def _toggle_map_filter(self, key):
+        """One category group on or off. Nothing to redraw by hand — the map is
+        repainted wholesale on the next tick and reads the ticks as it goes."""
+        self._map_filters[key] = not self._map_filters.get(key, True)
+        self._save_settings()
+
     def _toggle_hide_ooc(self):
         self._hide_ooc = not self._hide_ooc
         self._save_settings()
@@ -4211,6 +4378,10 @@ class Overlay:
         self.btn_heal.config(
             text=("☑  Healing columns" if self._show_heal
                   else "☐  Healing columns"))
+        for key, label, _cats in MINIMAP_FILTERS:
+            on = self._map_filters.get(key, True)
+            self.btn_map_filter[key].config(
+                text=("☑  " if on else "☐  ") + label)
         # A standing setting, so this one shows its state rather than its action.
         self.btn_hide_ooc.config(
             text=("☑  Hide out of combat" if self._hide_ooc

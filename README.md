@@ -207,6 +207,7 @@ again.
 | Show / hide | Damage meter / Breakdown / Rift timer / Minimap | `Show`, `Hide`, or `Show in ESC` — the last keeps it off screen while you play and brings it back with the game's menu |
 | Show / hide | Healing columns | columns inside the meter rather than a window, so it stays a tick |
 | Show / hide | Hide out of combat | fades both windows away a few seconds after the fighting stops |
+| Minimap | Collectibles / Players / Enemies / Activities | what the map draws, by category — orbs and chests share one tick, since nobody wants one without the other. Obelisks, respawn points and soulstones have no tick and are always drawn: they're the landmarks you navigate *by*. The compass isn't affected |
 | Actions | 60s Parse Mode | see below |
 | Actions | Parse Screenshots | opens `parses/` in Explorer (created on the spot if you haven't run one yet) |
 | Reset | Reset encounter data (`Shift+\`) | the same reset the hotkey fires — the label carries the keybind because that's the one you want mid-fight, when the escape menu isn't an option |
@@ -269,6 +270,13 @@ crystal in the world.
 two goes: a chest's `stateId` doesn't change when you loot it (it reads `Closed`
 either way — that means "shut", not "been here"), so what the meter watches is
 the chest's *visual* state, measured by opening one with a probe running.
+
+**Markers settle for a moment before they appear.** The game's entity lists
+churn at distance — things arrive for a single frame, or drop out for a second
+or two and come back — which showed up as icons blinking on the map and
+compass. A marker now waits a quarter-second before it's drawn, and lingers a
+couple of seconds after it stops being reported, so what you see holds still.
+Enemies are exempt: a mob appearing late is worse than a mob flickering.
 
 Also worth knowing: **the game only keeps a handful of chests loaded at a time**
 — four or five, in a zone with 47 of them. So a chest appears on the map as you
