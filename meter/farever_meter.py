@@ -178,12 +178,53 @@ TOGGLEABLE_ELEMENTS = (
     ("detail", "Breakdown"),
     ("healing", "Healing columns"),
     ("rift", "Rift timer"),
+    ("minimap", "Minimap"),
 )
 
 # Elements the out-of-combat rule doesn't touch. The rift countdown is most use
 # exactly when you're standing around between pulls, so hiding it out of combat
-# would hide it for its whole useful life.
-OOC_EXEMPT = ("rift",)
+# would hide it for its whole useful life. The minimap is the same case only
+# more so: its whole job is telling you what's around while you're travelling,
+# which is by definition out of combat.
+OOC_EXEMPT = ("rift", "minimap")
+
+# ---------------------------------------------------------------------------
+# Minimap
+# ---------------------------------------------------------------------------
+# North-up: the map never rotates, and the player is an arrow that turns. It
+# keeps landmarks where you last saw them, which is what makes a minimap worth
+# glancing at, and it costs one arrow rotation instead of transforming every
+# icon each frame.
+MINIMAP_SIZE = 180          # square, in pixels at 100% UI scale
+# World units from centre to edge. Measured against a live fight rather than
+# guessed, because the guess was out by a factor of four: a group and the pack
+# it's fighting sit 1-12 units apart, nearby chests and orbs 10-80, and the
+# next activity several hundred. Anything above ~150 collapses a whole fight
+# into a couple of pixels; much below ~80 loses the interactibles.
+MINIMAP_RANGE = 120
+MINIMAP_TICK_MS = 100       # redraw cadence; the hook feeds us at ~6.7/sec
+
+# The hook culls to 600 units, so the range above can grow without touching it.
+MINIMAP_RANGE_MIN, MINIMAP_RANGE_MAX = 80, 600
+
+# How each category is drawn: colour, radius in pixels, and shape. Kept in one
+# table so the legend, the draw pass and any future re-skin can't disagree.
+# Drawn in list order, so the things you most need to see land on top.
+MINIMAP_STYLE = (
+    ("activity", {"fill": "#E8C15A", "r": 4.0, "shape": "diamond"}),
+    ("obelisk",  {"fill": "#B07BD8", "r": 3.5, "shape": "square"}),
+    ("respawn",  {"fill": "#7FD8C0", "r": 3.0, "shape": "square"}),
+    ("chest",    {"fill": "#E0A33C", "r": 3.5, "shape": "square"}),
+    ("orb",      {"fill": "#6FC9E8", "r": 3.5, "shape": "dot"}),
+    ("foe",      {"fill": "#C0392B", "r": 3.0, "shape": "dot"}),
+    ("hero",     {"fill": "#5279B5", "r": 3.5, "shape": "dot"}),
+)
+MINIMAP_STYLE_MAP = dict(MINIMAP_STYLE)
+MINIMAP_ORDER = [k for k, _ in MINIMAP_STYLE]
+
+MINIMAP_ME = "#F2E1CB"          # the player arrow — brightest thing on the map
+MINIMAP_PARTY_RING = "#57C7FF"  # the ring that marks a group member
+MINIMAP_GRID = "#00000033"
 
 # Rifts open on the hour. The countdown is just the wall clock — reading the
 # game's own world-event schedule turned out to report the running event rather
@@ -790,6 +831,13 @@ class WorldSnapshot:
         self.me = {"x": 0, "y": 0, "r": 0.0}
         self.ents = []
         self.stamp = 0.0
+        # Both come from the hook's `hero` message, which already carries the
+        # group roster it reads for the meter's party filter. Reusing it means
+        # "who is in my group" has one answer, and it covers group members who
+        # haven't dealt damage yet — which the meter's own per-player flag
+        # can't, since that's only set when someone lands a hit.
+        self.party = frozenset()
+        self.local = None
 
     def update(self, payload):
         with self._lock:
@@ -797,11 +845,21 @@ class WorldSnapshot:
             self.ents = payload.get("ents") or []
             self.stamp = time.monotonic()
 
+    def set_hero(self, name, party):
+        with self._lock:
+            if name:
+                self.local = name
+            self.party = frozenset(party or ())
+
     def read(self):
         """A snapshot for the draw pass. Copied under the lock because the
         overlay iterates it on the Tk thread while the hook thread replaces it."""
         with self._lock:
             return self.me, list(self.ents), self.stamp
+
+    def who(self):
+        with self._lock:
+            return self.local, self.party
 
     def fresh(self, max_age=2.0):
         with self._lock:
@@ -1409,8 +1467,10 @@ class Overlay:
         self.promptwin.title("Farever+ Prompt")
         self.riftwin = tk.Toplevel(self.root)
         self.riftwin.title("Farever+ Rift Timer")
+        self.mapwin = tk.Toplevel(self.root)
+        self.mapwin.title("Farever+ Minimap")
         for win in (self.root, self.detail, self.menu, self.hintwin,
-                    self.parsewin, self.promptwin, self.riftwin):
+                    self.parsewin, self.promptwin, self.riftwin, self.mapwin):
             win.overrideredirect(True)
             win.attributes("-topmost", True)
             win.configure(bg=TRANSPARENT_KEY)
@@ -1422,11 +1482,12 @@ class Overlay:
             # rebuilds a toplevel's Windows wrapper as it applies the wm
             # attributes above, and the DWM setting dies with the old hwnd.
             win.bind("<Map>", self._on_map_round, add="+")
-        for win in (self.root, self.detail, self.menu, self.riftwin):
+        for win in (self.root, self.detail, self.menu, self.riftwin,
+                    self.mapwin):
             win.attributes("-alpha", OVERLAY_ALPHA)
         # Keys must match TOGGLEABLE_ELEMENTS.
         self._element_win = {"meter": self.root, "detail": self.detail,
-                             "rift": self.riftwin}
+                             "rift": self.riftwin, "minimap": self.mapwin}
         # Every window that fades: the two toggleable ones, plus the control
         # menu and its hint, which follow the game's escape menu.
         self._fade_win = dict(self._element_win, menu=self.menu,
@@ -1451,6 +1512,7 @@ class Overlay:
         self._build_parse()
         self._build_prompt()
         self._build_rift()
+        self._build_minimap()
         self.root.update_idletasks()
         self._place_windows(pos)
         # The control menu and its hint only exist while the game's escape menu
@@ -1479,7 +1541,7 @@ class Overlay:
             except Exception:
                 return {}
         out = {}
-        for key in ("meter", "detail", "menu", "rift"):
+        for key in ("meter", "detail", "menu", "rift", "minimap"):
             try:
                 out[key] = (int(d[key]["x"]), int(d[key]["y"]))
             except Exception:
@@ -1518,6 +1580,11 @@ class Overlay:
             self.riftwin.geometry(f"+{rw[0]}+{rw[1]}")
         else:
             self._default_rift_pos()
+        mm = pos.get("minimap")
+        if mm and self._pos_visible(*mm):
+            self.mapwin.geometry(f"+{mm[0]}+{mm[1]}")
+        else:
+            self._default_minimap_pos()
         mn = pos.get("menu")
         if mn and self._pos_visible(*mn):
             self.menu.geometry(f"+{mn[0]}+{mn[1]}")
@@ -1546,6 +1613,14 @@ class Overlay:
         l, t, r, _b = self._game_rect()
         w = max(self.riftwin.winfo_reqwidth(), self.riftwin.winfo_width(), 120)
         self.riftwin.geometry(f"+{l + ((r - l) - w) // 2}+{t + TOP_STRIP_RIFT}")
+
+    def _default_minimap_pos(self):
+        """Bottom-left of the game window. The meter stack owns the right side,
+        and a minimap wants a corner it can keep."""
+        self.mapwin.update_idletasks()
+        l, _t, _r, b = self._game_rect()
+        h = max(self.mapwin.winfo_reqheight(), self.mapwin.winfo_height(), 200)
+        self.mapwin.geometry(f"+{l + 24}+{b - h - 24}")
 
     def _default_detail_pos(self):
         # Just below the meter, left-aligned with it. The meter is usually
@@ -1580,6 +1655,8 @@ class Overlay:
                 "menu": {"x": self.menu.winfo_x(), "y": self.menu.winfo_y()},
                 "rift": {"x": self.riftwin.winfo_x(),
                          "y": self.riftwin.winfo_y()},
+                "minimap": {"x": self.mapwin.winfo_x(),
+                            "y": self.mapwin.winfo_y()},
             }))
         except OSError:
             pass
@@ -1846,6 +1923,136 @@ class Overlay:
                       fill=BG_BORDER, anchor="nw")
         c.create_text(pad, pad, text=RESET_HOTKEY_TEXT, font=f,
                       fill=BG_BODY, anchor="nw")
+
+    def _build_minimap(self):
+        """A square, north-up map of what's around you.
+
+        One canvas, redrawn wholesale each tick. That sounds wasteful and isn't:
+        at ~40 entities it's a few dozen canvas items, and tracking item
+        identity across ticks — entities appear, move and despawn constantly —
+        costs more in bookkeeping than it saves in redraws."""
+        self.map_border = tk.Frame(self.mapwin, bg=BG_BORDER, padx=2, pady=2)
+        self.map_border.pack(fill="both", expand=True)
+        self.map_header = tk.Frame(self.map_border, bg=BG_HEADER)
+        self.map_header.pack(fill="x")
+        self.map_title = tk.Label(self.map_header, text="Nearby", bg=BG_HEADER,
+                                  fg=FG_HEADER, font=self.fonts["ui_sm_b"],
+                                  anchor="w", padx=6, pady=2)
+        self.map_title.pack(side="left")
+        self.map_count = tk.Label(self.map_header, text="", bg=BG_HEADER,
+                                  fg=FG_HEADER_DIM, font=self.fonts["ui_tiny_i"],
+                                  anchor="e", padx=6, pady=2)
+        self.map_count.pack(side="right")
+        self.map_canvas = tk.Canvas(self.map_border, bg=BG_BODY,
+                                    highlightthickness=0, bd=0,
+                                    width=MINIMAP_SIZE, height=MINIMAP_SIZE)
+        self.map_canvas.pack()
+        self._bind_drag(self.mapwin, (self.map_header, self.map_title,
+                                      self.map_count))
+        # Dragging the map body would fight with the click-to-inspect idea if
+        # that ever lands, so only the header moves it — same as the meter.
+        self._map_range = MINIMAP_RANGE
+
+    def _minimap_px(self, ex, ey, me, half, scale):
+        """World -> canvas. North-up, so this is a translate and a scale.
+
+        The game's +y is drawn as up, which means the canvas y is negated: Tk's
+        y grows downward and the world's does not."""
+        return (half + (ex - me["x"]) * scale,
+                half - (ey - me["y"]) * scale)
+
+    def _draw_minimap(self):
+        if not self._shown.get("minimap"):
+            return
+        c = self.map_canvas
+        me, ents, _stamp = self.world.read()
+        c.delete("all")
+        size = int(MINIMAP_SIZE * self._ui_scale)
+        if int(c["width"]) != size:
+            c.config(width=size, height=size)
+        half = size / 2.0
+        scale = half / float(self._map_range)
+
+        if not self.world.fresh():
+            # Say so rather than showing an empty box: a blank map and a map of
+            # an empty area look identical, and only one of them is a problem.
+            c.create_text(half, half, text="waiting for the game",
+                          fill=FG_DIM, font=self.fonts["ui_tiny_i"])
+            self.map_count.config(text="")
+            return
+
+        theme = self._theme
+        c.configure(bg=theme.get("body", BG_BODY))
+        track = theme.get("track", BG_BAR_TRACK)
+        # Range rings at a third and two thirds, so distances are readable
+        # without a scale bar taking up room.
+        for frac in (0.34, 0.67):
+            r = half * frac
+            c.create_oval(half - r, half - r, half + r, half + r,
+                          outline=track, width=1)
+        c.create_line(half, 0, half, size, fill=track)
+        c.create_line(0, half, size, half, fill=track)
+
+        # The minimap always shows everyone nearby, regardless of the meter's
+        # party/all mode — a map that hid the player standing next to you would
+        # be misleading. Group members are marked with a ring instead.
+        local, roster = self.world.who()
+
+        drawn = 0
+        by_cat = {}
+        for e in ents:
+            by_cat.setdefault(e.get("c"), []).append(e)
+        for cat in MINIMAP_ORDER:
+            style = MINIMAP_STYLE_MAP[cat]
+            for e in by_cat.get(cat, ()):
+                x, y = self._minimap_px(e.get("x", 0), e.get("y", 0), me,
+                                        half, scale)
+                if not (0 <= x <= size and 0 <= y <= size):
+                    continue        # outside the square; the hook's cull is round
+                r = style["r"] * self._ui_scale
+                # The local player is drawn last, as an arrow, not a dot.
+                if cat == "hero" and e.get("n") and e["n"] == local:
+                    continue
+                self._map_glyph(c, x, y, r, style)
+                if cat == "hero" and e.get("n") in roster:
+                    # Party members get a ring rather than a different colour:
+                    # colour already means category, and overloading it would
+                    # make a grouped player read as a different kind of thing.
+                    rr = r + 2.5 * self._ui_scale
+                    c.create_oval(x - rr, y - rr, x + rr, y + rr,
+                                  outline=MINIMAP_PARTY_RING, width=2)
+                drawn += 1
+
+        self._draw_me_arrow(c, half, me.get("r", 0.0))
+        self.map_count.config(text=f"{drawn}  ·  {int(self._map_range)}u")
+
+    def _map_glyph(self, c, x, y, r, style):
+        shape = style["shape"]
+        fill = style["fill"]
+        if shape == "dot":
+            c.create_oval(x - r, y - r, x + r, y + r, fill=fill, outline="")
+        elif shape == "square":
+            c.create_rectangle(x - r, y - r, x + r, y + r, fill=fill, outline="")
+        else:   # diamond
+            c.create_polygon(x, y - r, x + r, y, x, y + r, x - r, y,
+                             fill=fill, outline="")
+
+    def _draw_me_arrow(self, c, half, rot):
+        """You, at the centre, pointing where you're facing.
+
+        rotationZ is radians, measured from the same axis the positions use, so
+        the arrow is drawn straight from it — the map itself never turns."""
+        s = 6.0 * self._ui_scale
+        # Screen y is inverted relative to world y, hence the negated sine.
+        ca, sa = math.cos(rot), math.sin(rot)
+
+        def pt(fx, fy):
+            return (half + (fx * ca - fy * sa) * s,
+                    half - (fx * sa + fy * ca) * s)
+
+        tip, left, right, tail = pt(0, 1.4), pt(-0.9, -1.0), pt(0.9, -1.0), pt(0, -0.4)
+        c.create_polygon(*tip, *left, *tail, *right, fill=MINIMAP_ME,
+                         outline=BG_BORDER, width=1)
 
     def _build_rift(self):
         """The next-rift countdown. Styled after the rifts themselves rather
@@ -2536,6 +2743,13 @@ class Overlay:
             row.set_theme(t)
         for col in (self.dmg_col, self.heal_col):
             col.set_theme(t)
+        # The minimap follows too. Its canvas contents are redrawn from scratch
+        # on the next tick and read self._theme directly, so only the chrome
+        # needs repainting here.
+        self.map_border.config(bg=t["border"])
+        self.map_header.config(bg=t["header"])
+        self.map_title.config(bg=t["header"], fg=t["fg_header"])
+        self.map_count.config(bg=t["header"], fg=t["fg_header_dim"])
         # Force the header tint to be re-pushed: its guard compares against the
         # last colour applied, which belongs to the theme we just left.
         self._header_bg = None
@@ -2792,6 +3006,19 @@ class Overlay:
         return me or (rows[0].name if rows else None)
 
     def run(self):
+        # The minimap gets its own timer rather than riding the 250ms refresh:
+        # the hook feeds positions at ~6.7/sec, and redrawing at 4/sec throws
+        # away a third of them and makes dots step instead of glide. It's a
+        # canvas redraw of a few dozen items, so the extra ticks are cheap —
+        # and it deliberately does NOT touch the aggregation the main loop owns.
+        def map_loop():
+            try:
+                self._draw_minimap()
+            except tk.TclError:
+                return              # window went away; stop rescheduling
+            self.root.after(MINIMAP_TICK_MS, map_loop)
+        map_loop()
+
         def loop():
             # Checked before the refresh and without rescheduling, so a stand-
             # down request costs at most one tick. quit() (not destroy()) leaves
@@ -3616,6 +3843,9 @@ def _run(tray, session, ui_state, world):
             # never printed — the console is often on screen next to the game,
             # and the overlay's own `*` row already says which player is you.
             name = p.get("name")
+            # The roster rides along on this message; the minimap needs it to
+            # ring group members, including ones who haven't fought yet.
+            world.set_hero(name, p.get("party"))
             if name and name != hero_id["name"]:
                 first = hero_id["name"] is None
                 hero_id["name"] = name
