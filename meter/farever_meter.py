@@ -111,6 +111,11 @@ HAS_CONSOLE = sys.stderr is not None and sys.stdout is not None
 # How long to let a running instance shut itself down before forcing it. It has
 # to unload the hook and detach, which is the whole point of asking nicely.
 QUIT_WAIT_SECS = 12.0
+# Serialises the claim in claim_single_instance(). "Local\" scopes it to the
+# logon session, which is the right boundary — two users on one machine each get
+# their own meter, their own lock file and their own game.
+CLAIM_MUTEX = "Local\\FareverMeterClaim"
+CLAIM_WAIT_MS = 30000       # comfortably longer than a full QUIT_WAIT_SECS wait
 
 COMBAT_TIMEOUT_SECS = 25.0
 REFRESH_MS = 250
@@ -379,10 +384,17 @@ def setup_logging():
             try:
                 LOG_FILE.replace(prev)
             except OSError:
+                # Windows won't rename a file another process still has open,
+                # which is exactly the case where two meters overlap — during a
+                # handover, or when one is displacing another. Appending below
+                # rather than truncating means the outgoing instance's last
+                # lines (the ones explaining the handover) survive it.
                 pass
-        # Line-buffered: a crash mid-write still leaves the lines before it,
+        # Append, not truncate: see above. After a successful rotation the file
+        # is gone, so this creates a fresh one and the two are equivalent.
+        # Line-buffered, so a crash mid-write still leaves the lines before it —
         # which is exactly the log you want to read after a crash.
-        f = open(LOG_FILE, "w", buffering=1, encoding="utf-8", errors="replace")
+        f = open(LOG_FILE, "a", buffering=1, encoding="utf-8", errors="replace")
     except OSError:
         return          # nowhere to log => run silently rather than not at all
     sys.stdout = sys.stderr = f
@@ -3257,6 +3269,30 @@ def quit_requested():
         return False
 
 
+def watch_for_quit_request():
+    """Poll the stand-down flag on a background thread, for the stretches where
+    nothing else is polling it.
+
+    The overlay checks the flag on its own refresh tick, but the overlay doesn't
+    exist yet while we're waiting for Farever to launch or for the hook's memory
+    scan to finish — and those are precisely the stretches a newly-started meter
+    has to displace us through. Without this, an instance that hasn't reached
+    the overlay ignores the request entirely and gets force-killed twelve
+    seconds later, which is the outcome the whole polite handover exists to
+    avoid. It matters more now that the meter is built to be started *before*
+    the game, and so spends real time waiting."""
+    def work():
+        while not STOP.is_set():
+            if quit_requested():
+                print("[meter] a newer instance asked us to exit — standing "
+                      "down.", file=sys.stderr)
+                request_stop()
+                return
+            time.sleep(0.25)
+
+    threading.Thread(target=work, daemon=True, name="quit-watch").start()
+
+
 def _stop_instance(pid):
     """Ask pid to exit, and wait. The request is a file the running overlay
     polls — it returns from its mainloop and takes main()'s normal shutdown
@@ -3289,6 +3325,48 @@ def _stop_instance(pid):
         pass
 
 
+def _acquire_claim_mutex():
+    """Take the system-wide lock covering the read-decide-write in
+    claim_single_instance(), returning a handle to release afterwards.
+
+    Without it that sequence races itself. Stopping the previous instance takes
+    up to QUIT_WAIT_SECS, and the winner's own pid isn't written to the lock
+    file until after that — so a meter started inside the gap reads the same
+    stale pid, shuts down the same already-dying instance, and declares itself
+    the survivor too. Two live meters, each certain it's the only one. Starting
+    the game from Steam while a shortcut launch is still settling is enough to
+    hit it."""
+    k32 = ctypes.windll.kernel32
+    k32.CreateMutexW.restype = ctypes.c_void_p
+    k32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    k32.WaitForSingleObject.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    k32.ReleaseMutex.argtypes = [ctypes.c_void_p]
+    try:
+        h = k32.CreateMutexW(None, False, CLAIM_MUTEX)
+        if not h:
+            return None
+        # Long enough to outlast a full QUIT_WAIT_SECS handover ahead of us.
+        # A timeout isn't fatal — carrying on unserialised is exactly the old
+        # behaviour, so the worst case is no worse than before.
+        k32.WaitForSingleObject(h, CLAIM_WAIT_MS)
+        return h
+    except Exception as e:
+        print(f"[meter] claim lock unavailable ({e}) — continuing.",
+              file=sys.stderr)
+        return None
+
+
+def _release_claim_mutex(h):
+    if not h:
+        return
+    k32 = ctypes.windll.kernel32
+    try:
+        k32.ReleaseMutex(h)
+        k32.CloseHandle(h)
+    except Exception:
+        pass
+
+
 def claim_single_instance():
     """Become the only meter running, then record ourselves in the lock file.
 
@@ -3301,6 +3379,15 @@ def claim_single_instance():
     except OSError:
         return                       # no lock dir => skip the mechanism entirely
 
+    claim = _acquire_claim_mutex()
+    try:
+        _claim_locked()
+    finally:
+        _release_claim_mutex(claim)
+
+
+def _claim_locked():
+    """The claim itself. Only ever runs one-at-a-time system-wide."""
     try:
         other = json.loads(LOCK_FILE.read_text())
     except Exception:
@@ -3399,6 +3486,9 @@ def main():
     seed_analysis()
     check_for_update()          # background; the notice lands when it lands
     claim_single_instance()
+    # Only after claiming: before it, the flag on disk may still be the one
+    # aimed at the instance we just displaced.
+    watch_for_quit_request()
     session = PartySession()
     ui_state = GameUIState()
 
@@ -3413,6 +3503,10 @@ def main():
         return _run(tray, session, ui_state)
     finally:
         tray.stop()
+        # Here as well as on the paths inside _run, which miss the early
+        # returns — stopping while still waiting for the game would otherwise
+        # leave our pid sitting in the lock file. Unlinking twice is harmless.
+        release_instance_lock()
 
 
 def _run(tray, session, ui_state):
