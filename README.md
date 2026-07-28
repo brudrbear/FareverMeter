@@ -1,5 +1,15 @@
 # Farever+ Party Meter (memory-reading edition)
 
+> ## 📥 Getting it
+>
+> Open **[Releases](../../releases)** and download the latest version, then
+> **extract it anywhere on your PC** — Desktop, Downloads, wherever. It does
+> **not** need to go in your Farever folder, and nothing in the game is touched
+> or modified.
+>
+> Then see [Requirements](#requirements) — there's one Python checkbox that
+> catches almost everyone.
+
 A party/raid damage meter for **Farever** that reads the game's own combat
 functions in memory via Frida — giving **real spell IDs, damage elements,
 crits, and kills** with a live comparison across all nearby players, instead of
