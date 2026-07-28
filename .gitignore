@@ -6,8 +6,10 @@ parses/
 __pycache__/
 *.pyc
 
-# Where you dragged the overlay windows. Per-machine, and rewritten constantly.
+# Where you dragged the overlay windows, and which options you picked. Both are
+# per-machine and rewritten constantly.
 .meter_position.json
+.meter_settings.json
 
 # Release build output from packaging/build.ps1 — a few hundred megabytes of
 # regenerated bundle. The installer it produces belongs on a GitHub release,
