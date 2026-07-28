@@ -1563,6 +1563,7 @@ class Overlay:
         self._map_mode = MINIMAP_MODES[0]   # "Rotating" — you always face up
         self._map_rate = MINIMAP_RATE_NAMES[0]   # "High"
         self._game_hwnd = None         # cached; re-resolved if it goes stale
+        self._last_cam = None          # last camera heading seen; see _draw_minimap
         # True while the countdown has nothing to count down to. The window is
         # hidden in that state unless the escape menu is open, so it isn't
         # sitting there saying "No rift upcoming" for six minutes of every hour.
@@ -2197,8 +2198,18 @@ class Overlay:
         # constantly, since the character turns to face its target. `c` is None
         # until the camera hook has seen a frame, and the character's own facing
         # is the fallback rather than snapping the map to zero.
+        # Sticky. A missing camera reading means the hook is between cameras —
+        # a zone change retires the old object and the next frame re-latches —
+        # and it lasts a tick or two. Falling back to the character's facing
+        # there swung the map to an unrelated heading and back, which read as
+        # the orientation randomly breaking after a rift (the same event that
+        # recolours the panel). Holding the last known heading is both steadier
+        # and closer to true, since the camera hasn't actually moved.
         cam = me.get("c")
-        heading = _yaw(cam if cam is not None else (me.get("r", 0.0) or 0.0))
+        if cam is not None:
+            self._last_cam = float(cam)
+        heading = _yaw(self._last_cam if self._last_cam is not None
+                       else (me.get("r", 0.0) or 0.0))
         rot = ((math.cos(heading), math.sin(heading))
                if self._map_mode == "Rotating" else None)
         # The marker shows where the CAMERA is pointing, nothing else. In

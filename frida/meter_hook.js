@@ -214,6 +214,10 @@ function checkZone() {
         if (lastZoneSig !== null && sig !== lastZoneSig) {
             resetWindows();          // the whole UI is rebuilt across a load
             send({ kind: "zone", sig: sig });
+            // Drop the camera: the layer is being rebuilt and the object we
+            // were holding may not survive it. postUpdate re-latches on the
+            // next frame the real camera runs.
+            camPtr = null;
         }
         lastZoneSig = sig;
     } catch (e) {}
@@ -305,24 +309,38 @@ function setWorldTick(ms) {
 // every frame, and being on the BASE class it captures whichever camera is
 // currently driving the view (game, cinematic, character-edit).
 let camPtr = null;
+const CAM_CLASS = "client.GameCamera";
+
 function hookCamera(base) {
     const fi = DATA.cam_targets && DATA.cam_targets["client.BaseCamera.postUpdate"];
-    if (fi === undefined) { log("!! camera target missing; minimap will follow the character"); return; }
+    if (fi === undefined) { log("!! camera target missing; minimap will not follow the view"); return; }
     try {
         Interceptor.attach(base.add(fi * 8).readPointer(), {
-            onEnter: function (args) { camPtr = args[0]; }
+            onEnter: function (args) {
+                // Hooked on the base class so it survives the game swapping
+                // cameras, but only the gameplay camera is worth following —
+                // a cinematic or character-edit camera points somewhere the
+                // player isn't looking. Measured: in normal play only
+                // GameCamera calls this, so the check costs a cached lookup.
+                if (typeName(args[0]) === CAM_CLASS) camPtr = args[0];
+            }
         });
     } catch (e) {
-        log("!! camera hook failed (" + e + "); minimap will follow the character");
+        log("!! camera hook failed (" + e + "); minimap will not follow the view");
     }
 }
 
 function cameraDirection() {
-    // null when the camera hasn't been seen yet — the caller falls back to the
-    // character's own facing rather than snapping the map to zero.
     if (!camPtr || camPtr.isNull() || !OFF.Camera) return null;
-    try { return camPtr.add(OFF.Camera.curDirection).readDouble(); }
-    catch (e) { return null; }
+    // Re-check the type on every read. A zone change (which is also what a
+    // rift entry is) can retire the camera object, and HL will happily reuse
+    // that memory for something else — at which point curDirection is whatever
+    // the new occupant keeps at that offset, and the map swings to a heading
+    // out of nowhere. Cheap: typeName is cached by type pointer.
+    try {
+        if (typeName(camPtr) !== CAM_CLASS) { camPtr = null; return null; }
+        return camPtr.add(OFF.Camera.curDirection).readDouble();
+    } catch (e) { camPtr = null; return null; }
 }
 
 // What we draw, keyed by runtime class name. An allowlist rather than "whatever
