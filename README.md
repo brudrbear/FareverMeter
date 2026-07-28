@@ -192,7 +192,8 @@ again.
 |---|---|---|
 | Options | Show all players / Show party only | switches between your group and everyone nearby; resets the encounter |
 | Options | Theme | `Dynamic` (default) follows the game — rift colours inside a rift, Farever colours everywhere else. `Farever` and `Rift` pin it either way. |
-| Options | Minimap | `Rotating` (default) turns the map so you always face the top of it. `Fixed` keeps north up and turns the arrow instead. |
+| Options | Minimap | `Rotating` (default) turns the map with the camera, so the top of the map is whatever you're looking at. `Fixed` keeps north up and turns the arrow instead. |
+| Options | Map refresh | how often the minimap is updated — `High` (~16/sec, default), `Medium` (~9/sec), `Low` (~4/sec). Lower costs less CPU in the game; below about 8/sec the dots visibly step. |
 | Show / hide | Damage meter / Breakdown / Healing columns / Rift timer / Minimap | hides that piece of the overlay (the control menu stays, so you can bring it back) |
 | Show / hide | Hide out of combat | fades both windows away a few seconds after the fighting stops |
 | Actions | 60s Parse Mode | see below |
@@ -252,8 +253,10 @@ A square map of what's around you, drawn from the game's own entity lists:
 **obelisks**, **respawn points** and **activities**. Drag it by its header like
 the other windows; its position is remembered and it has a Show / hide tick.
 
-`Rotating` (the default) turns the map so you're always facing the top of it.
-`Fixed` keeps the map still and turns the arrow instead. Two rings mark a third
+`Rotating` (the default) turns the map **with the camera**, so the top of the
+map is whatever you're looking at — not where your character happens to be
+pointing, which changes constantly as it turns to face things. `Fixed` keeps the
+map still and turns the arrow instead. Two rings mark a third
 and two thirds of the range, which is 120 world units from the centre out.
 
 **Anything on a different floor is drawn faded** — a mob in the tunnel below you

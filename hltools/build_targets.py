@@ -92,6 +92,16 @@ UI_TARGETS = ["ui.BaseUI.displayWindow", "ui.BaseUI.removeWindow",
               "ui.win.BaseWindow.onRemove"]
 ui_targets = {nm: fi for fi, nm in names.items() if nm in UI_TARGETS}
 
+# ---- the active camera ----
+# The minimap turns with the camera, not the character, so it needs the live
+# camera object. There's no reachable singleton for it — GameApp holds one but
+# nothing hands us a GameApp — so instead we hook a per-frame camera method and
+# keep `this`. postUpdate is on the BASE class deliberately: the game swaps
+# between game/cinematic/character-edit cameras, and hooking the base captures
+# whichever one is currently driving the view.
+CAM_TARGETS = ["client.BaseCamera.postUpdate"]
+cam_targets = {nm: fi for fi, nm in names.items() if nm in CAM_TARGETS}
+
 payload = {
     "nfunctions": code.counts["nfunctions"],
     "nnatives": code.counts["nnatives"],
@@ -99,6 +109,7 @@ payload = {
     "candidates": candidates,
     "count_targets": count_targets,
     "ui_targets": ui_targets,
+    "cam_targets": cam_targets,
     "funcs": funcs,
     "map_fn": map_fn,
 }
@@ -108,6 +119,9 @@ print(f"anchors={len(anchors)}  candidates={len(candidates)}  "
 for nm in UI_TARGETS:
     if nm not in ui_targets:
         print(f"    [!] UI target not found in this build: {nm}")
+for nm in CAM_TARGETS:
+    if nm not in cam_targets:
+        print(f"    [!] camera target not found in this build: {nm}")
 for nm, fi in sorted(candidates.items()):
     print(f"    {nm:<45} findex={fi}")
 print(f"[written] {OUT / 'resolver_data.json'}")

@@ -50,6 +50,7 @@ def main():
     activity = offs("st.Activity")
     arrobj = offs("hl.types.ArrayObj")
     foe = offs("ent.Foe")
+    cam = offs("client.BaseCamera")
 
     # skill display-name chain: BaseSkill.inf (virtual #963) -> texts (#973) -> name
     row = code.types[963]
@@ -100,6 +101,12 @@ def main():
         "Interactible": {"enabled": inter["enabled"][0],
                          "isOffScreen": inter["isOffScreen"][0]},
         "Activity": {"kind": activity["kind"][0]},
+        # curDirection is the camera yaw actually being rendered; `direction`
+        # is the value it is easing towards. Following the eased one would make
+        # the minimap lead the view it is supposed to match.
+        "Camera": {"direction": cam["direction"][0],
+                   "curDirection": cam["curDirection"][0],
+                   "distance": cam["distance"][0]},
         # A foe with a summonOwner is somebody's pet, not a mob. That's the
         # only reliable way to tell them apart — they're the same class.
         "Foe": {"summonOwner": foe["summonOwner"][0],

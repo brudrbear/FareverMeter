@@ -60,6 +60,11 @@
   "Activity": {
     "kind": 464
   },
+  "Camera": {
+    "direction": 208,
+    "curDirection": 256,
+    "distance": 192
+  },
   "Foe": {
     "summonOwner": 1224,
     "persistantSummon": 1240

@@ -286,7 +286,44 @@ function checkRift() {
 // `entities`, which is why all three are read.
 const SWEEP_RADIUS = 600;        // world units; generous, to leave zoom headroom
 const SWEEP_MAX = 400;           // hard cap on entities reported, worst case
-const WORLD_TICK_MS = 150;       // ~6.7/sec — smooth enough that dots glide
+let worldTickMs = 150;           // replaced by the host's Refresh setting
+let worldTimer = null;
+
+function setWorldTick(ms) {
+    ms = Math.max(30, Math.min(1000, ms | 0));
+    if (ms === worldTickMs && worldTimer !== null) return;
+    worldTickMs = ms;
+    if (worldTimer !== null) clearInterval(worldTimer);
+    worldTimer = setInterval(sweepWorld, worldTickMs);
+    log("minimap sweep every " + worldTickMs + "ms");
+}
+
+// ---- the active camera ----
+// The minimap turns with the camera rather than the character, which means
+// knowing where the camera is pointing. Nothing hands out the camera object,
+// so client.BaseCamera.postUpdate is hooked purely to keep `this` — it runs
+// every frame, and being on the BASE class it captures whichever camera is
+// currently driving the view (game, cinematic, character-edit).
+let camPtr = null;
+function hookCamera(base) {
+    const fi = DATA.cam_targets && DATA.cam_targets["client.BaseCamera.postUpdate"];
+    if (fi === undefined) { log("!! camera target missing; minimap will follow the character"); return; }
+    try {
+        Interceptor.attach(base.add(fi * 8).readPointer(), {
+            onEnter: function (args) { camPtr = args[0]; }
+        });
+    } catch (e) {
+        log("!! camera hook failed (" + e + "); minimap will follow the character");
+    }
+}
+
+function cameraDirection() {
+    // null when the camera hasn't been seen yet — the caller falls back to the
+    // character's own facing rather than snapping the map to zero.
+    if (!camPtr || camPtr.isNull() || !OFF.Camera) return null;
+    try { return camPtr.add(OFF.Camera.curDirection).readDouble(); }
+    catch (e) { return null; }
+}
 
 // What we draw, keyed by runtime class name. An allowlist rather than "whatever
 // is in the array": `interactibles` is ~60% generic ent.Element scenery, which
@@ -379,6 +416,7 @@ function sweepWorld() {
             z: localHero.add(OFF.Entity.posz).readDouble(),
             r: localHero.add(OFF.Entity.rotationZ).readDouble(),   // radians
         };
+        const cam = cameraDirection();
         const out = [], seen = {};
         const G = OFF.GameLayer;
         // Order matters with the dedupe: the narrow, purpose-built lists first,
@@ -389,7 +427,11 @@ function sweepWorld() {
         sweepArray(layer.add(G.entities).readPointer(), out, me, true, seen);
         send({ kind: "world", me: { x: Math.round(me.x), y: Math.round(me.y),
                                     z: Math.round(me.z),
-                                    r: Math.round(me.r * 1000) / 1000 },
+                                    r: Math.round(me.r * 1000) / 1000,
+                                    // Camera yaw, or null until the camera has
+                                    // been seen. The overlay falls back to r.
+                                    c: cam === null ? null
+                                       : Math.round(cam * 1000) / 1000 },
                ents: out });
     } catch (e) {}
 }
@@ -530,8 +572,19 @@ function main() {
 
     // The minimap wants a faster cadence than the combat heartbeat: at 400ms
     // dots visibly step rather than move. The sweep costs ~1ms, so its own
-    // timer is cheaper than it looks.
-    setInterval(sweepWorld, WORLD_TICK_MS);
+    // timer is cheaper than it looks. The host resets this from the Refresh
+    // setting as soon as it connects.
+    hookCamera(base);
+    setWorldTick(worldTickMs);
+
+    // Host -> agent config. re-armed after each message, which is how frida's
+    // recv() works: a handler fires once.
+    function onConfig(msg) {
+        try { if (msg && msg.worldTick) setWorldTick(msg.worldTick); }
+        catch (e) { log("config failed: " + e); }
+        recv("config", onConfig);
+    }
+    recv("config", onConfig);
 
     const fi = DATA.count_targets["ent.Unit.onInflictDamage"];
     const daddr = base.add(fi * 8).readPointer();

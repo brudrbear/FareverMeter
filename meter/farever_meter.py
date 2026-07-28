@@ -203,6 +203,13 @@ OOC_EXEMPT = ("rift", "minimap")
 # Rotating costs one extra rotate per entity per frame; at a few dozen entities
 # that is nothing next to the canvas work.
 MINIMAP_MODES = ("Rotating", "Fixed")
+
+# How often the hook sweeps the world. Higher costs a little CPU in the game
+# process (~1ms per sweep) and a message per tick; below about 8/sec the dots
+# visibly step rather than glide, which is what makes a minimap feel laggy.
+MINIMAP_RATES = (("High", 60), ("Medium", 110), ("Low", 250))
+MINIMAP_RATE_MS = dict(MINIMAP_RATES)
+MINIMAP_RATE_NAMES = [n for n, _ in MINIMAP_RATES]
 MINIMAP_SIZE = 270          # square, in pixels at 100% UI scale
 # World units from centre to edge. Measured against a live fight rather than
 # guessed, because the guess was out by a factor of four: a group and the pack
@@ -210,7 +217,9 @@ MINIMAP_SIZE = 270          # square, in pixels at 100% UI scale
 # next activity several hundred. Anything above ~150 collapses a whole fight
 # into a couple of pixels; much below ~80 loses the interactibles.
 MINIMAP_RANGE = 120
-MINIMAP_TICK_MS = 100       # redraw cadence; the hook feeds us at ~6.7/sec
+# The canvas is redrawn at roughly twice the sweep rate. Matching them exactly
+# would beat against the hook's timer and drop or double frames; drawing a bit
+# faster than the data arrives keeps motion even.
 
 # The hook culls to 600 units, so the range above can grow without touching it.
 MINIMAP_RANGE_MIN, MINIMAP_RANGE_MAX = 80, 600
@@ -1429,11 +1438,14 @@ class TrayIcon:
 # ---------------------------------------------------------------------------
 class Overlay:
     def __init__(self, session: PartySession, target_pid, ui_state=None,
-                 world=None):
+                 world=None, configure=None):
         self.session = session
         self.target_pid = target_pid
         self.ui_state = ui_state if ui_state is not None else GameUIState()
         self.world = world if world is not None else WorldSnapshot()
+        # Pushes settings to the running hook (currently just the sweep rate).
+        # A no-op when there's no hook, so the overlay stays testable on its own.
+        self._configure = configure or (lambda **kw: None)
         self.focus_player = None       # drilled-in player name (None => local)
         self.mode = "party"            # "party" (group only) or "all"
         # The overlay is click-through unless the game has freed the cursor for
@@ -1455,6 +1467,7 @@ class Overlay:
         self._quit_armed = False       # the Quit button's second-click window
         self._update_shown = False     # the update notice is applied once
         self._map_mode = MINIMAP_MODES[0]   # "Rotating" — you always face up
+        self._map_rate = MINIMAP_RATE_NAMES[0]   # "High"
         # True while the countdown has nothing to count down to. The window is
         # hidden in that state unless the escape menu is open, so it isn't
         # sitting there saying "No rift upcoming" for six minutes of every hour.
@@ -1894,6 +1907,23 @@ class Overlay:
             font=self.fonts["ui"])
         self.opt_map.pack(side="right", expand=True, fill="x", padx=(8, 0))
 
+        row = field(left, "Map refresh")
+        self._map_rate_var = tk.StringVar(value=self._map_rate)
+        self.opt_rate = tk.OptionMenu(row, self._map_rate_var,
+                                      *MINIMAP_RATE_NAMES,
+                                      command=self._on_map_rate_pick)
+        self.opt_rate.config(
+            bg=BG_BODY_SOFT, fg=FG_TEXT, activebackground=BG_BAR_TRACK,
+            activeforeground=FG_VALUE, relief="flat", bd=0, anchor="w",
+            padx=10, pady=3, font=self.fonts["ui"], cursor="hand2",
+            highlightthickness=1, highlightbackground=BG_BAR_TRACK,
+            direction="right")
+        self.opt_rate["menu"].config(
+            bg=BG_BODY, fg=FG_TEXT, activebackground=BTN_ON_BG,
+            activeforeground=FG_HEADER, bd=0, relief="flat",
+            font=self.fonts["ui"])
+        self.opt_rate.pack(side="right", expand=True, fill="x", padx=(8, 0))
+
         # Every font in the overlay is a named Tk font, so dragging this resizes
         # the lot. Released rather than live: repainting the whole tree on each
         # pixel of drag is visibly slow.
@@ -2053,7 +2083,13 @@ class Overlay:
 
         # Rotating mode turns the world under a fixed arrow; fixed mode leaves
         # the world alone and turns the arrow instead.
-        heading = float(me.get("r", 0.0) or 0.0)
+        # Camera first: the map should turn with what you're looking at, not
+        # with where the character happens to be pointing — they diverge
+        # constantly, since the character turns to face its target. `c` is None
+        # until the camera hook has seen a frame, and the character's own facing
+        # is the fallback rather than snapping the map to zero.
+        cam = me.get("c")
+        heading = float(cam if cam is not None else (me.get("r", 0.0) or 0.0))
         rot = ((math.cos(heading), math.sin(heading))
                if self._map_mode == "Rotating" else None)
 
@@ -2743,6 +2779,25 @@ class Overlay:
         # Queued for the same reason as the theme pick: the draw pass reads it.
         self._enqueue(lambda: setattr(self, "_map_mode", value))()
 
+    def _on_map_rate_pick(self, value):
+        self._enqueue(lambda: self._set_map_rate(value))()
+
+    def _set_map_rate(self, value):
+        """Change how often the hook sweeps the world.
+
+        The redraw timer picks the new rate up on its next tick by reading
+        _map_rate, so only the agent side needs telling."""
+        if value not in MINIMAP_RATE_MS:
+            return
+        self._map_rate = value
+        ms = MINIMAP_RATE_MS[value]
+        print(f"[meter] minimap refresh {value} ({ms}ms)", file=sys.stderr)
+        try:
+            self._configure(worldTick=ms)
+        except Exception as e:
+            print(f"[meter] couldn't push the refresh rate: {e}",
+                  file=sys.stderr)
+
     def _toggle_hide_ooc(self):
         self._hide_ooc = not self._hide_ooc
         self._refresh_visibility()
@@ -3102,7 +3157,8 @@ class Overlay:
                 self._draw_minimap()
             except tk.TclError:
                 return              # window went away; stop rescheduling
-            self.root.after(MINIMAP_TICK_MS, map_loop)
+            self.root.after(max(25, MINIMAP_RATE_MS[self._map_rate] // 2),
+                            map_loop)
         map_loop()
 
         def loop():
@@ -4041,7 +4097,17 @@ def _run(tray, session, ui_state, world):
           "menu (and to drag the windows / click a row to inspect). Only "
           "hotkey: Shift+\\ resets the encounter.", file=sys.stderr)
 
-    overlay = Overlay(session, pid, ui_state, world)
+    def configure_hook(**kw):
+        """Push a setting to the running agent. Wrapped so the overlay doesn't
+        have to know about frida, and so a dead script is a logged failure
+        rather than an exception in a menu callback."""
+        if script is None:
+            return
+        script.post(dict(kw, type="config"))
+
+    overlay = Overlay(session, pid, ui_state, world, configure=configure_hook)
+    # Push the starting rate, since the agent boots on its own default.
+    overlay._set_map_rate(overlay._map_rate)
     # From here the overlay owns shutdown: it's the only thing that can return
     # from the mainloop and let the finally below unload the hook and detach.
     _OVERLAY["ref"] = overlay

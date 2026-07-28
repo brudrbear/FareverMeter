@@ -620,6 +620,9 @@
     "ui.BaseUI.removeWindow": 3066,
     "ui.win.BaseWindow.onRemove": 10991
   },
+  "cam_targets": {
+    "client.BaseCamera.postUpdate": 10884
+  },
   "funcs": {
     "ui.Console.getMyHero": 12336,
     "GameApp.getCameraHero": 11581
