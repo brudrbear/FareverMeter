@@ -191,11 +191,19 @@ OOC_EXEMPT = ("rift", "minimap")
 # ---------------------------------------------------------------------------
 # Minimap
 # ---------------------------------------------------------------------------
-# North-up: the map never rotates, and the player is an arrow that turns. It
-# keeps landmarks where you last saw them, which is what makes a minimap worth
-# glancing at, and it costs one arrow rotation instead of transforming every
-# icon each frame.
-MINIMAP_SIZE = 180          # square, in pixels at 100% UI scale
+# Two orientations:
+#
+#   Rotating (default) — the map turns under you, so you are always facing the
+#   top of it. Matches how you're actually looking at the world, which is what
+#   most people want from a minimap while moving.
+#
+#   Fixed — north is always up and the arrow turns instead. Landmarks stay
+#   where you last saw them, which is better for learning a zone.
+#
+# Rotating costs one extra rotate per entity per frame; at a few dozen entities
+# that is nothing next to the canvas work.
+MINIMAP_MODES = ("Rotating", "Fixed")
+MINIMAP_SIZE = 270          # square, in pixels at 100% UI scale
 # World units from centre to edge. Measured against a live fight rather than
 # guessed, because the guess was out by a factor of four: a group and the pack
 # it's fighting sit 1-12 units apart, nearby chests and orbs 10-80, and the
@@ -224,7 +232,22 @@ MINIMAP_ORDER = [k for k, _ in MINIMAP_STYLE]
 
 MINIMAP_ME = "#F2E1CB"          # the player arrow — brightest thing on the map
 MINIMAP_PARTY_RING = "#57C7FF"  # the ring that marks a group member
-MINIMAP_GRID = "#00000033"
+
+# rotationZ is measured from +x (east), not +y (north) — established by the
+# arrow pointing 90 degrees off the player's real facing until it was corrected.
+# So the facing vector is (cos r, sin r), and screen-up corresponds to r = pi/2.
+
+# A flat map can't tell you that a mob is on the gantry above you or in the
+# tunnel below, and those are very different news. Anything further than this
+# in elevation is drawn faded toward the background rather than hidden, so it
+# still reads as present but not as something you can walk to.
+# 30 rather than something tighter because the measured distribution is
+# bimodal, not gradual: everything on your own floor came in at 0-12 units of
+# elevation (slopes and ledges), and everything genuinely on another level at
+# 154-173. Anywhere in that gap gives the same answer, so this sits clear of
+# terrain rather than close to it.
+MINIMAP_Z_FADE = 30.0       # world units of elevation before dimming kicks in
+MINIMAP_Z_DIM = 0.4         # how much of the original colour survives
 
 # Rifts open on the hour. The countdown is just the wall clock — reading the
 # game's own world-event schedule turned out to report the running event rather
@@ -1431,6 +1454,11 @@ class Overlay:
         self._q_lock = threading.Lock()
         self._quit_armed = False       # the Quit button's second-click window
         self._update_shown = False     # the update notice is applied once
+        self._map_mode = MINIMAP_MODES[0]   # "Rotating" — you always face up
+        # True while the countdown has nothing to count down to. The window is
+        # hidden in that state unless the escape menu is open, so it isn't
+        # sitting there saying "No rift upcoming" for six minutes of every hour.
+        self._rift_idle = True
         self._last_epoch = session.epoch
         # Parse mode: None | "countdown" (pre-roll) | "parsing" | "done" (the
         # finished sample, frozen on screen until it's cleared).
@@ -1850,6 +1878,22 @@ class Overlay:
             font=self.fonts["ui"])
         self.opt_theme.pack(side="right", expand=True, fill="x", padx=(8, 0))
 
+        row = field(left, "Minimap")
+        self._map_mode_var = tk.StringVar(value=self._map_mode)
+        self.opt_map = tk.OptionMenu(row, self._map_mode_var, *MINIMAP_MODES,
+                                     command=self._on_map_mode_pick)
+        self.opt_map.config(
+            bg=BG_BODY_SOFT, fg=FG_TEXT, activebackground=BG_BAR_TRACK,
+            activeforeground=FG_VALUE, relief="flat", bd=0, anchor="w",
+            padx=10, pady=3, font=self.fonts["ui"], cursor="hand2",
+            highlightthickness=1, highlightbackground=BG_BAR_TRACK,
+            direction="right")
+        self.opt_map["menu"].config(
+            bg=BG_BODY, fg=FG_TEXT, activebackground=BTN_ON_BG,
+            activeforeground=FG_HEADER, bd=0, relief="flat",
+            font=self.fonts["ui"])
+        self.opt_map.pack(side="right", expand=True, fill="x", padx=(8, 0))
+
         # Every font in the overlay is a named Tk font, so dragging this resizes
         # the lot. Released rather than live: repainting the whole tree on each
         # pixel of drag is visibly slow.
@@ -1953,13 +1997,24 @@ class Overlay:
         # that ever lands, so only the header moves it — same as the meter.
         self._map_range = MINIMAP_RANGE
 
-    def _minimap_px(self, ex, ey, me, half, scale):
-        """World -> canvas. North-up, so this is a translate and a scale.
+    def _minimap_px(self, ex, ey, me, half, scale, rot):
+        """World -> canvas, relative to the player.
 
         The game's +y is drawn as up, which means the canvas y is negated: Tk's
-        y grows downward and the world's does not."""
-        return (half + (ex - me["x"]) * scale,
-                half - (ey - me["y"]) * scale)
+        y grows downward and the world's does not.
+
+        `rot` is (cos r, sin r) in rotating mode and None in fixed mode. The
+        offset is turned so the direction the player faces lands at the top of
+        the map — which is what lets the arrow stay still.
+
+        Facing is (cos r, sin r), i.e. r is measured from +x. Turning that to
+        screen-up is a rotation by (pi/2 - r), which reduces to the form below;
+        substituting the facing vector gives (0, 1) as it should."""
+        dx, dy = ex - me["x"], ey - me["y"]
+        if rot is not None:
+            ca, sa = rot
+            dx, dy = dx * sa - dy * ca, dx * ca + dy * sa
+        return half + dx * scale, half - dy * scale
 
     def _draw_minimap(self):
         if not self._shown.get("minimap"):
@@ -1982,16 +2037,25 @@ class Overlay:
             return
 
         theme = self._theme
-        c.configure(bg=theme.get("body", BG_BODY))
+        body = theme.get("body", BG_BODY)
+        c.configure(bg=body)
         track = theme.get("track", BG_BAR_TRACK)
+        mez = me.get("z", 0)
         # Range rings at a third and two thirds, so distances are readable
         # without a scale bar taking up room.
         for frac in (0.34, 0.67):
             r = half * frac
             c.create_oval(half - r, half - r, half + r, half + r,
                           outline=track, width=1)
-        c.create_line(half, 0, half, size, fill=track)
-        c.create_line(0, half, size, half, fill=track)
+        # Rings only, no crosshair: the rings carry the distance information on
+        # their own, and in rotating mode a crosshair would have to turn with
+        # the map, which reads as the whole panel wobbling.
+
+        # Rotating mode turns the world under a fixed arrow; fixed mode leaves
+        # the world alone and turns the arrow instead.
+        heading = float(me.get("r", 0.0) or 0.0)
+        rot = ((math.cos(heading), math.sin(heading))
+               if self._map_mode == "Rotating" else None)
 
         # The minimap always shows everyone nearby, regardless of the meter's
         # party/all mode — a map that hid the player standing next to you would
@@ -2006,29 +2070,42 @@ class Overlay:
             style = MINIMAP_STYLE_MAP[cat]
             for e in by_cat.get(cat, ()):
                 x, y = self._minimap_px(e.get("x", 0), e.get("y", 0), me,
-                                        half, scale)
+                                        half, scale, rot)
                 if not (0 <= x <= size and 0 <= y <= size):
                     continue        # outside the square; the hook's cull is round
                 r = style["r"] * self._ui_scale
                 # The local player is drawn last, as an arrow, not a dot.
                 if cat == "hero" and e.get("n") and e["n"] == local:
                     continue
-                self._map_glyph(c, x, y, r, style)
+                # Faded toward the background rather than hidden when it's on
+                # another floor: still there, but visibly not reachable.
+                far = abs(e.get("z", mez) - mez) > MINIMAP_Z_FADE
+                fill = style["fill"]
+                if far:
+                    fill = _lerp_hex(body, fill, MINIMAP_Z_DIM)
+                self._map_glyph(c, x, y, r, style, fill)
                 if cat == "hero" and e.get("n") in roster:
                     # Party members get a ring rather than a different colour:
                     # colour already means category, and overloading it would
                     # make a grouped player read as a different kind of thing.
                     rr = r + 2.5 * self._ui_scale
+                    ring = (_lerp_hex(body, MINIMAP_PARTY_RING, MINIMAP_Z_DIM)
+                            if far else MINIMAP_PARTY_RING)
                     c.create_oval(x - rr, y - rr, x + rr, y + rr,
-                                  outline=MINIMAP_PARTY_RING, width=2)
+                                  outline=ring, width=2)
                 drawn += 1
 
-        self._draw_me_arrow(c, half, me.get("r", 0.0))
+        # Rotating mode already turned the world, so the arrow points at the
+        # top of the map. Fixed mode turns the arrow instead: facing is
+        # (cos r, sin r) in world, and screen y is inverted.
+        if rot is not None:
+            self._draw_me_arrow(c, half, 0.0, -1.0)
+        else:
+            self._draw_me_arrow(c, half, math.cos(heading), -math.sin(heading))
         self.map_count.config(text=f"{drawn}  ·  {int(self._map_range)}u")
 
-    def _map_glyph(self, c, x, y, r, style):
+    def _map_glyph(self, c, x, y, r, style, fill):
         shape = style["shape"]
-        fill = style["fill"]
         if shape == "dot":
             c.create_oval(x - r, y - r, x + r, y + r, fill=fill, outline="")
         elif shape == "square":
@@ -2037,20 +2114,17 @@ class Overlay:
             c.create_polygon(x, y - r, x + r, y, x, y + r, x - r, y,
                              fill=fill, outline="")
 
-    def _draw_me_arrow(self, c, half, rot):
-        """You, at the centre, pointing where you're facing.
-
-        rotationZ is radians, measured from the same axis the positions use, so
-        the arrow is drawn straight from it — the map itself never turns."""
+    def _draw_me_arrow(self, c, half, dx, dy):
+        """You, at the centre. `dx, dy` is the way you're pointing in SCREEN
+        space — already resolved by the caller, because the two modes disagree
+        about it: fixed mode turns the arrow, rotating mode turned the world
+        instead and leaves the arrow pointing at the top of the map."""
         s = 6.0 * self._ui_scale
-        # Screen y is inverted relative to world y, hence the negated sine.
-        ca, sa = math.cos(rot), math.sin(rot)
-
-        def pt(fx, fy):
-            return (half + (fx * ca - fy * sa) * s,
-                    half - (fx * sa + fy * ca) * s)
-
-        tip, left, right, tail = pt(0, 1.4), pt(-0.9, -1.0), pt(0.9, -1.0), pt(0, -0.4)
+        px, py = -dy, dx        # perpendicular, for the two back corners
+        tip = (half + dx * 1.4 * s, half + dy * 1.4 * s)
+        tail = (half - dx * 0.4 * s, half - dy * 0.4 * s)
+        left = (half - dx * s + px * 0.9 * s, half - dy * s + py * 0.9 * s)
+        right = (half - dx * s - px * 0.9 * s, half - dy * s - py * 0.9 * s)
         c.create_polygon(*tip, *left, *tail, *right, fill=MINIMAP_ME,
                          outline=BG_BORDER, width=1)
 
@@ -2114,7 +2188,9 @@ class Overlay:
                                  font=self.fonts["ui_idle_i"])
             self._set_rift_box(RIFT_BOX_FAR)
             self._set_pulsing(False)
+            self._rift_idle = True
             return
+        self._rift_idle = False
         left = 3600 - into_hour
         mins, secs = divmod(left, 60)
         self.rift_title.config(text="NEXT RIFT")
@@ -2663,6 +2739,10 @@ class Overlay:
         # loop reads, and Tk isn't thread-safe.
         self._enqueue(lambda: self._set_theme_mode(value))()
 
+    def _on_map_mode_pick(self, value):
+        # Queued for the same reason as the theme pick: the draw pass reads it.
+        self._enqueue(lambda: setattr(self, "_map_mode", value))()
+
     def _toggle_hide_ooc(self):
         self._hide_ooc = not self._hide_ooc
         self._refresh_visibility()
@@ -2699,6 +2779,12 @@ class Overlay:
             # No countdown while you're inside a rift: you're in the thing it
             # was counting down to.
             if key == "rift" and self.ui_state.in_rift():
+                want = False
+            # ...nor while there's nothing to count. "No rift upcoming" is true
+            # for six minutes of every hour and is not worth a panel; the
+            # escape menu still brings it back, like every other hidden thing,
+            # so the Show/hide tick can be seen to do something.
+            if key == "rift" and self._rift_idle and not self._menu_unlock:
                 want = False
             changed |= self._want_visible(key, want)
         menu_visible = self._menu_unlock and not self._prompt_open

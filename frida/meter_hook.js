@@ -331,6 +331,13 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
         if (!cat) continue;
         try {
             if (e.add(OFF.State.removed).readU8()) continue;   // despawned
+            // Pets and summons are ent.Foe like any mob — the only thing that
+            // separates them is an owner. Dropped here rather than sent and
+            // filtered, since nothing downstream wants them.
+            if (cat === "foe" && OFF.Foe) {
+                const owner = e.add(OFF.Foe.summonOwner).readPointer();
+                if (owner && !owner.isNull()) continue;
+            }
             const x = e.add(OFF.Entity.posx).readDouble();
             const y = e.add(OFF.Entity.posy).readDouble();
             const dx = x - me.x, dy = y - me.y;
@@ -338,7 +345,11 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
             // Culled here rather than overlay-side so the payload stays small
             // regardless of how crowded the zone is. Rounded for the same
             // reason: sub-unit precision is invisible on a minimap.
-            const ent = { c: cat, x: Math.round(x), y: Math.round(y) };
+            // z rides along so the overlay can fade things on a different
+            // floor: a mob directly below you is not the same news as one you
+            // can walk to, and on the flat map they look identical.
+            const ent = { c: cat, x: Math.round(x), y: Math.round(y),
+                          z: Math.round(e.add(OFF.Entity.posz).readDouble()) };
             if (cat === "hero") {
                 // Named so the overlay can ring party members. Party membership
                 // is matched by name against the group roster the meter already
@@ -365,6 +376,7 @@ function sweepWorld() {
         const me = {
             x: localHero.add(OFF.Entity.posx).readDouble(),
             y: localHero.add(OFF.Entity.posy).readDouble(),
+            z: localHero.add(OFF.Entity.posz).readDouble(),
             r: localHero.add(OFF.Entity.rotationZ).readDouble(),   // radians
         };
         const out = [], seen = {};
@@ -376,6 +388,7 @@ function sweepWorld() {
         sweepArray(layer.add(G.interactibles).readPointer(), out, me, false, seen);
         sweepArray(layer.add(G.entities).readPointer(), out, me, true, seen);
         send({ kind: "world", me: { x: Math.round(me.x), y: Math.round(me.y),
+                                    z: Math.round(me.z),
                                     r: Math.round(me.r * 1000) / 1000 },
                ents: out });
     } catch (e) {}

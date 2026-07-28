@@ -60,6 +60,10 @@
   "Activity": {
     "kind": 464
   },
+  "Foe": {
+    "summonOwner": 1224,
+    "persistantSummon": 1240
+  },
   "ArrayObj": {
     "length": 8,
     "array": 16,

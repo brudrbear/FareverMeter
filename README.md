@@ -192,7 +192,8 @@ again.
 |---|---|---|
 | Options | Show all players / Show party only | switches between your group and everyone nearby; resets the encounter |
 | Options | Theme | `Dynamic` (default) follows the game — rift colours inside a rift, Farever colours everywhere else. `Farever` and `Rift` pin it either way. |
-| Show / hide | Damage meter / Breakdown / Healing columns / Rift timer | hides that piece of the overlay (the control menu stays, so you can bring it back) |
+| Options | Minimap | `Rotating` (default) turns the map so you always face the top of it. `Fixed` keeps north up and turns the arrow instead. |
+| Show / hide | Damage meter / Breakdown / Healing columns / Rift timer / Minimap | hides that piece of the overlay (the control menu stays, so you can bring it back) |
 | Show / hide | Hide out of combat | fades both windows away a few seconds after the fighting stops |
 | Actions | 60s Parse Mode | see below |
 | Actions | Parse Screenshots | opens `parses/` in Explorer (created on the spot if you haven't run one yet) |
@@ -244,6 +245,24 @@ resetting the data (`Shift+\`, the menu button, or a zone change), returns to
 normal live metering. Either route clears the sample: resuming capture into a
 finished parse would quietly append live hits to the numbers you were reading.
 
+### Minimap
+
+A square map of what's around you, drawn from the game's own entity lists:
+**players** (group members ringed blue), **mobs**, **chests**, **orbs**,
+**obelisks**, **respawn points** and **activities**. Drag it by its header like
+the other windows; its position is remembered and it has a Show / hide tick.
+
+`Rotating` (the default) turns the map so you're always facing the top of it.
+`Fixed` keeps the map still and turns the arrow instead. Two rings mark a third
+and two thirds of the range, which is 120 world units from the centre out.
+
+**Anything on a different floor is drawn faded** — a mob in the tunnel below you
+is not the same news as one you can walk to, and on a flat map they'd look
+identical. Pets and summons are left off entirely.
+
+It stays visible out of combat, since telling you what's nearby while you're
+travelling is most of the point.
+
 ### The only hotkey
 
 | Key | Action |
@@ -279,8 +298,11 @@ itself if the rift ends before you answer.
 A **rift countdown** floats separately, styled after the rifts rather than the
 meter — drag it anywhere, its position is remembered, and it's toggled under
 Show / hide. Rifts open on the hour, so it simply counts down the wall clock; for
-the first 6 minutes past the hour it reads "No rift upcoming", since the rift
-that just opened is the current one. It hides while you're inside a rift, and
+the first 6 minutes past the hour there is nothing to count down to, since the
+rift that just opened is the current one — so it takes itself off screen rather
+than sitting there saying "No rift upcoming" for a tenth of every hour. Open the
+escape menu and it comes back, like everything else you've hidden. It also hides
+while you're inside a rift, and
 it's the one element out-of-combat hiding leaves alone — a countdown you can
 only see mid-fight would be useless.
 

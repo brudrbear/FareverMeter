@@ -49,6 +49,7 @@ def main():
     inter = offs("ent.Interactible")
     activity = offs("st.Activity")
     arrobj = offs("hl.types.ArrayObj")
+    foe = offs("ent.Foe")
 
     # skill display-name chain: BaseSkill.inf (virtual #963) -> texts (#973) -> name
     row = code.types[963]
@@ -99,6 +100,10 @@ def main():
         "Interactible": {"enabled": inter["enabled"][0],
                          "isOffScreen": inter["isOffScreen"][0]},
         "Activity": {"kind": activity["kind"][0]},
+        # A foe with a summonOwner is somebody's pet, not a mob. That's the
+        # only reliable way to tell them apart — they're the same class.
+        "Foe": {"summonOwner": foe["summonOwner"][0],
+                "persistantSummon": foe["persistantSummon"][0]},
         # hl.types.ArrayObj: length, then a pointer to an hl_varray whose
         # ELEMENTS START AT +24, past its (t, at, size, pad) header. Reading
         # from +0 yields the header as your first entity and faults instantly.
