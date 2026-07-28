@@ -31,6 +31,9 @@ def main():
     ua = offs("ent.UnitAttributes")
     hero = offs("ent.Hero")
     layer = offs("st.GameLayer")
+    tstate = offs("TimeState")
+    wevents = offs("st.event.WorldEvents")
+    wevent = offs("st.event.WorldEvent")
     player = offs("st.Player")
     group = offs("st.Group")
     base = offs("st.skill.BaseSkill")
@@ -59,7 +62,19 @@ def main():
                  "isInCombat": hero["isInCombat"][0],
                  "layer": hero["layer"][0]},
         "GameLayer": {"isRift": layer["isRift"][0],
-                      "mainActivity": layer["mainActivity"][0]},
+                      "mainActivity": layer["mainActivity"][0],
+                      "worldEvents": layer["worldEvents"][0],
+                      "time": layer["_time"][0]},
+        # Rift countdown: worldEvents.currentEvents is an hxbit proxy array
+        # (same shape as Group.players), holding st.event.WorldEvent objects.
+        # startTime and serverNow share the server clock.
+        "TimeState": {"serverNow": tstate["serverNow"][0],
+                      "serverStart": tstate["serverStart"][0]},
+        "WorldEvents": {"currentEvents": wevents["currentEvents"][0]},
+        "WorldEvent": {"kind": wevent["kind"][0],
+                       "creationTime": wevent["creationTime"][0],
+                       "startTime": wevent["startTime"][0],
+                       "stopTime": wevent["stopTime"][0]},
         "Player": {"name": player["name"][0], "group": player["group"][0],
                    "isMe": player["isMe"][0], "lobbyId": player["lobbyId"][0]},
         "Group": {"groupId": group["groupId"][0], "players": group["players"][0]},

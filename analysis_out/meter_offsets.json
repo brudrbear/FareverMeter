@@ -36,7 +36,22 @@
   },
   "GameLayer": {
     "isRift": 248,
-    "mainActivity": 240
+    "mainActivity": 240,
+    "worldEvents": 288,
+    "time": 200
+  },
+  "TimeState": {
+    "serverNow": 184,
+    "serverStart": 192
+  },
+  "WorldEvents": {
+    "currentEvents": 176
+  },
+  "WorldEvent": {
+    "kind": 176,
+    "creationTime": 192,
+    "startTime": 200,
+    "stopTime": 208
   },
   "Player": {
     "name": 192,
