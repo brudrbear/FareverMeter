@@ -194,9 +194,9 @@ again.
 | Options | Theme | `Dynamic` (default) follows the game — rift colours inside a rift, Farever colours everywhere else. `Farever` and `Rift` pin it either way. |
 | Options | Minimap | `Rotating` (default) turns the map with the camera, so the top of the map is whatever you're looking at. `Fixed` keeps north up and turns the arrow instead. |
 | Options | Map refresh | how often the minimap is updated — `Ultra` (~30/sec), `High` (~16/sec, default), `Medium` (~9/sec), `Low` (~4/sec). Lower costs less CPU in the game; below about 8/sec the dots visibly step. |
-| Options | UI Scale | resizes the meter, breakdown and control menu |
-| Options | Minimap Scale | resizes the minimap alone, 50–250% |
-| Show / hide | Damage meter / Breakdown / Healing columns / Rift timer / Minimap | hides that piece of the overlay (the control menu stays, so you can bring it back) |
+| Scaling | Meter / Breakdown / Settings / Minimap | each window sizes independently, so one can be big and another small |
+| Show / hide | Damage meter / Breakdown / Rift timer / Minimap | `Show`, `Hide`, or `Show in ESC` — the last keeps it off screen while you play and brings it back with the game's menu |
+| Show / hide | Healing columns | columns inside the meter rather than a window, so it stays a tick |
 | Show / hide | Hide out of combat | fades both windows away a few seconds after the fighting stops |
 | Actions | 60s Parse Mode | see below |
 | Actions | Parse Screenshots | opens `parses/` in Explorer (created on the spot if you haven't run one yet) |

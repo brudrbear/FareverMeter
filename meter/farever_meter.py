@@ -177,10 +177,16 @@ PARSE_LENGTH_SECS = 60
 # backed by Overlay._show[key].
 # A key that names a window in Overlay._element_win is mapped/unmapped wholesale;
 # any other key is a content toggle handled inside the render pass.
+# Each overlay window is Show / Hide / Show in ESC rather than a tick, so
+# "hidden while playing but there when I open the menu" is something you can
+# ask for directly. It used to be what an unticked box did, which meant there
+# was no way to say "hidden, and I mean it".
+ELEMENT_MODES = ("Show", "Hide", "Show in ESC")
+ELEMENT_SHOW, ELEMENT_HIDE, ELEMENT_ESC = ELEMENT_MODES
+
 TOGGLEABLE_ELEMENTS = (
     ("meter", "Damage meter"),
     ("detail", "Breakdown"),
-    ("healing", "Healing columns"),
     ("rift", "Rift timer"),
     ("minimap", "Minimap"),
 )
@@ -252,8 +258,14 @@ MINIMAP_ORDER = [k for k, _ in MINIMAP_STYLE]
 
 # What the hover strip says with nothing under the cursor. It doubles as the
 # hint that hovering does anything, which is why it isn't blank.
-MINIMAP_TIP_IDLE = "hover a marker for details"
+# Two lines even when idle, so the box never changes height under the cursor.
+MINIMAP_TIP_IDLE = "hover a marker\nfor details"
 MINIMAP_TIP_RADIUS = 9          # px of slack around a marker, at 100% scale
+# Names are elided rather than allowed to set the panel width. A long one
+# ("Fragrant Garlic Seedling") otherwise stretches the whole minimap sideways
+# on hover and snaps it back on leave, which moves the map out from under the
+# cursor you were pointing with.
+MINIMAP_TIP_MAXLEN = 22
 
 # Hover labels. Separate from the style table because these are prose for a
 # human, not drawing instructions.
@@ -412,15 +424,15 @@ FONT_SPECS = {
     "mono_10":    ("Consolas", 10),
     "mono_sm":    ("Consolas", 8),
     "mono_xl_b":  ("Consolas", 18, "bold"),
-    # The minimap has its own scale control, so its text has to be its own
-    # fonts — sharing the meter's would drag it back under the global slider.
-    "map_title":  ("Segoe UI", 8, "bold"),
-    "map_count":  ("Segoe UI", 7, "italic"),
-    "map_tip":    ("Segoe UI", 9),
 }
-# Excluded from the global UI scale; driven by the minimap's own instead.
-MAP_FONT_KEYS = ("map_title", "map_count", "map_tip")
 UI_SCALE_MIN, UI_SCALE_MAX = 75, 175      # percent
+# The independently-scaled window groups, in the order the menu lists them.
+SCALE_GROUPS = (
+    ("meter", "Meter"),
+    ("detail", "Breakdown"),
+    ("menu", "Settings"),
+    ("minimap", "Minimap"),
+)
 # Wider than the UI's: a minimap is worth making genuinely large on a big
 # screen, and genuinely small when it's only there for a glance.
 MINIMAP_SCALE_MIN, MINIMAP_SCALE_MAX = 50, 250
@@ -1596,8 +1608,11 @@ class Overlay:
         self._hide_ooc = False         # "hide out of combat" setting
         # _show is what the player asked for, _shown is what's actually mapped
         # (they differ while out-of-combat hiding is in effect).
-        self._show = {k: True for k, _ in TOGGLEABLE_ELEMENTS}
-        self._shown = dict(self._show)
+        self._show = {k: ELEMENT_SHOW for k, _ in TOGGLEABLE_ELEMENTS}
+        # Healing is columns inside the meter, not a window of its own, so it
+        # stays a plain on/off rather than gaining a mode it can't honour.
+        self._show_heal = True
+        self._shown = {k: True for k, _ in TOGGLEABLE_ELEMENTS}
         self._heal_cols_shown = True   # last healing layout pushed to the widgets
         self._combat_seen_at = 0.0     # last moment a tracked player was fighting
         self._header_bg = BG_HEADER    # last tint pushed to the header bars
@@ -1609,7 +1624,11 @@ class Overlay:
         self._update_shown = False     # the update notice is applied once
         self._map_mode = MINIMAP_MODES[0]   # "Rotating" — you always face up
         self._map_rate = "High"        # Ultra exists but is opt-in
-        self._map_scale = 1.0          # minimap only; independent of UI scale
+        # One scale per window group. Each window wants a size that suits its
+        # job — the meter one that suits reading numbers, the map one that
+        # suits the screen it covers — and a single slider means at least one
+        # of them is always wrong.
+        self._scales = {"meter": 1.0, "detail": 1.0, "menu": 1.0, "minimap": 1.0}
         self._game_hwnd = None         # cached; re-resolved if it goes stale
         self._cursor_free = False      # game has released the mouse (Alt, menus)
         self._last_cam = None          # last camera heading seen; see _draw_minimap
@@ -1634,19 +1653,35 @@ class Overlay:
         # Before any widget exists: the dropdowns and Show/hide ticks are built
         # from these, so loading afterwards would leave the menu disagreeing
         # with the state it is supposed to be showing.
-        self._pending_scale = None
-        self._pending_map_scale = None
+        self._pending_scales = None
         self._load_settings()
 
         pos = self._load_positions()
         self.root = tk.Tk()
         self._ui_scale = 1.0
-        self.fonts = {}
-        for key, (family, size, *style) in FONT_SPECS.items():
-            self.fonts[key] = tkfont.Font(
-                root=self.root, family=family, size=size,
-                weight="bold" if "bold" in style else "normal",
-                slant="italic" if "italic" in style else "roman")
+        # One font set per independently-scaled window group. Tk fonts are
+        # shared objects, so resizing one would resize every widget using it —
+        # separate scales mean separate sets, not a cleverer setter.
+        #   fonts    the meter, and the small floating bits that belong with it
+        #            (rift timer, hint, parse banner, rift prompt)
+        #   fonts_d  the breakdown
+        #   fonts_m  the control menu
+        #   fonts_map the minimap
+        def _font_set():
+            out = {}
+            for key, (family, size, *style) in FONT_SPECS.items():
+                out[key] = tkfont.Font(
+                    root=self.root, family=family, size=size,
+                    weight="bold" if "bold" in style else "normal",
+                    slant="italic" if "italic" in style else "roman")
+            return out
+
+        self.fonts = _font_set()
+        self.fonts_d = _font_set()
+        self.fonts_m = _font_set()
+        self.fonts_map = _font_set()
+        self._font_sets = {"meter": self.fonts, "detail": self.fonts_d,
+                           "menu": self.fonts_m, "minimap": self.fonts_map}
         self.root.title("Farever+ Party Meter")
         self.detail = tk.Toplevel(self.root)
         self.detail.title("Farever+ Breakdown")
@@ -1708,17 +1743,14 @@ class Overlay:
         self._build_minimap()
         self.root.update_idletasks()
         self._place_windows(pos)
-        # A restored scale can only be applied now: it resizes the named fonts,
-        # which every window has already been packed against. The slider is set
-        # from it too, or the menu would show 100% while the UI is at 125.
-        if self._pending_scale and abs(self._pending_scale - 1.0) > 0.001:
-            self._scale_var.set(int(round(self._pending_scale * 100)))
-            self._set_ui_scale(self._pending_scale)
-        self._pending_scale = None
-        if self._pending_map_scale and abs(self._pending_map_scale - 1.0) > 0.001:
-            self._map_scale_var.set(int(round(self._pending_map_scale * 100)))
-            self._set_map_scale(self._pending_map_scale)
-        self._pending_map_scale = None
+        # Restored scales can only be applied now: they resize the fonts every
+        # window has already been packed against. The sliders are set from them
+        # too, or the menu would read 100% while the window is at 125.
+        for group, factor in (self._pending_scales or {}).items():
+            if group in self._scales and abs(factor - 1.0) > 0.001:
+                self._scale_vars[group].set(int(round(factor * 100)))
+                self._set_group_scale(group, factor)
+        self._pending_scales = None
         # The control menu and its hint only exist while the game's escape menu
         # is up; _sync_game_ui maps them in. The parse banner is mapped by parse
         # mode itself, and deliberately answers to nothing else — a countdown
@@ -1872,24 +1904,42 @@ class Overlay:
             self.mode = data["mode"]
         if isinstance(data.get("hide_ooc"), bool):
             self._hide_ooc = data["hide_ooc"]
-        try:
-            scale = float(data.get("ui_scale", 1.0))
-            if UI_SCALE_MIN <= scale * 100 <= UI_SCALE_MAX:
-                self._pending_scale = scale
-        except (TypeError, ValueError):
-            pass
-        try:
-            ms = float(data.get("map_scale", 1.0))
-            if MINIMAP_SCALE_MIN <= ms * 100 <= MINIMAP_SCALE_MAX:
-                self._pending_map_scale = ms
-        except (TypeError, ValueError):
-            pass
+        # Scales can only be applied once the fonts exist, so they're parked
+        # here and used after the windows are built.
+        saved = data.get("scales")
+        if not isinstance(saved, dict):
+            # Written by the build with one global slider plus a separate
+            # minimap one. The global value becomes the meter's, which is the
+            # window it mostly stood for.
+            saved = {"meter": data.get("ui_scale"),
+                     "minimap": data.get("map_scale")}
+        pending = {}
+        for group, _label in SCALE_GROUPS:
+            lo, hi = ((MINIMAP_SCALE_MIN, MINIMAP_SCALE_MAX) if group == "minimap"
+                      else (UI_SCALE_MIN, UI_SCALE_MAX))
+            try:
+                v = float(saved.get(group))
+            except (TypeError, ValueError):
+                continue
+            if lo <= v * 100 <= hi:
+                pending[group] = v
+        self._pending_scales = pending
+        if isinstance(data.get("show_heal"), bool):
+            self._show_heal = data["show_heal"]
         show = data.get("show")
         if isinstance(show, dict):
             for key, _label in TOGGLEABLE_ELEMENTS:
-                if isinstance(show.get(key), bool):
-                    self._show[key] = show[key]
-            self._shown = dict(self._show)
+                v = show.get(key)
+                if v in ELEMENT_MODES:
+                    self._show[key] = v
+                elif isinstance(v, bool):
+                    # Written by a build that had ticks rather than modes. An
+                    # unticked box then meant "hidden while playing, back when
+                    # the menu opens", which is exactly Show in ESC — so the
+                    # setting survives the upgrade instead of silently changing
+                    # behaviour.
+                    self._show[key] = ELEMENT_SHOW if v else ELEMENT_ESC
+            self._shown = {k: True for k, _ in TOGGLEABLE_ELEMENTS}
 
     def _save_settings(self):
         """Write the settings out. Called on every change rather than at exit —
@@ -1903,10 +1953,11 @@ class Overlay:
                 "map_rate": self._map_rate,
                 "mode": self.mode,
                 "hide_ooc": self._hide_ooc,
-                "ui_scale": round(self._ui_scale, 3),
-                "map_scale": round(self._map_scale, 3),
-                "show": {k: bool(self._show.get(k, True))
+                "scales": {g: round(self._scales[g], 3)
+                           for g, _label in SCALE_GROUPS},
+                "show": {k: self._show.get(k, ELEMENT_SHOW)
                          for k, _label in TOGGLEABLE_ELEMENTS},
+                "show_heal": bool(self._show_heal),
             }, indent=2))
         except OSError as e:
             print(f"[meter] couldn't save settings: {e}", file=sys.stderr)
@@ -1971,7 +2022,7 @@ class Overlay:
 
     def _meter_cols_text(self):
         head = f"  #  {'NAME':<12}{'DMG':>9} {'DPS':>6} {'%':>4}"
-        return head + (f"{'HEAL':>9}" if self._show["healing"] else "")
+        return head + (f"{'HEAL':>9}" if self._show_heal else "")
 
     def _build_detail(self):
         self.d_border = border = tk.Frame(self.detail, bg=BG_BORDER, padx=2, pady=2)
@@ -1981,7 +2032,7 @@ class Overlay:
         self.d_header.pack(fill="x")
         self.d_title = tk.Label(self.d_header, text="Breakdown",
                                 bg=BG_HEADER, fg=FG_HEADER,
-                                font=self.fonts["ui_b"], anchor="w",
+                                font=self.fonts_d["ui_b"], anchor="w",
                                 padx=8, pady=4)
         self.d_title.pack(side="left")
         # Sits in the header rather than the body so it reads as a caption on
@@ -1989,29 +2040,29 @@ class Overlay:
         self.d_tip = tk.Label(self.d_header,
                               text="Click a player in the meter to view details",
                               bg=BG_HEADER, fg=FG_HEADER_DIM,
-                              font=self.fonts["ui_tiny_i"], anchor="e", padx=8)
+                              font=self.fonts_d["ui_tiny_i"], anchor="e", padx=8)
         self.d_tip.pack(side="right")
         self._bind_drag(self.detail, (self.d_header, self.d_title, self.d_tip))
 
         self.d_body = body = tk.Frame(border, bg=BG_BODY, padx=8, pady=6)
         body.pack(fill="both", expand=True)
         self.stats_lbl = tk.Label(body, text="", bg=BG_BODY, fg=FG_TEXT,
-                                  font=self.fonts["mono"], anchor="w")
+                                  font=self.fonts_d["mono"], anchor="w")
         self.stats_lbl.pack(fill="x")
 
         self.d_cols = cols = tk.Frame(body, bg=BG_BODY)
         cols.pack(fill="x", pady=(3, 2))
-        self.dmg_col = SkillColumn(cols, "DAMAGE", DMG_BAR, self.fonts)
+        self.dmg_col = SkillColumn(cols, "DAMAGE", DMG_BAR, self.fonts_d)
         self.dmg_col.f.pack(side="left", anchor="n")
         # Kept as attributes so the healing toggle can unpack them; re-packing
         # in this order puts them back to the right of the damage column.
         self.col_sep = tk.Frame(cols, bg=BG_BODY_SOFT, width=1)
         self.col_sep.pack(side="left", fill="y", padx=6)
-        self.heal_col = SkillColumn(cols, "HEALING", HEAL_BAR, self.fonts)
+        self.heal_col = SkillColumn(cols, "HEALING", HEAL_BAR, self.fonts_d)
         self.heal_col.f.pack(side="left", anchor="n")
 
         self.elem_lbl = tk.Label(body, text="", bg=BG_BODY, fg=FG_DIM,
-                                 font=self.fonts["mono_sm"], anchor="w", justify="left")
+                                 font=self.fonts_d["mono_sm"], anchor="w", justify="left")
         self.elem_lbl.pack(fill="x", pady=(3, 0))
         self.detail.minsize(MIN_W["detail"], 0)
 
@@ -2028,7 +2079,7 @@ class Overlay:
         self.m_header.pack(fill="x")
         self.m_title = tk.Label(self.m_header, text="Farever+ Controls",
                                 bg=BG_HEADER_UNLOCKED, fg=FG_HEADER,
-                                font=self.fonts["ui_b"], anchor="w",
+                                font=self.fonts_m["ui_b"], anchor="w",
                                 padx=8, pady=4)
         self.m_title.pack(side="left")
         self._bind_drag(self.menu, (self.m_header, self.m_title))
@@ -2047,7 +2098,7 @@ class Overlay:
                                  else SHUTDOWN_HINT,
                                  bg=BG_BODY,
                                  fg=FG_WARN if HAS_CONSOLE else FG_DIM,
-                                 font=self.fonts["ui_sm_b"],
+                                 font=self.fonts_m["ui_sm_b"],
                                  anchor="w", justify="left",
                                  wraplength=WARN_WRAP)
         self.warn_lbl.pack(fill="x", pady=(0, 8))
@@ -2068,17 +2119,17 @@ class Overlay:
             row = tk.Frame(parent, bg=BG_BODY)
             row.pack(fill="x", pady=(0 if first else 9, 3))
             tk.Label(row, text=text, bg=BG_BODY, fg=ACCENT,
-                     font=self.fonts["ui_sm_b"], anchor="w").pack(side="left")
+                     font=self.fonts_m["ui_sm_b"], anchor="w").pack(side="left")
             if note:
                 # Quieter than the heading it hangs off: it's a note about how
                 # the section behaves, not another thing to read every time.
                 tk.Label(row, text=note, bg=BG_BODY, fg=FG_DIM,
-                         font=self.fonts["ui_tiny_i"],
+                         font=self.fonts_m["ui_tiny_i"],
                          anchor="e").pack(side="right")
 
         def button(parent, cmd):
             b = tk.Button(parent, text="", command=cmd, anchor="w",
-                          font=self.fonts["ui"], bg=BG_BODY_SOFT, fg=FG_TEXT,
+                          font=self.fonts_m["ui"], bg=BG_BODY_SOFT, fg=FG_TEXT,
                           activebackground=BG_BAR_TRACK, activeforeground=FG_VALUE,
                           relief="flat", bd=0, padx=10, pady=5,
                           highlightthickness=1, highlightbackground=BG_BAR_TRACK,
@@ -2091,7 +2142,7 @@ class Overlay:
             row = tk.Frame(parent, bg=BG_BODY)
             row.pack(fill="x", pady=2)
             tk.Label(row, text=label, bg=BG_BODY, fg=FG_TEXT,
-                     font=self.fonts["ui"], anchor="w", padx=2).pack(side="left")
+                     font=self.fonts_m["ui"], anchor="w", padx=2).pack(side="left")
             return row
 
         # Commands are queued rather than run inline: they mutate overlay state
@@ -2106,13 +2157,13 @@ class Overlay:
         self.opt_theme.config(
             bg=BG_BODY_SOFT, fg=FG_TEXT, activebackground=BG_BAR_TRACK,
             activeforeground=FG_VALUE, relief="flat", bd=0, anchor="w",
-            padx=10, pady=3, font=self.fonts["ui"], cursor="hand2",
+            padx=10, pady=3, font=self.fonts_m["ui"], cursor="hand2",
             highlightthickness=1, highlightbackground=BG_BAR_TRACK,
             direction="right")
         self.opt_theme["menu"].config(
             bg=BG_BODY, fg=FG_TEXT, activebackground=BTN_ON_BG,
             activeforeground=FG_HEADER, bd=0, relief="flat",
-            font=self.fonts["ui"])
+            font=self.fonts_m["ui"])
         self.opt_theme.pack(side="right", expand=True, fill="x", padx=(8, 0))
 
         row = field(left, "Minimap")
@@ -2122,13 +2173,13 @@ class Overlay:
         self.opt_map.config(
             bg=BG_BODY_SOFT, fg=FG_TEXT, activebackground=BG_BAR_TRACK,
             activeforeground=FG_VALUE, relief="flat", bd=0, anchor="w",
-            padx=10, pady=3, font=self.fonts["ui"], cursor="hand2",
+            padx=10, pady=3, font=self.fonts_m["ui"], cursor="hand2",
             highlightthickness=1, highlightbackground=BG_BAR_TRACK,
             direction="right")
         self.opt_map["menu"].config(
             bg=BG_BODY, fg=FG_TEXT, activebackground=BTN_ON_BG,
             activeforeground=FG_HEADER, bd=0, relief="flat",
-            font=self.fonts["ui"])
+            font=self.fonts_m["ui"])
         self.opt_map.pack(side="right", expand=True, fill="x", padx=(8, 0))
 
         row = field(left, "Map refresh")
@@ -2139,53 +2190,61 @@ class Overlay:
         self.opt_rate.config(
             bg=BG_BODY_SOFT, fg=FG_TEXT, activebackground=BG_BAR_TRACK,
             activeforeground=FG_VALUE, relief="flat", bd=0, anchor="w",
-            padx=10, pady=3, font=self.fonts["ui"], cursor="hand2",
+            padx=10, pady=3, font=self.fonts_m["ui"], cursor="hand2",
             highlightthickness=1, highlightbackground=BG_BAR_TRACK,
             direction="right")
         self.opt_rate["menu"].config(
             bg=BG_BODY, fg=FG_TEXT, activebackground=BTN_ON_BG,
             activeforeground=FG_HEADER, bd=0, relief="flat",
-            font=self.fonts["ui"])
+            font=self.fonts_m["ui"])
         self.opt_rate.pack(side="right", expand=True, fill="x", padx=(8, 0))
 
         # Every font in the overlay is a named Tk font, so dragging this resizes
         # the lot. Released rather than live: repainting the whole tree on each
         # pixel of drag is visibly slow.
-        row = field(left, "UI Scale")
-        self._scale_var = tk.IntVar(value=int(round(self._ui_scale * 100)))
-        self.scl_ui = tk.Scale(
-            row, from_=UI_SCALE_MIN, to=UI_SCALE_MAX, resolution=5,
-            orient="horizontal", variable=self._scale_var, showvalue=True,
-            bg=BG_BODY, fg=FG_DIM, troughcolor=BG_BAR_TRACK,
-            activebackground=BTN_ON_BG, highlightthickness=0, bd=0,
-            sliderrelief="flat", font=self.fonts["ui_tiny_i"], length=130,
-            cursor="hand2")
-        self.scl_ui.bind("<ButtonRelease-1>", self._on_scale_pick)
-        self.scl_ui.pack(side="right", expand=True, fill="x", padx=(8, 0))
+        section(left, "SCALING")
+        self._scale_vars = {}
+        for group, label in SCALE_GROUPS:
+            row = field(left, label)
+            var = tk.IntVar(value=int(round(self._scales[group] * 100)))
+            self._scale_vars[group] = var
+            lo, hi = (MINIMAP_SCALE_MIN, MINIMAP_SCALE_MAX) if group == "minimap"                 else (UI_SCALE_MIN, UI_SCALE_MAX)
+            scl = tk.Scale(
+                row, from_=lo, to=hi, resolution=5, orient="horizontal",
+                variable=var, showvalue=True, bg=BG_BODY, fg=FG_DIM,
+                troughcolor=BG_BAR_TRACK, activebackground=BTN_ON_BG,
+                highlightthickness=0, bd=0, sliderrelief="flat",
+                font=self.fonts_m["ui_tiny_i"], length=120, cursor="hand2")
+            # Released rather than live: repainting a whole window on each
+            # pixel of drag is visibly slow.
+            scl.bind("<ButtonRelease-1>",
+                     lambda _e, g=group: self._on_scale_pick(g))
+            scl.pack(side="right", expand=True, fill="x", padx=(8, 0))
 
-        # Its own slider: the map wants a size that suits the screen it covers,
-        # the meter one that suits reading numbers. Tied together, one of the
-        # two is always wrong.
-        row = field(left, "Minimap Scale")
-        self._map_scale_var = tk.IntVar(value=int(round(self._map_scale * 100)))
-        self.scl_map = tk.Scale(
-            row, from_=MINIMAP_SCALE_MIN, to=MINIMAP_SCALE_MAX, resolution=5,
-            orient="horizontal", variable=self._map_scale_var, showvalue=True,
-            bg=BG_BODY, fg=FG_DIM, troughcolor=BG_BAR_TRACK,
-            activebackground=BTN_ON_BG, highlightthickness=0, bd=0,
-            sliderrelief="flat", font=self.fonts["ui_tiny_i"], length=130,
-            cursor="hand2")
-        self.scl_map.bind("<ButtonRelease-1>", self._on_map_scale_pick)
-        self.scl_map.pack(side="right", expand=True, fill="x", padx=(8, 0))
-
-        section(left, "SHOW / HIDE", note="Always visible when Esc is open")
-        self.element_btns = {
-            key: button(left, self._enqueue(lambda k=key: self._toggle_element(k)))
-            for key, _label in TOGGLEABLE_ELEMENTS
-        }
+        section(left, "SHOW / HIDE")
+        self.element_vars = {}
+        for key, label in TOGGLEABLE_ELEMENTS:
+            row = field(left, label)
+            var = tk.StringVar(value=self._show.get(key, ELEMENT_SHOW))
+            self.element_vars[key] = var
+            opt = tk.OptionMenu(row, var, *ELEMENT_MODES,
+                                command=lambda v, k=key: self._on_element_pick(k, v))
+            opt.config(
+                bg=BG_BODY_SOFT, fg=FG_TEXT, activebackground=BG_BAR_TRACK,
+                activeforeground=FG_VALUE, relief="flat", bd=0, anchor="w",
+                padx=8, pady=2, font=self.fonts_m["ui"], cursor="hand2",
+                highlightthickness=1, highlightbackground=BG_BAR_TRACK,
+                direction="right")
+            opt["menu"].config(
+                bg=BG_BODY, fg=FG_TEXT, activebackground=BTN_ON_BG,
+                activeforeground=FG_HEADER, bd=0, relief="flat",
+                font=self.fonts_m["ui"])
+            opt.pack(side="right", expand=True, fill="x", padx=(8, 0))
+        # Columns inside the meter rather than a window, so it keeps its tick.
+        self.btn_heal = button(left, self._enqueue(self._toggle_heal))
         # Last in this section rather than under OPTIONS: it hides the same
-        # windows the checkboxes above do, just on a condition instead of a
-        # click.
+        # windows the dropdowns above do, just on a condition instead of a
+        # choice.
         self.btn_hide_ooc = button(left, self._enqueue(self._toggle_hide_ooc))
 
         section(right, "ACTIONS", first=True)
@@ -2251,11 +2310,11 @@ class Overlay:
         self.map_header = tk.Frame(self.map_border, bg=BG_HEADER)
         self.map_header.pack(fill="x")
         self.map_title = tk.Label(self.map_header, text="Nearby", bg=BG_HEADER,
-                                  fg=FG_HEADER, font=self.fonts["map_title"],
+                                  fg=FG_HEADER, font=self.fonts_map["ui_sm_b"],
                                   anchor="w", padx=6, pady=2)
         self.map_title.pack(side="left")
         self.map_count = tk.Label(self.map_header, text="", bg=BG_HEADER,
-                                  fg=FG_HEADER_DIM, font=self.fonts["map_count"],
+                                  fg=FG_HEADER_DIM, font=self.fonts_map["ui_tiny_i"],
                                   anchor="e", padx=6, pady=2)
         self.map_count.pack(side="right")
         _mb = THEME_DEFAULT["map_body"]
@@ -2273,8 +2332,8 @@ class Overlay:
         self.map_tip = tk.Label(self.map_tipbox, text=MINIMAP_TIP_IDLE,
                                 bg=_lerp_hex(_mb, "#000000", 0.30),
                                 fg=_lerp_hex(_mb, "#FFFFFF", 0.55),
-                                font=self.fonts["map_tip"], anchor="w",
-                                padx=8, pady=5)
+                                font=self.fonts_map["ui"], anchor="w",
+                                justify="left", padx=8, pady=5)
         self.map_tip.pack(fill="x")
         # Hit targets from the last draw: (x, y, radius, label, dist, dz).
         # Rebuilt every frame, which is also what keeps it honest — a stale
@@ -2320,7 +2379,7 @@ class Overlay:
         c = self.map_canvas
         me, ents, _stamp = self.world.read()
         c.delete("all")
-        size = int(MINIMAP_SIZE * self._map_scale)
+        size = int(MINIMAP_SIZE * self._scales["minimap"])
         if int(c["width"]) != size:
             c.config(width=size, height=size)
         half = size / 2.0
@@ -2333,7 +2392,7 @@ class Overlay:
             c.create_text(half, half, text="waiting for the game",
                           fill=_lerp_hex(self._theme.get("map_body", BG_BODY),
                                          "#FFFFFF", 0.45),
-                          font=self.fonts["map_count"])
+                          font=self.fonts_map["ui_tiny_i"])
             self.map_count.config(text="")
             self._map_hits = []
             return
@@ -2388,7 +2447,7 @@ class Overlay:
                                         half, scale, rot)
                 if not (0 <= x <= size and 0 <= y <= size):
                     continue        # outside the square; the hook's cull is round
-                r = style["r"] * self._map_scale
+                r = style["r"] * self._scales["minimap"]
                 # The local player is drawn last, as an arrow, not a dot.
                 if cat == "hero" and e.get("n") and e["n"] == local:
                     continue
@@ -2424,7 +2483,7 @@ class Overlay:
                     # Party members get a ring rather than a different colour:
                     # colour already means category, and overloading it would
                     # make a grouped player read as a different kind of thing.
-                    rr = r + 2.5 * self._map_scale
+                    rr = r + 2.5 * self._scales["minimap"]
                     ring = (_lerp_hex(body, MINIMAP_PARTY_RING, MINIMAP_Z_DIM)
                             if fade else MINIMAP_PARTY_RING)
                     c.create_oval(x - rr, y - rr, x + rr, y + rr,
@@ -2438,9 +2497,9 @@ class Overlay:
         hit = self._update_map_tip()
         if hit is not None:
             hx, hy, hr = hit[0], hit[1], hit[2]
-            rr = hr + 4.0 * self._map_scale
+            rr = hr + 4.0 * self._scales["minimap"]
             c.create_oval(hx - rr, hy - rr, hx + rr, hy + rr,
-                          outline="#FFFFFF", width=max(1, int(round(self._map_scale * 2))))
+                          outline="#FFFFFF", width=max(1, int(round(self._scales["minimap"] * 2))))
 
     def _facing_screen(self, world_angle, heading, rotating):
         """A world heading as a screen-space unit vector.
@@ -2472,7 +2531,7 @@ class Overlay:
             far = min(far, half / abs(dy))
         c.create_line(half, half, half + dx * far, half + dy * far,
                       fill=_lerp_hex(body, accent, MINIMAP_VIEW_LINE),
-                      width=max(1, int(self._map_scale)))
+                      width=max(1, int(self._scales["minimap"])))
 
     def _on_map_hover(self, event):
         """Only reachable while the game's escape menu is open, because that's
@@ -2488,7 +2547,7 @@ class Overlay:
             return None
         cx, cy = self._map_cursor
         best, best_d2 = None, None
-        slack = MINIMAP_TIP_RADIUS * self._map_scale
+        slack = MINIMAP_TIP_RADIUS * self._scales["minimap"]
         for hit in self._map_hits:
             hx, hy, r = hit[0], hit[1], hit[2]
             reach = max(r, slack)
@@ -2510,9 +2569,16 @@ class Overlay:
         # that helps, and one combined number would hide exactly that.
         updown = "level" if abs(dz) < 1 else (f"{abs(dz):.0f} up" if dz > 0
                                               else f"{abs(dz):.0f} down")
-        self.map_tip.config(text=f"{label}   ·   {dist:.0f}u away   ·   {updown}",
+        # Name on its own line, position under it: a long name would otherwise
+        # set the width of the whole panel and shove the map sideways on hover.
+        self.map_tip.config(text=f"{label}\n{dist:.0f}u away   ·   {updown}",
                             fg=self._map_ink(0.95))
         return hit
+
+    @staticmethod
+    def _elide(text, limit=MINIMAP_TIP_MAXLEN):
+        text = (text or "").strip()
+        return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
 
     def _marker_label(self, cat, e, roster):
         """What the hover line calls this marker.
@@ -2523,15 +2589,18 @@ class Overlay:
         left to the ring colour, since that's the thing you're hovering to
         find out."""
         name = e.get("n")
+        # Only the name is elided — the bracketed kind is the part that makes
+        # the line readable, so it must survive.
         if cat == "hero":
             if not name:
                 return "Player"
-            return f"{name} ({'Party' if name in roster else 'Player'})"
+            kind = "Party" if name in roster else "Player"
+            return f"{self._elide(name)} ({kind})"
         if cat == "foe":
             # The CDB display name once the agent has resolved it; until then
             # the internal id, prettified, so a foe is never just "Enemy".
             nm = (name or "").strip() or _pretty_id(e.get("k") or "")
-            return f"{nm} (Enemy)" if nm else "Enemy"
+            return f"{self._elide(nm)} (Enemy)" if nm else "Enemy"
         return MINIMAP_LABELS.get(cat, cat.title())
 
     def _clear_map_tip(self, drop_cursor=False):
@@ -2580,7 +2649,7 @@ class Overlay:
         whether you need to go up or down to reach it, which is the part you
         act on."""
         s = r * 0.8
-        gap = r + 2.0 * self._map_scale
+        gap = r + 2.0 * self._scales["minimap"]
         if dz > 0:
             pts = (x - s, y - gap, x + s, y - gap, x, y - gap - s)
         else:
@@ -2592,7 +2661,7 @@ class Overlay:
         space — already resolved by the caller, because the two modes disagree
         about it: fixed mode turns the arrow, rotating mode turned the world
         instead and leaves the arrow pointing at the top of the map."""
-        s = 6.0 * self._map_scale
+        s = 6.0 * self._scales["minimap"]
         px, py = -dy, dx        # perpendicular, for the two back corners
         tip = (half + dx * 1.4 * s, half + dy * 1.4 * s)
         tail = (half - dx * 0.4 * s, half - dy * 0.4 * s)
@@ -3254,27 +3323,40 @@ class Overlay:
         if q and self._menu_unlock:
             self._refocus_game()
 
-    def _toggle_element(self, key):
-        """Show/hide one overlay element. The control menu itself is never in
-        TOGGLEABLE_ELEMENTS — it's how you get the others back."""
-        self._show[key] = not self._show[key]
+    def _on_element_pick(self, key, value):
+        self._enqueue(lambda: self._set_element_mode(key, value))()
+
+    def _set_element_mode(self, key, value):
+        """Show / Hide / Show in ESC for one overlay window. The control menu
+        is never in TOGGLEABLE_ELEMENTS — it's how you get the others back."""
+        if value not in ELEMENT_MODES:
+            return
+        self._show[key] = value
         self._save_settings()
         self._refresh_visibility()
 
-    def _on_scale_pick(self, _event=None):
-        self._enqueue(lambda: self._set_ui_scale(self._scale_var.get() / 100))()
+    def _toggle_heal(self):
+        self._show_heal = not self._show_heal
+        self._save_settings()
 
-    def _set_ui_scale(self, factor):
-        """Resize every named font, which resizes every window that packs to its
-        content. The two canvas-drawn banners measure their text at draw time,
+    def _on_scale_pick(self, group):
+        self._enqueue(lambda: self._set_group_scale(
+            group, self._scale_vars[group].get() / 100))()
+
+    def _set_group_scale(self, group, factor):
+        """Resize one window group's fonts, which resizes the windows that pack
+        to them. The two canvas-drawn banners measure their text at draw time,
         so they're re-drawn rather than left at the old size."""
-        if abs(factor - self._ui_scale) < 0.001:
+        if abs(factor - self._scales.get(group, 1.0)) < 0.001:
             return
-        self._ui_scale = factor
+        self._scales[group] = factor
         for key, (_family, size, *_style) in FONT_SPECS.items():
-            if key in MAP_FONT_KEYS:
-                continue          # the minimap answers to its own slider
-            self.fonts[key].configure(size=max(6, round(size * factor)))
+            self._font_sets[group][key].configure(
+                size=max(6, round(size * factor)))
+        if group == "meter":
+            # Kept in step because a pile of pixel constants (minimum widths,
+            # the warning wrap) are still expressed against it.
+            self._ui_scale = factor
         self._parse_text = None          # force the parse banner to re-measure
         self._save_settings()
         self._draw_hint()
@@ -3284,7 +3366,7 @@ class Overlay:
             win.minsize(int(MIN_W[key] * factor), 0)
         self.warn_lbl.config(wraplength=int(WARN_WRAP * factor))
         self.root.update_idletasks()
-        print(f"[meter] UI scale {factor:.2f}x", file=sys.stderr)
+        print(f"[meter] {group} scale {factor:.2f}x", file=sys.stderr)
 
     def _on_theme_pick(self, value):
         # Queued like every other menu action: it mutates state the refresh
@@ -3294,24 +3376,6 @@ class Overlay:
     def _on_map_mode_pick(self, value):
         # Queued for the same reason as the theme pick: the draw pass reads it.
         self._enqueue(lambda: self._set_map_mode(value))()
-
-    def _set_map_scale(self, factor):
-        """Resize the minimap alone. Separate from the UI scale because the map
-        wants a size that suits the screen it's overlaying, while the meter
-        wants a size that suits reading numbers — tying them together means one
-        of the two is always wrong."""
-        if abs(factor - self._map_scale) < 0.001:
-            return
-        self._map_scale = factor
-        for key in MAP_FONT_KEYS:
-            _family, size, *_style = FONT_SPECS[key]
-            self.fonts[key].configure(size=max(6, round(size * factor)))
-        self._save_settings()
-        print(f"[meter] minimap scale {factor:.2f}x", file=sys.stderr)
-
-    def _on_map_scale_pick(self, _event=None):
-        self._enqueue(
-            lambda: self._set_map_scale(self._map_scale_var.get() / 100))()
 
     def _set_map_mode(self, value):
         self._map_mode = value
@@ -3370,7 +3434,14 @@ class Overlay:
         changed = False
         for key in self._element_win:
             hidden = blanket or (ooc_hidden and key not in OOC_EXEMPT)
-            want = (self._show[key] or self._menu_unlock) and not hidden
+            mode = self._show.get(key, ELEMENT_SHOW)
+            if mode == ELEMENT_HIDE:
+                base = False           # hidden, and stays hidden in the menu
+            elif mode == ELEMENT_ESC:
+                base = self._menu_unlock
+            else:
+                base = True
+            want = base and not hidden
             # No countdown while you're inside a rift: you're in the thing it
             # was counting down to.
             if key == "rift" and self.ui_state.in_rift():
@@ -3529,7 +3600,7 @@ class Overlay:
         meter's HEAL column header, and the breakdown's HEALING list with its
         divider. Guarded on the last applied state — re-packing widgets on every
         250 ms tick would flicker."""
-        show = self._show["healing"]
+        show = self._show_heal
         if show == self._heal_cols_shown:
             return
         self._heal_cols_shown = show
@@ -3544,9 +3615,9 @@ class Overlay:
     def _refresh_menu(self):
         """Menu buttons are labelled with what they'll *do*, so they double as
         the state readout the old hint line used to provide."""
-        for key, label in TOGGLEABLE_ELEMENTS:
-            self.element_btns[key].config(
-                text=("☑  " if self._show[key] else "☐  ") + label)
+        self.btn_heal.config(
+            text=("☑  Healing columns" if self._show_heal
+                  else "☐  Healing columns"))
         # A standing setting, so this one shows its state rather than its action.
         self.btn_hide_ooc.config(
             text=("☑  Hide out of combat" if self._hide_ooc
@@ -3669,7 +3740,7 @@ class Overlay:
                 row.show(i + 1, p, dps, pct, focused=(focus == p.name),
                          dmg_frac=p.total / top_dmg,
                          heal_frac=p.heal_total / top_heal,
-                         show_heal=self._show["healing"])
+                         show_heal=self._show_heal)
             else:
                 row.hide()
 
@@ -3687,13 +3758,13 @@ class Overlay:
             crit_pct = (fp.crits / fp.hits * 100) if fp.hits else 0.0
             stats = [f"{int(fp.total)} dmg", f"{fdps:.0f} dps",
                      f"{fp.hits} hits", f"{crit_pct:.0f}% crit"]
-            if self._show["healing"]:
+            if self._show_heal:
                 stats.append(f"{int(fp.heal_total)} heal")
             if fp.kills:
                 stats.append(f"{fp.kills} kills")
             self.stats_lbl.config(text=" · ".join(stats))
             self.dmg_col.show(self._merge_named(fp.skills), fp.total)
-            if self._show["healing"]:
+            if self._show_heal:
                 self.heal_col.show(self._merge_named(fp.heals), fp.heal_total)
             el = sorted(fp.elements.items(), key=lambda kv: -kv[1][1])
             self.elem_lbl.config(
