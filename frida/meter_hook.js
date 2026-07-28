@@ -401,7 +401,9 @@ const SWEEP_CLASS = {
     "ent.Hero": "hero",
     "ent.Foe": "foe",
     "ent.interactible.Chest": "chest",
-    "ent.interactible.InstanceOrb": "orb",
+    // NOT an orb. An "instance orb" is the entrance to an instance — the
+    // dungeon portal you press F at — and drawing it as a collectible sent
+    // people to pick up a doorway. The collectibles are handled below.
     "ent.interactible.Obelisk": "obelisk",
     "ent.interactible.RespawnPoint": "respawn",
 };
@@ -411,6 +413,10 @@ const SWEEP_CLASS = {
 // ent.Element with an id like "RedOrb_World_140", which the allowlist
 // otherwise skips as scenery, since most ent.Element is exactly that.
 const ORB_KIND = /orb/i;
+// ...and a real one is Enabled. The dungeon entrance reads "None" here, which
+// is what gave it away — so the state is checked as well as the name rather
+// than trusting either on its own.
+const ORB_STATE = "Enabled";
 
 // ent.Element.stateId, measured on the live game:
 //   chests  Closed | Locked        obelisks  Closed        orbs  Enabled
@@ -459,7 +465,10 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
         let elemKind = null;
         if (!cat && cls === "ent.Element" && OFF.Element) {
             elemKind = hlStr(e.add(OFF.Element.kind).readPointer());
-            if (elemKind && ORB_KIND.test(elemKind)) cat = "orb";
+            if (elemKind && ORB_KIND.test(elemKind)) {
+                const est = hlStr(e.add(OFF.Element.stateId).readPointer());
+                if (est === ORB_STATE) cat = "orb";
+            }
         }
         if (!cat) continue;
         try {

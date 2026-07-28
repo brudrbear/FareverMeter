@@ -189,6 +189,7 @@ TOGGLEABLE_ELEMENTS = (
     ("detail", "Breakdown"),
     ("rift", "Rift timer"),
     ("minimap", "Minimap"),
+    ("compass", "Compass"),
 )
 
 # Elements the out-of-combat rule doesn't touch. The rift countdown is most use
@@ -196,7 +197,7 @@ TOGGLEABLE_ELEMENTS = (
 # would hide it for its whole useful life. The minimap is the same case only
 # more so: its whole job is telling you what's around while you're travelling,
 # which is by definition out of combat.
-OOC_EXEMPT = ("rift", "minimap")
+OOC_EXEMPT = ("rift", "minimap", "compass")
 
 # ---------------------------------------------------------------------------
 # Minimap
@@ -300,6 +301,25 @@ MINIMAP_LABELS = {
     "hero": "Player", "foe": "Enemy", "chest": "Chest", "orb": "Orb",
     "obelisk": "Obelisk", "respawn": "Respawn point", "activity": "Activity",
 }
+
+# ---------------------------------------------------------------------------
+# Compass
+# ---------------------------------------------------------------------------
+# A strip of bearings across the top of the view. It answers a different
+# question from the minimap: not "what is around me" but "which way is that",
+# and it answers it out to the full sweep radius rather than the map's 120u —
+# so the thing you're walking toward stays on screen long after it has left
+# the map.
+COMPASS_W = 460             # px at 100% scale
+COMPASS_H = 26
+COMPASS_FOV = 180.0         # degrees of bearing shown, centred on your view
+COMPASS_RANGE = 600.0       # matches the agent's own cull, so nothing is lost
+# Categories worth a bearing, and how far out each is worth one. Enemies,
+# respawn points and activities are deliberately absent: the strip is for
+# things you're travelling to, and a compass crowded with mobs is a smear.
+COMPASS_CATS = ("chest", "orb", "obelisk", "hero")
+COMPASS_LIMITS = {"obelisk": 200.0}
+COMPASS_CARDINALS = ((0.0, "E"), (90.0, "N"), (180.0, "W"), (270.0, "S"))
 
 MINIMAP_ME = "#FFFFFF"          # the player arrow — brightest thing on the map
 
@@ -463,6 +483,7 @@ SCALE_GROUPS = (
     ("detail", "Breakdown"),
     ("menu", "Settings"),
     ("minimap", "Minimap"),
+    ("compass", "Compass"),
 )
 # Wider than the UI's: a minimap is worth making genuinely large on a big
 # screen, and genuinely small when it's only there for a glance.
@@ -1669,7 +1690,7 @@ class Overlay:
         # job — the meter one that suits reading numbers, the map one that
         # suits the screen it covers — and a single slider means at least one
         # of them is always wrong.
-        self._scales = {"meter": 1.0, "detail": 1.0, "menu": 1.0, "minimap": 1.0}
+        self._scales = {group: 1.0 for group, _label in SCALE_GROUPS}
         self._game_hwnd = None         # cached; re-resolved if it goes stale
         self._cursor_free = False      # game has released the mouse (Alt, menus)
         self._focused = True           # Farever is the window you're looking at
@@ -1722,8 +1743,10 @@ class Overlay:
         self.fonts_d = _font_set()
         self.fonts_m = _font_set()
         self.fonts_map = _font_set()
+        self.fonts_compass = _font_set()
         self._font_sets = {"meter": self.fonts, "detail": self.fonts_d,
-                           "menu": self.fonts_m, "minimap": self.fonts_map}
+                           "menu": self.fonts_m, "minimap": self.fonts_map,
+                           "compass": self.fonts_compass}
         self.root.title("Farever+ Party Meter")
         self.detail = tk.Toplevel(self.root)
         self.detail.title("Farever+ Breakdown")
@@ -1739,8 +1762,11 @@ class Overlay:
         self.riftwin.title("Farever+ Rift Timer")
         self.mapwin = tk.Toplevel(self.root)
         self.mapwin.title("Farever+ Minimap")
+        self.compasswin = tk.Toplevel(self.root)
+        self.compasswin.title("Farever+ Compass")
         for win in (self.root, self.detail, self.menu, self.hintwin,
-                    self.parsewin, self.promptwin, self.riftwin, self.mapwin):
+                    self.parsewin, self.promptwin, self.riftwin, self.mapwin,
+                    self.compasswin):
             win.overrideredirect(True)
             win.attributes("-topmost", True)
             win.configure(bg=TRANSPARENT_KEY)
@@ -1753,11 +1779,12 @@ class Overlay:
             # attributes above, and the DWM setting dies with the old hwnd.
             win.bind("<Map>", self._on_map_round, add="+")
         for win in (self.root, self.detail, self.menu, self.riftwin,
-                    self.mapwin):
+                    self.mapwin, self.compasswin):
             win.attributes("-alpha", OVERLAY_ALPHA)
         # Keys must match TOGGLEABLE_ELEMENTS.
         self._element_win = {"meter": self.root, "detail": self.detail,
-                             "rift": self.riftwin, "minimap": self.mapwin}
+                             "rift": self.riftwin, "minimap": self.mapwin,
+                             "compass": self.compasswin}
         # Every window that fades: the two toggleable ones, plus the control
         # menu and its hint, which follow the game's escape menu.
         self._fade_win = dict(self._element_win, menu=self.menu,
@@ -1783,6 +1810,7 @@ class Overlay:
         self._build_prompt()
         self._build_rift()
         self._build_minimap()
+        self._build_compass()
         self.root.update_idletasks()
         self._place_windows(pos)
         # Restored scales can only be applied now: they resize the fonts every
@@ -1819,7 +1847,7 @@ class Overlay:
             except Exception:
                 return {}
         out = {}
-        for key in ("meter", "detail", "menu", "rift", "minimap"):
+        for key in ("meter", "detail", "menu", "rift", "minimap", "compass"):
             try:
                 out[key] = (int(d[key]["x"]), int(d[key]["y"]))
             except Exception:
@@ -1863,6 +1891,11 @@ class Overlay:
             self.mapwin.geometry(f"+{mm[0]}+{mm[1]}")
         else:
             self._default_minimap_pos()
+        cp = pos.get("compass")
+        if cp and self._pos_visible(*cp):
+            self.compasswin.geometry(f"+{cp[0]}+{cp[1]}")
+        else:
+            self._default_compass_pos()
         mn = pos.get("menu")
         if mn and self._pos_visible(*mn):
             self.menu.geometry(f"+{mn[0]}+{mn[1]}")
@@ -1891,6 +1924,15 @@ class Overlay:
         l, t, r, _b = self._game_rect()
         w = max(self.riftwin.winfo_reqwidth(), self.riftwin.winfo_width(), 120)
         self.riftwin.geometry(f"+{l + ((r - l) - w) // 2}+{t + TOP_STRIP_RIFT}")
+
+    def _default_compass_pos(self):
+        """Top-centre of the game window, where a compass belongs and where
+        nothing else of ours sits."""
+        self.compasswin.update_idletasks()
+        l, t, r, _b = self._game_rect()
+        w = max(self.compasswin.winfo_reqwidth(),
+                self.compasswin.winfo_width(), 200)
+        self.compasswin.geometry(f"+{l + ((r - l) - w) // 2}+{t + 8}")
 
     def _default_minimap_pos(self):
         """Bottom-left of the game window. The meter stack owns the right side,
@@ -2015,6 +2057,8 @@ class Overlay:
                          "y": self.riftwin.winfo_y()},
                 "minimap": {"x": self.mapwin.winfo_x(),
                             "y": self.mapwin.winfo_y()},
+                "compass": {"x": self.compasswin.winfo_x(),
+                            "y": self.compasswin.winfo_y()},
             }))
         except OSError:
             pass
@@ -2743,6 +2787,106 @@ class Overlay:
         right = (half - dx * s - px * 0.9 * s, half - dy * s - py * 0.9 * s)
         c.create_polygon(*tip, *left, *tail, *right, fill=MINIMAP_ME,
                          outline=BG_BORDER, width=1)
+
+    def _build_compass(self):
+        """A bearing strip. One canvas, redrawn each tick like the map."""
+        self.compass_border = tk.Frame(
+            self.compasswin,
+            bg=_lerp_hex(THEME_DEFAULT["map_body"], "#000000", 0.45),
+            padx=2, pady=2)
+        self.compass_border.pack(fill="both", expand=True)
+        self.compass_canvas = tk.Canvas(
+            self.compass_border, bg=THEME_DEFAULT["map_body"],
+            highlightthickness=0, bd=0, width=COMPASS_W, height=COMPASS_H)
+        self.compass_canvas.pack()
+        # Draggable anywhere on it: unlike the map there's nothing to click, so
+        # the whole strip can be the grab handle.
+        self._bind_drag(self.compasswin,
+                        (self.compass_canvas, self.compass_border),
+                        unlocked=self._mouse_available)
+
+    def _compass_x(self, dx, dy, rot, half_w):
+        """Screen x for a world offset, or None if it's outside the arc.
+
+        Routed through the same rotation the map uses, mirror included, so a
+        marker can't sit left on the compass and right on the minimap."""
+        ca, sa = rot
+        mx = MINIMAP_MIRROR_X * (dx * sa - dy * ca)   # right of view, on screen
+        fy = dx * ca + dy * sa                        # ahead of view
+        rel = math.atan2(mx, fy)                      # 0 = straight ahead
+        span = math.radians(COMPASS_FOV) / 2.0
+        if abs(rel) > span:
+            return None
+        return half_w + (rel / span) * half_w
+
+    def _draw_compass(self):
+        if not self._shown.get("compass"):
+            return
+        c = self.compass_canvas
+        me, ents, _stamp = self.world.read()
+        c.delete("all")
+        scale = self._scales["compass"]
+        w, h = int(COMPASS_W * scale), int(COMPASS_H * scale)
+        if int(c["width"]) != w or int(c["height"]) != h:
+            c.config(width=w, height=h)
+        theme = self._theme
+        body = theme.get("map_body", BG_BODY)
+        c.configure(bg=body)
+        half_w = w / 2.0
+
+        if not self.world.fresh():
+            return
+        heading = float(self._last_cam if self._last_cam is not None
+                        else (me.get("r", 0.0) or 0.0))
+        rot = (math.cos(heading), math.sin(heading))
+
+        # Cardinals first, so markers sit over them.
+        ink = _lerp_hex(body, "#FFFFFF", 0.40)
+        for deg, letter in COMPASS_CARDINALS:
+            a = math.radians(deg)
+            x = self._compass_x(math.cos(a), math.sin(a), rot, half_w)
+            if x is None:
+                continue
+            c.create_line(x, h - 6 * scale, x, h, fill=ink)
+            c.create_text(x, h * 0.42, text=letter, fill=ink,
+                          font=self.fonts_compass["ui_tiny_i"])
+        # Dead ahead.
+        c.create_line(half_w, 0, half_w, h * 0.3,
+                      fill=_lerp_hex(body, "#FFFFFF", 0.7))
+
+        mez = me.get("z", 0)
+        _local, roster = self.world.who()
+        rows = []
+        for e in ents:
+            cat = e.get("c")
+            if cat not in COMPASS_CATS:
+                continue
+            # Party only — a compass full of strangers tells you nothing about
+            # where your group went.
+            if cat == "hero" and e.get("n") not in roster:
+                continue
+            dx = e.get("x", 0) - me.get("x", 0)
+            dy = e.get("y", 0) - me.get("y", 0)
+            dist = math.hypot(dx, dy)
+            if dist > COMPASS_LIMITS.get(cat, COMPASS_RANGE):
+                continue
+            x = self._compass_x(dx, dy, rot, half_w)
+            if x is None:
+                continue        # behind you
+            rows.append((dist, cat, x, e))
+        # Farthest first, so the nearer marker wins an overlap.
+        rows.sort(key=lambda t: -t[0])
+        for dist, cat, x, e in rows:
+            style = MINIMAP_STYLE_MAP[cat]
+            r = style["r"] * scale
+            facing = None
+            if cat == "hero" and e.get("r") is not None:
+                facing = self._facing_screen(float(e["r"]), heading, True)
+            edge = _lerp_hex(body, BG_BORDER, 0.8)
+            self._map_glyph(c, x, h * 0.5, r, style, style["fill"], facing, edge)
+            dz = e.get("z", mez) - mez
+            if abs(dz) > MINIMAP_Z_FADE:
+                self._map_z_marker(c, x, h * 0.5, r, dz, _contrast_ink(body))
 
     def _build_rift(self):
         """The next-rift countdown. Styled after the rifts themselves rather
@@ -3629,6 +3773,8 @@ class Overlay:
         # navy. The header still carries the theme, so the panel stays
         # recognisably part of the same overlay.
         self.map_border.config(bg=_lerp_hex(mb, "#000000", 0.45))
+        self.compass_border.config(bg=_lerp_hex(mb, "#000000", 0.45))
+        self.compass_canvas.config(bg=mb)
         # Force the header tint to be re-pushed: its guard compares against the
         # last colour applied, which belongs to the theme we just left.
         self._header_bg = None
@@ -3907,6 +4053,7 @@ class Overlay:
         def map_loop():
             try:
                 self._draw_minimap()
+                self._draw_compass()
             except tk.TclError:
                 return              # window went away; stop rescheduling
             self.root.after(max(25, MINIMAP_RATE_MS[self._map_rate] // 2),

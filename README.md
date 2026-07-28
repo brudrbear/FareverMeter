@@ -303,6 +303,21 @@ them.
 It stays visible out of combat, since telling you what's nearby while you're
 travelling is most of the point.
 
+### Compass
+
+A strip of bearings across the top of the view, answering the question the
+minimap can't: *which way is that*, for things too far away to be on the map.
+It reaches the full 600 units the meter can see, where the minimap stops at 120.
+
+It carries only what you'd travel toward — **party members**, **available
+orbs**, **unopened chests**, and **obelisks within 200u**. Enemies, respawn
+points and activities are left off on purpose: a compass crowded with mobs is
+a smear. Icons match the minimap, `N`/`E`/`S`/`W` mark the cardinals, and the
+tick in the middle is dead ahead.
+
+Drag it anywhere, hide it or set it to `Show in ESC` like the other windows,
+and it has its own entry under Scaling.
+
 ### The only hotkey
 
 | Key | Action |
