@@ -31,7 +31,12 @@
   "Hero": {
     "name": 1272,
     "player": 1208,
-    "isInCombat": 680
+    "isInCombat": 680,
+    "layer": 112
+  },
+  "GameLayer": {
+    "isRift": 248,
+    "mainActivity": 240
   },
   "Player": {
     "name": 192,

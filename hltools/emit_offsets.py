@@ -30,6 +30,7 @@ def main():
     hd = offs("st.skill.HitData")
     ua = offs("ent.UnitAttributes")
     hero = offs("ent.Hero")
+    layer = offs("st.GameLayer")
     player = offs("st.Player")
     group = offs("st.Group")
     base = offs("st.skill.BaseSkill")
@@ -51,8 +52,14 @@ def main():
                       "ownerPlayer": base["ownerPlayer"][0]},
         "HitData": {"baseSkill": hd["baseSkill"][0]},
         "UnitAttributes": {"unit": ua["unit"][0], "health": ua["health"][0]},
+        # Hero.layer is st.State.layer, inherited — it points at the GameLayer
+        # the hero is in, which is how the hook reaches the rift flag without
+        # calling anything (a plain pointer walk is safe off the game thread).
         "Hero": {"name": hero["name"][0], "player": hero["player"][0],
-                 "isInCombat": hero["isInCombat"][0]},
+                 "isInCombat": hero["isInCombat"][0],
+                 "layer": hero["layer"][0]},
+        "GameLayer": {"isRift": layer["isRift"][0],
+                      "mainActivity": layer["mainActivity"][0]},
         "Player": {"name": player["name"][0], "group": player["group"][0],
                    "isMe": player["isMe"][0], "lobbyId": player["lobbyId"][0]},
         "Group": {"groupId": group["groupId"][0], "players": group["players"][0]},
