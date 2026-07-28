@@ -393,6 +393,10 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
                 // reads — one source of truth, not two.
                 const nm = hlStr(e.add(OFF.Hero.name).readPointer());
                 if (nm) ent.n = nm;
+                // ...and their facing, so they can be drawn as chevrons that
+                // point where they're going rather than as anonymous dots.
+                ent.r = Math.round(
+                    e.add(OFF.Entity.rotationZ).readDouble() * 1000) / 1000;
             } else if (cat !== "foe" && cat !== "activity") {
                 // Reported, not filtered on: whether a looted chest clears this
                 // flag or leaves the array is a display decision, and keeping it

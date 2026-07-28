@@ -234,10 +234,22 @@ MINIMAP_STYLE = (
     ("chest",    {"fill": "#E0A33C", "r": 3.5, "shape": "square"}),
     ("orb",      {"fill": "#6FC9E8", "r": 3.5, "shape": "dot"}),
     ("foe",      {"fill": "#C0392B", "r": 3.0, "shape": "dot"}),
-    ("hero",     {"fill": "#5279B5", "r": 3.5, "shape": "dot"}),
+    ("hero",     {"fill": "#5279B5", "r": 4.2, "shape": "chevron"}),
 )
 MINIMAP_STYLE_MAP = dict(MINIMAP_STYLE)
 MINIMAP_ORDER = [k for k, _ in MINIMAP_STYLE]
+
+# What the hover strip says with nothing under the cursor. It doubles as the
+# hint that hovering does anything, which is why it isn't blank.
+MINIMAP_TIP_IDLE = "hover a marker for details"
+MINIMAP_TIP_RADIUS = 9          # px of slack around a marker, at 100% scale
+
+# Hover labels. Separate from the style table because these are prose for a
+# human, not drawing instructions.
+MINIMAP_LABELS = {
+    "hero": "Player", "foe": "Enemy", "chest": "Chest", "orb": "Orb",
+    "obelisk": "Obelisk", "respawn": "Respawn point", "activity": "Activity",
+}
 
 MINIMAP_ME = "#F2E1CB"          # the player arrow — brightest thing on the map
 MINIMAP_PARTY_RING = "#57C7FF"  # the ring that marks a group member
@@ -977,6 +989,40 @@ def _set_clickthrough(hwnd, enabled):
     setl(hwnd, GWL_EXSTYLE, ex)
 
 
+def _main_hwnd_of_pid(pid):
+    """The process's largest visible top-level window, or None.
+
+    Same enumeration _window_rect_of_pid does, kept separate because the caller
+    wants the handle rather than the rectangle."""
+    if sys.platform != "win32":
+        return None
+    u = ctypes.windll.user32
+    u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    u.GetWindowThreadProcessId.argtypes = [wintypes.HWND,
+                                           ctypes.POINTER(wintypes.DWORD)]
+    best = {"area": 0, "hwnd": None}
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND,
+                                     wintypes.LPARAM)
+
+    def visit(hwnd, _lparam):
+        wpid = wintypes.DWORD()
+        u.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+        if wpid.value != pid or not u.IsWindowVisible(hwnd):
+            return True
+        r = wintypes.RECT()
+        if u.GetWindowRect(hwnd, ctypes.byref(r)):
+            area = (r.right - r.left) * (r.bottom - r.top)
+            if area > best["area"]:
+                best["area"], best["hwnd"] = area, hwnd
+        return True
+
+    try:
+        u.EnumWindows(WNDENUMPROC(visit), 0)
+    except Exception:
+        return None
+    return best["hwnd"]
+
+
 def _window_rect_of_pid(pid):
     """(left, top, right, bottom) of a process's largest visible top-level
     window, or None. Used to centre the control menu on the game rather than on
@@ -1468,6 +1514,7 @@ class Overlay:
         self._update_shown = False     # the update notice is applied once
         self._map_mode = MINIMAP_MODES[0]   # "Rotating" — you always face up
         self._map_rate = MINIMAP_RATE_NAMES[0]   # "High"
+        self._game_hwnd = None         # cached; re-resolved if it goes stale
         # True while the countdown has nothing to count down to. The window is
         # hidden in that state unless the escape menu is open, so it isn't
         # sitting there saying "No rift upcoming" for six minutes of every hour.
@@ -2021,6 +2068,19 @@ class Overlay:
                                     highlightthickness=0, bd=0,
                                     width=MINIMAP_SIZE, height=MINIMAP_SIZE)
         self.map_canvas.pack()
+        # Hover readout. Always present rather than appearing on hover, so the
+        # panel doesn't change height under the cursor and shove the map about.
+        self.map_tip = tk.Label(self.map_border, text=MINIMAP_TIP_IDLE,
+                                bg=BG_BODY_SOFT, fg=FG_DIM,
+                                font=self.fonts["ui_tiny_i"], anchor="w",
+                                padx=6, pady=2)
+        self.map_tip.pack(fill="x")
+        # Hit targets from the last draw: (x, y, radius, label, dist, dz).
+        # Rebuilt every frame, which is also what keeps it honest — a stale
+        # entry would describe something that has already moved.
+        self._map_hits = []
+        self.map_canvas.bind("<Motion>", self._on_map_hover)
+        self.map_canvas.bind("<Leave>", lambda _e: self._clear_map_tip())
         self._bind_drag(self.mapwin, (self.map_header, self.map_title,
                                       self.map_count))
         # Dragging the map body would fight with the click-to-inspect idea if
@@ -2064,6 +2124,7 @@ class Overlay:
             c.create_text(half, half, text="waiting for the game",
                           fill=FG_DIM, font=self.fonts["ui_tiny_i"])
             self.map_count.config(text="")
+            self._map_hits = []
             return
 
         theme = self._theme
@@ -2099,6 +2160,7 @@ class Overlay:
         local, roster = self.world.who()
 
         drawn = 0
+        hits = []
         by_cat = {}
         for e in ents:
             by_cat.setdefault(e.get("c"), []).append(e)
@@ -2119,7 +2181,19 @@ class Overlay:
                 fill = style["fill"]
                 if far:
                     fill = _lerp_hex(body, fill, MINIMAP_Z_DIM)
-                self._map_glyph(c, x, y, r, style, fill)
+                # Other players point where they're facing. In rotating mode
+                # that has to be taken relative to the camera, or everyone would
+                # keep their world heading while the map turned under them.
+                facing = None
+                if cat == "hero" and e.get("r") is not None:
+                    a = float(e["r"]) - (heading - math.pi / 2 if rot is not None
+                                         else 0.0)
+                    facing = (math.cos(a), -math.sin(a))
+                self._map_glyph(c, x, y, r, style, fill, facing)
+                hits.append((x, y, r, cat, e.get("n"),
+                             math.hypot(e.get("x", 0) - me.get("x", 0),
+                                        e.get("y", 0) - me.get("y", 0)),
+                             e.get("z", mez) - mez))
                 if cat == "hero" and e.get("n") in roster:
                     # Party members get a ring rather than a different colour:
                     # colour already means category, and overloading it would
@@ -2139,10 +2213,56 @@ class Overlay:
         else:
             self._draw_me_arrow(c, half, math.cos(heading), -math.sin(heading))
         self.map_count.config(text=f"{drawn}  ·  {int(self._map_range)}u")
+        self._map_hits = hits
 
-    def _map_glyph(self, c, x, y, r, style, fill):
+    def _on_map_hover(self, event):
+        """Name whatever is under the cursor, and say how far away it is.
+
+        Only reachable while the game's escape menu is open, because that's the
+        only time the overlay isn't click-through — which is also the only time
+        you have a cursor to hover with, so the two line up."""
+        best, best_d2 = None, None
+        slack = MINIMAP_TIP_RADIUS * self._ui_scale
+        for hx, hy, r, cat, name, dist, dz in self._map_hits:
+            reach = max(r, slack)
+            d2 = (event.x - hx) ** 2 + (event.y - hy) ** 2
+            if d2 <= reach * reach and (best_d2 is None or d2 < best_d2):
+                best, best_d2 = (cat, name, dist, dz), d2
+        if best is None:
+            self._clear_map_tip()
+            return
+        cat, name, dist, dz = best
+        label = name or MINIMAP_LABELS.get(cat, cat.title())
+        # Ground distance and height are reported separately on purpose: a
+        # chest 8 units away and 40 below you is not 8 units away in any sense
+        # that helps, and one combined number would hide exactly that.
+        updown = "level" if abs(dz) < 1 else (f"{abs(dz):.0f} up" if dz > 0
+                                              else f"{abs(dz):.0f} down")
+        self.map_tip.config(text=f"{label}  ·  {dist:.0f}u away  ·  {updown}",
+                            fg=FG_TEXT)
+
+    def _clear_map_tip(self):
+        try:
+            self.map_tip.config(text=MINIMAP_TIP_IDLE, fg=FG_DIM)
+        except tk.TclError:
+            pass
+
+    def _map_glyph(self, c, x, y, r, style, fill, facing=None):
         shape = style["shape"]
-        if shape == "dot":
+        if shape == "chevron" and facing is not None:
+            # Same arrow as the player marker, smaller and without the outline.
+            # Drawn from a screen-space direction, so the caller has already
+            # resolved whatever the current orientation mode implies.
+            dx, dy = facing
+            px, py = -dy, dx
+            c.create_polygon(
+                x + dx * 1.3 * r, y + dy * 1.3 * r,
+                x - dx * r + px * 0.85 * r, y - dy * r + py * 0.85 * r,
+                x - dx * 0.35 * r, y - dy * 0.35 * r,
+                x - dx * r - px * 0.85 * r, y - dy * r - py * 0.85 * r,
+                fill=fill, outline="")
+            return
+        if shape in ("dot", "chevron"):
             c.create_oval(x - r, y - r, x + r, y + r, fill=fill, outline="")
         elif shape == "square":
             c.create_rectangle(x - r, y - r, x + r, y + r, fill=fill, outline="")
@@ -2585,11 +2705,35 @@ class Overlay:
         def end(e):
             if state.pop("on", None):
                 self._save_pos()
+                self._refocus_game()
 
         for w in widgets:
             w.bind("<Button-1>", start)
             w.bind("<B1-Motion>", move)
             w.bind("<ButtonRelease-1>", end)
+
+    def _refocus_game(self):
+        """Hand keyboard focus back to Farever.
+
+        The overlay windows carry WS_EX_NOACTIVATE so clicking them shouldn't
+        steal focus — but Tk's dropdown menus are its own windows and don't,
+        and once one of those has been opened the game stops seeing keystrokes.
+        The symptom is Esc not closing the game's menu until you click the game
+        first. Rather than leaving that to the player, every interaction with
+        the control menu ends by giving the game the foreground back."""
+        if sys.platform != "win32" or not self.target_pid:
+            return
+        hwnd = self._game_hwnd
+        if not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
+            hwnd = self._game_hwnd = _main_hwnd_of_pid(self.target_pid)
+        if not hwnd:
+            return
+        try:
+            u = ctypes.windll.user32
+            if u.GetForegroundWindow() != hwnd:
+                u.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
 
     def _on_row_click(self, name):
         if not self._is_locked() and name:
@@ -2630,7 +2774,11 @@ class Overlay:
 
     def _apply_clickthrough(self):
         locked = self._is_locked()
-        for win in (self.root, self.detail, self.riftwin):
+        # The minimap belongs in here: left out, it stays a solid, clickable,
+        # always-on-top window over the game, so Windows draws a cursor over it
+        # even while the game has the pointer captured, and a click that lands
+        # on it goes to Tk instead of the game.
+        for win in (self.root, self.detail, self.riftwin, self.mapwin):
             self._set_win_clickthrough(win, locked)
         # The control menu is always interactive (it is only ever shown while
         # the cursor is free); the floating hint and parse banner are text over
@@ -2741,6 +2889,10 @@ class Overlay:
                 fn()
             except Exception as e:
                 print("[action]", e, file=sys.stderr)
+        # Only while the game's menu is open — that's the only time the overlay
+        # is interactive, and so the only time it can have taken focus.
+        if q and self._menu_unlock:
+            self._refocus_game()
 
     def _toggle_element(self, key):
         """Show/hide one overlay element. The control menu itself is never in
@@ -2891,6 +3043,7 @@ class Overlay:
         self.map_header.config(bg=t["header"])
         self.map_title.config(bg=t["header"], fg=t["fg_header"])
         self.map_count.config(bg=t["header"], fg=t["fg_header_dim"])
+        self.map_tip.config(bg=t["soft"], fg=t["fg_dim"])
         # Force the header tint to be re-pushed: its guard compares against the
         # last colour applied, which belongs to the theme we just left.
         self._header_bg = None

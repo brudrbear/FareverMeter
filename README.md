@@ -259,9 +259,16 @@ pointing, which changes constantly as it turns to face things. `Fixed` keeps the
 map still and turns the arrow instead. Two rings mark a third
 and two thirds of the range, which is 120 world units from the centre out.
 
+Other players are drawn as chevrons pointing where they're facing, so you can
+read which way a group is heading; group members get a blue ring.
+
 **Anything on a different floor is drawn faded** — a mob in the tunnel below you
 is not the same news as one you can walk to, and on a flat map they'd look
 identical. Pets and summons are left off entirely.
+
+While the game's `Esc` menu is open — the only time you have a cursor —
+**hovering a marker names it** and gives its ground distance and how far up or
+down it is, in the strip along the bottom.
 
 It stays visible out of combat, since telling you what's nearby while you're
 travelling is most of the point.
