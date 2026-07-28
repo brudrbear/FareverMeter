@@ -50,6 +50,7 @@ def main():
     activity = offs("st.Activity")
     arrobj = offs("hl.types.ArrayObj")
     foe = offs("ent.Foe")
+    unit = offs("ent.Unit")
     cam = offs("client.BaseCamera")
 
     # skill display-name chain: BaseSkill.inf (virtual #963) -> texts (#973) -> name
@@ -109,6 +110,9 @@ def main():
                    "distance": cam["distance"][0]},
         # A foe with a summonOwner is somebody's pet, not a mob. That's the
         # only reliable way to tell them apart — they're the same class.
+        # `kind` is the internal id ("Crimson_Z2W_Sword"); `inf` is the CDB row
+        # it came from, whose texts.name is the display name on the nameplate.
+        "Unit": {"kind": unit["kind"][0], "inf": unit["inf"][0]},
         "Foe": {"summonOwner": foe["summonOwner"][0],
                 "persistantSummon": foe["persistantSummon"][0]},
         # hl.types.ArrayObj: length, then a pointer to an hl_varray whose

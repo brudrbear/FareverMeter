@@ -211,7 +211,10 @@ MINIMAP_MODES = ("Rotating", "Fixed")
 # How often the hook sweeps the world. Higher costs a little CPU in the game
 # process (~1ms per sweep) and a message per tick; below about 8/sec the dots
 # visibly step rather than glide, which is what makes a minimap feel laggy.
-MINIMAP_RATES = (("High", 60), ("Medium", 110), ("Low", 250))
+# Ultra sits just above the agent's own 30ms floor. At ~30/sec the sweep costs
+# a few percent of one core in the game process plus a message per tick, which
+# is why it's opt-in rather than the default.
+MINIMAP_RATES = (("Ultra", 33), ("High", 60), ("Medium", 110), ("Low", 250))
 MINIMAP_RATE_MS = dict(MINIMAP_RATES)
 MINIMAP_RATE_NAMES = [n for n, _ in MINIMAP_RATES]
 MINIMAP_SIZE = 270          # square, in pixels at 100% UI scale
@@ -409,8 +412,18 @@ FONT_SPECS = {
     "mono_10":    ("Consolas", 10),
     "mono_sm":    ("Consolas", 8),
     "mono_xl_b":  ("Consolas", 18, "bold"),
+    # The minimap has its own scale control, so its text has to be its own
+    # fonts — sharing the meter's would drag it back under the global slider.
+    "map_title":  ("Segoe UI", 8, "bold"),
+    "map_count":  ("Segoe UI", 7, "italic"),
+    "map_tip":    ("Segoe UI", 9),
 }
+# Excluded from the global UI scale; driven by the minimap's own instead.
+MAP_FONT_KEYS = ("map_title", "map_count", "map_tip")
 UI_SCALE_MIN, UI_SCALE_MAX = 75, 175      # percent
+# Wider than the UI's: a minimap is worth making genuinely large on a big
+# screen, and genuinely small when it's only there for a glance.
+MINIMAP_SCALE_MIN, MINIMAP_SCALE_MAX = 50, 250
 # Minimum widths, at 100%. They're pixel values, so the scale slider has to
 # scale them too or scaling down just hits the floor and nothing moves.
 MIN_W = {"meter": 360, "detail": 320, "menu": 230, "prompt": 320}
@@ -1583,7 +1596,8 @@ class Overlay:
         self._quit_armed = False       # the Quit button's second-click window
         self._update_shown = False     # the update notice is applied once
         self._map_mode = MINIMAP_MODES[0]   # "Rotating" — you always face up
-        self._map_rate = MINIMAP_RATE_NAMES[0]   # "High"
+        self._map_rate = "High"        # Ultra exists but is opt-in
+        self._map_scale = 1.0          # minimap only; independent of UI scale
         self._game_hwnd = None         # cached; re-resolved if it goes stale
         self._last_cam = None          # last camera heading seen; see _draw_minimap
         # True while the countdown has nothing to count down to. The window is
@@ -1608,6 +1622,7 @@ class Overlay:
         # from these, so loading afterwards would leave the menu disagreeing
         # with the state it is supposed to be showing.
         self._pending_scale = None
+        self._pending_map_scale = None
         self._load_settings()
 
         pos = self._load_positions()
@@ -1687,6 +1702,10 @@ class Overlay:
             self._scale_var.set(int(round(self._pending_scale * 100)))
             self._set_ui_scale(self._pending_scale)
         self._pending_scale = None
+        if self._pending_map_scale and abs(self._pending_map_scale - 1.0) > 0.001:
+            self._map_scale_var.set(int(round(self._pending_map_scale * 100)))
+            self._set_map_scale(self._pending_map_scale)
+        self._pending_map_scale = None
         # The control menu and its hint only exist while the game's escape menu
         # is up; _sync_game_ui maps them in. The parse banner is mapped by parse
         # mode itself, and deliberately answers to nothing else — a countdown
@@ -1846,6 +1865,12 @@ class Overlay:
                 self._pending_scale = scale
         except (TypeError, ValueError):
             pass
+        try:
+            ms = float(data.get("map_scale", 1.0))
+            if MINIMAP_SCALE_MIN <= ms * 100 <= MINIMAP_SCALE_MAX:
+                self._pending_map_scale = ms
+        except (TypeError, ValueError):
+            pass
         show = data.get("show")
         if isinstance(show, dict):
             for key, _label in TOGGLEABLE_ELEMENTS:
@@ -1866,6 +1891,7 @@ class Overlay:
                 "mode": self.mode,
                 "hide_ooc": self._hide_ooc,
                 "ui_scale": round(self._ui_scale, 3),
+                "map_scale": round(self._map_scale, 3),
                 "show": {k: bool(self._show.get(k, True))
                          for k, _label in TOGGLEABLE_ELEMENTS},
             }, indent=2))
@@ -2112,8 +2138,8 @@ class Overlay:
         # Every font in the overlay is a named Tk font, so dragging this resizes
         # the lot. Released rather than live: repainting the whole tree on each
         # pixel of drag is visibly slow.
-        row = field(left, "Scale")
-        self._scale_var = tk.IntVar(value=100)
+        row = field(left, "UI Scale")
+        self._scale_var = tk.IntVar(value=int(round(self._ui_scale * 100)))
         self.scl_ui = tk.Scale(
             row, from_=UI_SCALE_MIN, to=UI_SCALE_MAX, resolution=5,
             orient="horizontal", variable=self._scale_var, showvalue=True,
@@ -2123,6 +2149,21 @@ class Overlay:
             cursor="hand2")
         self.scl_ui.bind("<ButtonRelease-1>", self._on_scale_pick)
         self.scl_ui.pack(side="right", expand=True, fill="x", padx=(8, 0))
+
+        # Its own slider: the map wants a size that suits the screen it covers,
+        # the meter one that suits reading numbers. Tied together, one of the
+        # two is always wrong.
+        row = field(left, "Minimap Scale")
+        self._map_scale_var = tk.IntVar(value=int(round(self._map_scale * 100)))
+        self.scl_map = tk.Scale(
+            row, from_=MINIMAP_SCALE_MIN, to=MINIMAP_SCALE_MAX, resolution=5,
+            orient="horizontal", variable=self._map_scale_var, showvalue=True,
+            bg=BG_BODY, fg=FG_DIM, troughcolor=BG_BAR_TRACK,
+            activebackground=BTN_ON_BG, highlightthickness=0, bd=0,
+            sliderrelief="flat", font=self.fonts["ui_tiny_i"], length=130,
+            cursor="hand2")
+        self.scl_map.bind("<ButtonRelease-1>", self._on_map_scale_pick)
+        self.scl_map.pack(side="right", expand=True, fill="x", padx=(8, 0))
 
         section(left, "SHOW / HIDE", note="Always visible when Esc is open")
         self.element_btns = {
@@ -2197,11 +2238,11 @@ class Overlay:
         self.map_header = tk.Frame(self.map_border, bg=BG_HEADER)
         self.map_header.pack(fill="x")
         self.map_title = tk.Label(self.map_header, text="Nearby", bg=BG_HEADER,
-                                  fg=FG_HEADER, font=self.fonts["ui_sm_b"],
+                                  fg=FG_HEADER, font=self.fonts["map_title"],
                                   anchor="w", padx=6, pady=2)
         self.map_title.pack(side="left")
         self.map_count = tk.Label(self.map_header, text="", bg=BG_HEADER,
-                                  fg=FG_HEADER_DIM, font=self.fonts["ui_tiny_i"],
+                                  fg=FG_HEADER_DIM, font=self.fonts["map_count"],
                                   anchor="e", padx=6, pady=2)
         self.map_count.pack(side="right")
         _mb = THEME_DEFAULT["map_body"]
@@ -2219,7 +2260,7 @@ class Overlay:
         self.map_tip = tk.Label(self.map_tipbox, text=MINIMAP_TIP_IDLE,
                                 bg=_lerp_hex(_mb, "#000000", 0.30),
                                 fg=_lerp_hex(_mb, "#FFFFFF", 0.55),
-                                font=self.fonts["ui"], anchor="w",
+                                font=self.fonts["map_tip"], anchor="w",
                                 padx=8, pady=5)
         self.map_tip.pack(fill="x")
         # Hit targets from the last draw: (x, y, radius, label, dist, dz).
@@ -2265,7 +2306,7 @@ class Overlay:
         c = self.map_canvas
         me, ents, _stamp = self.world.read()
         c.delete("all")
-        size = int(MINIMAP_SIZE * self._ui_scale)
+        size = int(MINIMAP_SIZE * self._map_scale)
         if int(c["width"]) != size:
             c.config(width=size, height=size)
         half = size / 2.0
@@ -2278,7 +2319,7 @@ class Overlay:
             c.create_text(half, half, text="waiting for the game",
                           fill=_lerp_hex(self._theme.get("map_body", BG_BODY),
                                          "#FFFFFF", 0.45),
-                          font=self.fonts["ui_tiny_i"])
+                          font=self.fonts["map_count"])
             self.map_count.config(text="")
             self._map_hits = []
             return
@@ -2333,7 +2374,7 @@ class Overlay:
                                         half, scale, rot)
                 if not (0 <= x <= size and 0 <= y <= size):
                     continue        # outside the square; the hook's cull is round
-                r = style["r"] * self._ui_scale
+                r = style["r"] * self._map_scale
                 # The local player is drawn last, as an arrow, not a dot.
                 if cat == "hero" and e.get("n") and e["n"] == local:
                     continue
@@ -2361,7 +2402,7 @@ class Overlay:
                 if far:
                     self._map_z_marker(c, x, y, r, e.get("z", mez) - mez,
                                        _contrast_ink(body))
-                hits.append((x, y, r, cat, e.get("n"),
+                hits.append((x, y, r, cat, self._marker_label(cat, e, roster),
                              math.hypot(e.get("x", 0) - me.get("x", 0),
                                         e.get("y", 0) - me.get("y", 0)),
                              e.get("z", mez) - mez))
@@ -2369,7 +2410,7 @@ class Overlay:
                     # Party members get a ring rather than a different colour:
                     # colour already means category, and overloading it would
                     # make a grouped player read as a different kind of thing.
-                    rr = r + 2.5 * self._ui_scale
+                    rr = r + 2.5 * self._map_scale
                     ring = (_lerp_hex(body, MINIMAP_PARTY_RING, MINIMAP_Z_DIM)
                             if fade else MINIMAP_PARTY_RING)
                     c.create_oval(x - rr, y - rr, x + rr, y + rr,
@@ -2383,9 +2424,9 @@ class Overlay:
         hit = self._update_map_tip()
         if hit is not None:
             hx, hy, hr = hit[0], hit[1], hit[2]
-            rr = hr + 4.0 * self._ui_scale
+            rr = hr + 4.0 * self._map_scale
             c.create_oval(hx - rr, hy - rr, hx + rr, hy + rr,
-                          outline="#FFFFFF", width=max(1, int(round(self._ui_scale * 2))))
+                          outline="#FFFFFF", width=max(1, int(round(self._map_scale * 2))))
 
     def _facing_screen(self, world_angle, heading, rotating):
         """A world heading as a screen-space unit vector.
@@ -2417,7 +2458,7 @@ class Overlay:
             far = min(far, half / abs(dy))
         c.create_line(half, half, half + dx * far, half + dy * far,
                       fill=_lerp_hex(body, accent, MINIMAP_VIEW_LINE),
-                      width=max(1, int(self._ui_scale)))
+                      width=max(1, int(self._map_scale)))
 
     def _on_map_hover(self, event):
         """Only reachable while the game's escape menu is open, because that's
@@ -2433,7 +2474,7 @@ class Overlay:
             return None
         cx, cy = self._map_cursor
         best, best_d2 = None, None
-        slack = MINIMAP_TIP_RADIUS * self._ui_scale
+        slack = MINIMAP_TIP_RADIUS * self._map_scale
         for hit in self._map_hits:
             hx, hy, r = hit[0], hit[1], hit[2]
             reach = max(r, slack)
@@ -2449,8 +2490,7 @@ class Overlay:
         if hit is None:
             self._clear_map_tip()
             return None
-        _hx, _hy, _r, cat, name, dist, dz = hit
-        label = name or MINIMAP_LABELS.get(cat, cat.title())
+        _hx, _hy, _r, cat, label, dist, dz = hit
         # Ground distance and height are reported separately on purpose: a
         # chest 8 units away and 40 below you is not 8 units away in any sense
         # that helps, and one combined number would hide exactly that.
@@ -2459,6 +2499,26 @@ class Overlay:
         self.map_tip.config(text=f"{label}   ·   {dist:.0f}u away   ·   {updown}",
                             fg=self._map_ink(0.95))
         return hit
+
+    def _marker_label(self, cat, e, roster):
+        """What the hover line calls this marker.
+
+        Names alone aren't enough to read: player names are arbitrary and a
+        foe's is just a creature, so each carries what KIND of thing it is in
+        brackets. Party membership rides on the same line rather than being
+        left to the ring colour, since that's the thing you're hovering to
+        find out."""
+        name = e.get("n")
+        if cat == "hero":
+            if not name:
+                return "Player"
+            return f"{name} ({'Party' if name in roster else 'Player'})"
+        if cat == "foe":
+            # The CDB display name once the agent has resolved it; until then
+            # the internal id, prettified, so a foe is never just "Enemy".
+            nm = (name or "").strip() or _pretty_id(e.get("k") or "")
+            return f"{nm} (Enemy)" if nm else "Enemy"
+        return MINIMAP_LABELS.get(cat, cat.title())
 
     def _clear_map_tip(self, drop_cursor=False):
         if drop_cursor:
@@ -2506,7 +2566,7 @@ class Overlay:
         whether you need to go up or down to reach it, which is the part you
         act on."""
         s = r * 0.8
-        gap = r + 2.0 * self._ui_scale
+        gap = r + 2.0 * self._map_scale
         if dz > 0:
             pts = (x - s, y - gap, x + s, y - gap, x, y - gap - s)
         else:
@@ -2518,7 +2578,7 @@ class Overlay:
         space — already resolved by the caller, because the two modes disagree
         about it: fixed mode turns the arrow, rotating mode turned the world
         instead and leaves the arrow pointing at the top of the map."""
-        s = 6.0 * self._ui_scale
+        s = 6.0 * self._map_scale
         px, py = -dy, dx        # perpendicular, for the two back corners
         tip = (half + dx * 1.4 * s, half + dy * 1.4 * s)
         tail = (half - dx * 0.4 * s, half - dy * 0.4 * s)
@@ -3155,6 +3215,8 @@ class Overlay:
             return
         self._ui_scale = factor
         for key, (_family, size, *_style) in FONT_SPECS.items():
+            if key in MAP_FONT_KEYS:
+                continue          # the minimap answers to its own slider
             self.fonts[key].configure(size=max(6, round(size * factor)))
         self._parse_text = None          # force the parse banner to re-measure
         self._save_settings()
@@ -3175,6 +3237,24 @@ class Overlay:
     def _on_map_mode_pick(self, value):
         # Queued for the same reason as the theme pick: the draw pass reads it.
         self._enqueue(lambda: self._set_map_mode(value))()
+
+    def _set_map_scale(self, factor):
+        """Resize the minimap alone. Separate from the UI scale because the map
+        wants a size that suits the screen it's overlaying, while the meter
+        wants a size that suits reading numbers — tying them together means one
+        of the two is always wrong."""
+        if abs(factor - self._map_scale) < 0.001:
+            return
+        self._map_scale = factor
+        for key in MAP_FONT_KEYS:
+            _family, size, *_style = FONT_SPECS[key]
+            self.fonts[key].configure(size=max(6, round(size * factor)))
+        self._save_settings()
+        print(f"[meter] minimap scale {factor:.2f}x", file=sys.stderr)
+
+    def _on_map_scale_pick(self, _event=None):
+        self._enqueue(
+            lambda: self._set_map_scale(self._map_scale_var.get() / 100))()
 
     def _set_map_mode(self, value):
         self._map_mode = value

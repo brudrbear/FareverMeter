@@ -193,7 +193,9 @@ again.
 | Options | Show all players / Show party only | switches between your group and everyone nearby; resets the encounter |
 | Options | Theme | `Dynamic` (default) follows the game — rift colours inside a rift, Farever colours everywhere else. `Farever` and `Rift` pin it either way. |
 | Options | Minimap | `Rotating` (default) turns the map with the camera, so the top of the map is whatever you're looking at. `Fixed` keeps north up and turns the arrow instead. |
-| Options | Map refresh | how often the minimap is updated — `High` (~16/sec, default), `Medium` (~9/sec), `Low` (~4/sec). Lower costs less CPU in the game; below about 8/sec the dots visibly step. |
+| Options | Map refresh | how often the minimap is updated — `Ultra` (~30/sec), `High` (~16/sec, default), `Medium` (~9/sec), `Low` (~4/sec). Lower costs less CPU in the game; below about 8/sec the dots visibly step. |
+| Options | UI Scale | resizes the meter, breakdown and control menu |
+| Options | Minimap Scale | resizes the minimap alone, 50–250% |
 | Show / hide | Damage meter / Breakdown / Healing columns / Rift timer / Minimap | hides that piece of the overlay (the control menu stays, so you can bring it back) |
 | Show / hide | Hide out of combat | fades both windows away a few seconds after the fighting stops |
 | Actions | 60s Parse Mode | see below |
@@ -278,7 +280,10 @@ those are still somewhere to head for. Pets and summons never appear.
 
 While the game's `Esc` menu is open — the only time you have a cursor —
 **hovering a marker rings it in white** and names it in the box under the map,
-with its ground distance and how far up or down it is.
+with its ground distance and how far up or down it is. Players read as
+`Name (Party)` or `Name (Player)`, and enemies by their actual name —
+`Rice Seedling (Enemy)` — since a name on its own doesn't tell you what
+kind of thing you're pointing at.
 
 **Your settings are remembered** — theme, minimap mode and refresh, UI scale,
 party/all, and every Show/hide tick. They live in `.meter_settings.json`,

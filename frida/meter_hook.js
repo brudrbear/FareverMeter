@@ -322,6 +322,43 @@ function setWorldTick(ms) {
 let camPtr = null;
 const CAM_CLASS = "client.GameCamera";
 
+// ---- foe display names ----
+// The nameplate name lives in the CDB, reached the same way skill names are:
+// unit.inf -> texts -> name. That needs hl_obj_get_field, which is an HL call
+// and so must not happen on the sweep's timer thread. The camera's postUpdate
+// runs on the GAME thread every frame, so the sweep only queues an id and the
+// lookup is drained there — a handful per frame, since it's once per foe TYPE
+// and the cache serves every one of them after that.
+const unitNameCache = {};       // kind -> display name ("" once tried and empty)
+let unitNamePending = [];       // [{kind, ptr}] awaiting a game-thread lookup
+const UNIT_NAME_PER_FRAME = 4;
+const UNIT_NAME_QUEUE_MAX = 64;
+
+function queueUnitName(kind, ptr) {
+    if (!kind || kind in unitNameCache) return;
+    if (unitNamePending.length >= UNIT_NAME_QUEUE_MAX) return;
+    for (let i = 0; i < unitNamePending.length; i++)
+        if (unitNamePending[i].kind === kind) return;
+    unitNamePending.push({ kind: kind, ptr: ptr });
+}
+
+function drainUnitNames() {
+    if (!unitNamePending.length || !hl_getField) return;
+    for (let i = 0; i < UNIT_NAME_PER_FRAME && unitNamePending.length; i++) {
+        const job = unitNamePending.shift();
+        if (job.kind in unitNameCache) continue;
+        let nm = "";
+        try {
+            const inf = job.ptr.add(OFF.Unit.inf).readPointer();
+            const texts = getField(inf, "texts");
+            nm = hlStr(getField(texts, "name")) || "";
+        } catch (e) {}
+        // Cached even when empty, so a foe with no CDB name isn't retried on
+        // every frame it's on screen.
+        unitNameCache[job.kind] = nm;
+    }
+}
+
 function hookCamera(base) {
     const fi = DATA.cam_targets && DATA.cam_targets["client.BaseCamera.postUpdate"];
     if (fi === undefined) { log("!! camera target missing; minimap will not follow the view"); return; }
@@ -334,6 +371,9 @@ function hookCamera(base) {
                 // player isn't looking. Measured: in normal play only
                 // GameCamera calls this, so the check costs a cached lookup.
                 if (typeName(args[0]) === CAM_CLASS) camPtr = args[0];
+                // Game thread: the only safe place for the CDB lookups the
+                // sweep queues up.
+                drainUnitNames();
             }
         });
     } catch (e) {
@@ -428,7 +468,18 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
                 // point where they're going rather than as anonymous dots.
                 ent.r = Math.round(
                     e.add(OFF.Entity.rotationZ).readDouble() * 1000) / 1000;
-            } else if (cat !== "foe" && cat !== "activity") {
+            } else if (cat === "foe") {
+                // Send the id always and the display name once resolved, so
+                // the overlay has something to show on the first frame a foe
+                // appears rather than waiting for the lookup.
+                const kind = hlStr(e.add(OFF.Unit.kind).readPointer());
+                if (kind) {
+                    ent.k = kind;
+                    const nm = unitNameCache[kind];
+                    if (nm) ent.n = nm;
+                    else queueUnitName(kind, e);
+                }
+            } else if (cat !== "activity") {
                 // Reported, not filtered on: whether a looted chest clears this
                 // flag or leaves the array is a display decision, and keeping it
                 // here means finding out doesn't change the hook.

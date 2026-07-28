@@ -65,6 +65,10 @@
     "curDirection": 256,
     "distance": 192
   },
+  "Unit": {
+    "kind": 592,
+    "inf": 632
+  },
   "Foe": {
     "summonOwner": 1224,
     "persistantSummon": 1240
