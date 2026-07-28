@@ -33,6 +33,7 @@ import json
 import math
 import os
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -46,7 +47,19 @@ ROOT = Path(__file__).resolve().parent.parent
 ANALYSIS = ROOT / "analysis_out"
 FRIDA_DIR = ROOT / "frida"
 POSITION_CACHE = ROOT / ".meter_position.json"
+PARSES_DIR = ROOT / "parses"        # finished-parse images land here (gitignored)
 TARGET_PROCESS = "Farever.exe"
+
+# One meter at a time. The lock deliberately lives OUTSIDE the project folder:
+# copies of this script run from different directories have to find each other,
+# and that's the case that actually bites — an old copy left running while a
+# newer one is launched from somewhere else, with only the old overlay on screen
+# to show for it. A per-project lock would miss exactly that.
+LOCK_DIR = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()) / "FareverMeter"
+LOCK_FILE = LOCK_DIR / "instance.json"
+# How long to let a running instance shut itself down before forcing it. It has
+# to unload the hook and detach, which is the whole point of asking nicely.
+QUIT_WAIT_SECS = 12.0
 
 COMBAT_TIMEOUT_SECS = 25.0
 REFRESH_MS = 250
@@ -58,10 +71,39 @@ MAX_SKILL_ROWS = 8
 # draggable/clickable exactly when the player is in "UI mode" — no hotkey.
 UNLOCK_ON_WINDOWS = ("ui.win.EscapeMenu",)
 
+# Any OTHER game window (inventory, map, vendor, ...) hides the overlay while
+# it's up: those screens are what the player is reading, and a meter floating
+# over them is just clutter. The escape menu is excluded because that's the
+# overlay's own unlock/settings moment — it has to stay visible then.
+#
+# The hook's window feed names every ui.win.* class it sees (each one is logged
+# as "[meter] game window ..."), so if some always-on HUD class turns out to be
+# reported as open, add it here and the overlay stops treating it as a menu.
+MENU_IGNORE_WINDOWS = frozenset(UNLOCK_ON_WINDOWS)
+
 # Grace period for "hide out of combat": the game's isInCombat flag drops
 # between pulls, so hiding the instant it clears would make the overlay flicker
 # through a trash pack.
 HIDE_OOC_LINGER_SECS = 5.0
+
+# Show/hide is a fade rather than a pop — a window blinking out of existence
+# mid-fight reads as a crash. FADE_SECS is the full 0 -> OVERLAY_ALPHA travel;
+# the driver ticks every FADE_STEP_MS on its own timer, not on the 250 ms
+# refresh, which would be far too coarse to look like a fade.
+OVERLAY_ALPHA = 0.94
+FADE_SECS = 0.45
+# The control menu and its hint answer to a keypress, so they want to feel
+# immediate; the meter and breakdown fade on their own schedule, where a slower
+# fade reads as deliberate rather than sluggish.
+MENU_FADE_SECS = 0.15
+FADE_STEP_MS = 25
+
+# 60s Parse Mode: a fixed-length sample, so two runs are comparable in a way
+# "whatever that pull happened to be" never is. The pre-roll exists because the
+# button is clicked from the escape menu — you need those seconds to close it
+# and get your hands back on the keyboard.
+PARSE_PREROLL_SECS = 8
+PARSE_LENGTH_SECS = 60
 
 # Overlay elements the control menu can show/hide, as (key, label). This drives
 # the menu's SHOW / HIDE section: add a row here and a checkbox appears for it,
@@ -89,6 +131,7 @@ FG_HEADER_DIM = "#DCE9EA"   # captions in a header bar — readable on all tints
 FG_TEXT = "#3D2817"
 FG_VALUE = "#1F1208"
 FG_DIM = "#7B5A3A"
+FG_WARN = "#A32B1C"         # red that still reads on the cream body
 ACCENT = "#3D7C7C"
 DMG_BAR = "#5279B5"       # blue — damage bars
 HEAL_BAR = "#5E9C4A"      # green — healing bars
@@ -105,6 +148,12 @@ GWL_EXSTYLE = -20
 WS_EX_LAYERED = 0x00080000
 WS_EX_TRANSPARENT = 0x00000020
 WS_EX_NOACTIVATE = 0x08000000
+
+# Win11 rounds a window's corners on request, and does it for these borderless
+# layered popups too. DWM owns the shape from then on, so — unlike SetWindowRgn —
+# nothing needs re-applying as the meter grows and shrinks with the party.
+DWMWA_WINDOW_CORNER_PREFERENCE = 33
+DWMWCP_ROUND = 2                   # 3 = DWMWCP_ROUNDSMALL, a tighter radius
 
 
 def _pretty_id(sid: str) -> str:
@@ -179,6 +228,34 @@ class PartySession:
         self.active_since = None                 # ts when current active run began
         self.in_combat = False
         self.epoch = 0          # bumped on explicit/zone reset (UI watches it)
+        self.capture_until = None   # parse mode's hard cutoff (None = no limit)
+        self.capture_start = None   # ...and when that window opened
+
+    def set_capture_window(self, seconds):
+        """Parse mode: take data for exactly `seconds` from now, then stop.
+        Enforced here on the data path rather than by the UI tick, so the sample
+        is the length asked for however the 250 ms refresh happens to land.
+        None clears the limit."""
+        with self.lock:
+            now = time.time()
+            self.capture_start = None if seconds is None else now
+            self.capture_until = None if seconds is None else now + seconds
+
+    def _capturing(self, now):
+        return self.capture_until is None or now <= self.capture_until
+
+    def _effective_duration(self, now):
+        """Seconds to divide by for DPS.
+
+        Normally that's in-combat time, so a pull's DPS isn't diluted by the
+        walk to it. Inside a parse window it's wall-clock elapsed instead: the
+        window *is* the measurement, so downtime has to count against you or two
+        runs aren't comparable — and the game's isInCombat flag drops between
+        pulls, which would otherwise inflate a 60 s parse by however much of it
+        the flag happened to miss."""
+        if self.capture_start is not None:
+            return max(0.001, min(now, self.capture_until) - self.capture_start)
+        return max(0.001, self._duration(now)) if self.enc_start else 0.0
 
     def _reset(self, now):
         self.players.clear()
@@ -208,7 +285,13 @@ class PartySession:
     def record(self, ev: dict):
         with self.lock:
             now = time.time()
-            if self.last_hit and (now - self.last_hit) > self.timeout:
+            if not self._capturing(now):
+                return
+            # The lull-reset is suppressed inside a parse window: a quiet
+            # stretch mid-parse is part of the sample, not the start of a new
+            # encounter, and wiping 40 seconds in would ruin the run.
+            if (self.capture_until is None and self.last_hit
+                    and (now - self.last_hit) > self.timeout):
                 self._reset(now)          # new encounter after a long lull
             if self.enc_start == 0.0:
                 self.enc_start = now
@@ -223,6 +306,8 @@ class PartySession:
         # out-of-combat potion/regen must not roll the meter into a fresh
         # encounter (damage does that), so last_hit stays untouched.
         with self.lock:
+            if not self._capturing(time.time()):
+                return
             p = self._player_for(ev)
             p.record_heal(self._skill_of(ev),
                           float(ev.get("amount", 0.0)), int(ev.get("crit", 0)))
@@ -235,6 +320,10 @@ class PartySession:
         """Advance/pause the duration clock based on whether a captured player
         is currently in combat. Called each UI tick with a mode-aware value."""
         with self.lock:
+            # Past a parse window's cutoff the clock stops even mid-fight, so
+            # the duration the meter shows is the sample's, not the pull's.
+            if not self._capturing(now):
+                active = False
             if active and self.active_since is None:
                 self.active_since = now
             elif not active and self.active_since is not None:
@@ -247,6 +336,8 @@ class PartySession:
             self._reset(time.time())
             self.last_hit = 0.0
             self.in_combat = False
+            # A reset always returns to live capture — and so to in-combat DPS.
+            self.capture_until = self.capture_start = None
             self.epoch += 1
 
     def _duration(self, now):
@@ -261,15 +352,12 @@ class PartySession:
     def current(self):
         """(duration, in_combat) — cheap, reflects the latest clock state."""
         with self.lock:
-            now = time.time()
-            dur = max(0.001, self._duration(now)) if self.enc_start else 0.0
-            return dur, self.in_combat
+            return self._effective_duration(time.time()), self.in_combat
 
     def snapshot(self):
         """Return (duration, in_combat, [PlayerAgg sorted by total desc])."""
         with self.lock:
-            now = time.time()
-            duration = max(0.001, self._duration(now)) if self.enc_start else 0.0
+            duration = self._effective_duration(time.time())
             rows = sorted(self.players.values(), key=lambda p: -p.total)
             import copy
             return duration, self.in_combat, [copy.copy(p) for p in rows]
@@ -286,6 +374,15 @@ class GameUIState:
     def __init__(self):
         self._lock = threading.Lock()
         self._open: set[str] = set()
+        self._rift = False
+
+    def set_rift(self, state: bool):
+        with self._lock:
+            self._rift = bool(state)
+
+    def in_rift(self) -> bool:
+        with self._lock:
+            return self._rift
 
     def set_window(self, name: str, is_open: bool):
         if not name:
@@ -304,10 +401,31 @@ class GameUIState:
         with self._lock:
             return any(n in self._open for n in names)
 
+    def any_open_except(self, names) -> bool:
+        """True while any game window *other* than `names` is open — i.e. the
+        player is looking at one of the game's own screens."""
+        with self._lock:
+            return bool(self._open - set(names))
+
 
 # ---------------------------------------------------------------------------
 # Windows click-through + hotkeys (adapted from the original meter)
 # ---------------------------------------------------------------------------
+def _set_rounded_corners(hwnd):
+    """Ask DWM to round this window's corners. Silently does nothing anywhere
+    but Windows 11 (older builds don't know the attribute and just fail)."""
+    if sys.platform != "win32":
+        return
+    try:
+        pref = ctypes.c_int(DWMWCP_ROUND)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            ctypes.c_void_p(hwnd),
+            ctypes.c_uint(DWMWA_WINDOW_CORNER_PREFERENCE),
+            ctypes.byref(pref), ctypes.sizeof(pref))
+    except Exception:
+        pass
+
+
 def _set_clickthrough(hwnd, enabled):
     if sys.platform != "win32":
         return
@@ -361,9 +479,8 @@ def _window_rect_of_pid(pid):
 
 VK_OEM_5 = 0xDC                      # the \ key
 VK_SHIFT, VK_CONTROL, VK_MENU = 0x10, 0x11, 0x12
-WH_KEYBOARD_LL, WH_MOUSE_LL, HC_ACTION = 13, 14, 0
+WH_KEYBOARD_LL, HC_ACTION = 13, 0
 WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP = 0x100, 0x101, 0x104, 0x105
-WM_LBUTTONDOWN = 0x0201
 WM_HOTKEY = 0x0312
 MOD_SHIFT, MOD_NOREPEAT = 0x0004, 0x4000
 
@@ -371,13 +488,17 @@ MOD_SHIFT, MOD_NOREPEAT = 0x0004, 0x4000
 # other control moved onto the in-game control menu. Plain \ and / are left
 # alone now so the game keeps them.
 HK_RESET = 1
-RESET_HOTKEY_TEXT = "Reset FareverPlus - Shift + \\"
+# Split out so the floating hint and the menu button can't drift apart.
+RESET_HOTKEY_KEYS = "Shift + \\"
+RESET_HOTKEY_TEXT = f"Reset FareverPlus - {RESET_HOTKEY_KEYS}"
+
+SHUTDOWN_WARNING = ("ALWAYS CLOSE FAREVER+ BY CTRL+C "
+                    "NOT BY CLOSING THE COMMAND WINDOW")
 
 
-def start_hotkeys(callbacks: dict, target_pid, hit_test=None):
-    """hit_test(x, y) -> bool: called (from the hook thread) for Ctrl+LClick
-    while the game is focused; return True to swallow the click. Lets the
-    meter react to clicks while the overlay stays click-through/locked."""
+def start_hotkeys(callbacks: dict, target_pid):
+    """Run the keyboard hook that owns Shift+\\, on its own thread with its own
+    message pump."""
     if sys.platform != "win32":
         return
 
@@ -392,10 +513,6 @@ def start_hotkeys(callbacks: dict, target_pid, hit_test=None):
                         ("flags", wintypes.DWORD), ("time", wintypes.DWORD),
                         ("dwExtraInfo", ctypes.c_void_p)]
 
-        class MSLL(ctypes.Structure):
-            _fields_ = [("pt", wintypes.POINT), ("mouseData", wintypes.DWORD),
-                        ("flags", wintypes.DWORD), ("time", wintypes.DWORD),
-                        ("dwExtraInfo", ctypes.c_void_p)]
         HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
         u.SetWindowsHookExW.restype = HHOOK
         u.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, ctypes.c_void_p, wintypes.DWORD]
@@ -417,27 +534,6 @@ def start_hotkeys(callbacks: dict, target_pid, hit_test=None):
             pid = wintypes.DWORD()
             u.GetWindowThreadProcessId(h, ctypes.byref(pid))
             return pid.value
-
-        # ---- Ctrl+click-through-the-overlay (row inspect while locked) ----
-        def mproc(nCode, wParam, lParam):
-            if (nCode == HC_ACTION and wParam == WM_LBUTTONDOWN
-                    and hit_test is not None
-                    and pressed(VK_CONTROL) and not pressed(VK_MENU)
-                    and fg_pid() == target_pid):
-                ms = ctypes.cast(lParam, ctypes.POINTER(MSLL))[0]
-                try:
-                    if hit_test(ms.pt.x, ms.pt.y):
-                        return 1          # consumed by the meter
-                except Exception as e:
-                    print("[click]", e, file=sys.stderr)
-            return u.CallNextHookEx(None, nCode, wParam, lParam)
-
-        mproc_ref = HOOKPROC(mproc)   # keep alive for the hook's lifetime
-        hModM = ctypes.windll.kernel32.GetModuleHandleW(None)
-        if hit_test is not None:
-            if not u.SetWindowsHookExW(WH_MOUSE_LL, mproc_ref, hModM, 0):
-                print("[meter] LL mouse hook failed; Ctrl+click inspect "
-                      "unavailable while locked.", file=sys.stderr)
 
         def proc(nCode, wParam, lParam):
             if nCode != HC_ACTION:
@@ -523,8 +619,14 @@ class Overlay:
         self._action_q = []
         self._q_lock = threading.Lock()
         self._last_epoch = session.epoch
-        self._row_rects = []           # [(x1, y1, x2, y2, name)] screen coords
-        self._rects_lock = threading.Lock()
+        # Parse mode: None | "countdown" (pre-roll) | "parsing" | "done" (the
+        # finished sample, frozen on screen until it's cleared).
+        self._parse_state = None
+        self._parse_until = 0.0
+        # Rift prompt: modal, and the only overlay window on screen while it's
+        # up. _rift_seen is the edge detector — one prompt per rift entry.
+        self._prompt_open = False
+        self._rift_seen = False
 
         pos = self._load_positions()
         self.root = tk.Tk()
@@ -535,7 +637,12 @@ class Overlay:
         self.menu.title("Farever+ Controls")
         self.hintwin = tk.Toplevel(self.root)
         self.hintwin.title("Farever+ Hint")
-        for win in (self.root, self.detail, self.menu, self.hintwin):
+        self.parsewin = tk.Toplevel(self.root)
+        self.parsewin.title("Farever+ Parse")
+        self.promptwin = tk.Toplevel(self.root)
+        self.promptwin.title("Farever+ Prompt")
+        for win in (self.root, self.detail, self.menu, self.hintwin,
+                    self.parsewin, self.promptwin):
             win.overrideredirect(True)
             win.attributes("-topmost", True)
             win.configure(bg=TRANSPARENT_KEY)
@@ -543,21 +650,46 @@ class Overlay:
                 win.wm_attributes("-transparentcolor", TRANSPARENT_KEY)
             except tk.TclError:
                 pass
+            # Rounding has to be (re-)applied on every map, not once here: Tk
+            # rebuilds a toplevel's Windows wrapper as it applies the wm
+            # attributes above, and the DWM setting dies with the old hwnd.
+            win.bind("<Map>", self._on_map_round, add="+")
         for win in (self.root, self.detail, self.menu):
-            win.attributes("-alpha", 0.94)
+            win.attributes("-alpha", OVERLAY_ALPHA)
         # Keys must match TOGGLEABLE_ELEMENTS.
         self._element_win = {"meter": self.root, "detail": self.detail}
+        # Every window that fades: the two toggleable ones, plus the control
+        # menu and its hint, which follow the game's escape menu.
+        self._fade_win = dict(self._element_win, menu=self.menu,
+                              hint=self.hintwin, prompt=self.promptwin)
+        self._shown["menu"] = self._shown["hint"] = False
+        self._shown["prompt"] = False
+        # Live opacity of each faded window, driven by _step_fade. The menu pair
+        # starts at zero: they're withdrawn until the escape menu opens.
+        self._alpha = {k: OVERLAY_ALPHA for k in self._fade_win}
+        self._alpha["menu"] = self._alpha["hint"] = 0.0
+        self._alpha["prompt"] = 0.0
+        self._fade_secs = {k: FADE_SECS for k in self._fade_win}
+        self._fade_secs["menu"] = self._fade_secs["hint"] = MENU_FADE_SECS
+        self._fade_secs["prompt"] = MENU_FADE_SECS
+        self._fade_job = None          # pending `after` id for the fade driver
 
         self._build_meter()
         self._build_detail()
         self._build_menu()
         self._build_hint()
+        self._build_parse()
+        self._build_prompt()
         self.root.update_idletasks()
         self._place_windows(pos)
         # The control menu and its hint only exist while the game's escape menu
-        # is up; _sync_game_ui maps them in.
+        # is up; _sync_game_ui maps them in. The parse banner is mapped by parse
+        # mode itself, and deliberately answers to nothing else — a countdown
+        # you can't see is worse than useless.
         self.menu.withdraw()
         self.hintwin.withdraw()
+        self.parsewin.withdraw()
+        self.promptwin.withdraw()
         self.root.after(60, self._apply_clickthrough)
         self._install_hotkeys()
 
@@ -696,6 +828,12 @@ class Overlay:
         self.cols_lbl.pack(fill="x", pady=(2, 0))
         rows_box = tk.Frame(body, bg=BG_BODY)
         rows_box.pack(fill="x", pady=(1, 2))
+        # pack stops managing a container the moment its last slave is forgotten
+        # — it keeps whatever size it last asked for. Without this 1 px keeper
+        # the meter would stay as tall as the biggest party it ever showed once
+        # a reset empties the rows. Packed to the bottom so row order is
+        # untouched.
+        tk.Frame(rows_box, bg=BG_BODY, height=1, width=1).pack(side="bottom")
         self.player_rows = [PlayerRow(rows_box, self._on_row_click)
                             for _ in range(MAX_PLAYER_ROWS)]
 
@@ -768,6 +906,15 @@ class Overlay:
         body = tk.Frame(border, bg=BG_BODY, padx=8, pady=8)
         body.pack(fill="both", expand=True)
 
+        # Top of the menu, above everything: closing the console window kills the
+        # process before it can unload the hook and detach, which is what
+        # destabilises the game across relaunches. Worth shouting about — it's
+        # the one way to break things that looks like a normal way to quit.
+        tk.Label(body, text=SHUTDOWN_WARNING, bg=BG_BODY, fg=FG_WARN,
+                 font=("Segoe UI", 8, "bold"), anchor="w", justify="left",
+                 wraplength=250).pack(fill="x", pady=(0, 8))
+        tk.Frame(body, bg=BG_BAR_TRACK, height=1).pack(fill="x", pady=(0, 2))
+
         def section(text, first=False):
             tk.Label(body, text=text, bg=BG_BODY, fg=ACCENT,
                      font=("Segoe UI", 8, "bold"), anchor="w").pack(
@@ -785,17 +932,31 @@ class Overlay:
 
         # Commands are queued rather than run inline: they mutate overlay state
         # the refresh loop also touches, and _drain runs them on the Tk thread.
-        section("SHOW / HIDE", first=True)
+        section("OPTIONS", first=True)
+        self.btn_mode = button(self._enqueue(self._toggle_mode))
+        # Exactly what the hotkey fires, so the two can't diverge. Labelled with
+        # the keybind because the hotkey is the one that's useful mid-fight,
+        # when the escape menu (and so this button) isn't an option.
+        self.btn_reset_data = button(self._enqueue(self.session.reset))
+        self.btn_reset_data.config(
+            text=f"Reset encounter data   ({RESET_HOTKEY_KEYS})")
+        self.btn_reset_pos = button(self._enqueue(self._reset_pos))
+        self.btn_reset_pos.config(text="Reset window positions")
+
+        section("SHOW / HIDE")
         self.element_btns = {
             key: button(self._enqueue(lambda k=key: self._toggle_element(k)))
             for key, _label in TOGGLEABLE_ELEMENTS
         }
-
-        section("OPTIONS")
-        self.btn_mode = button(self._enqueue(self._toggle_mode))
+        # Last in this section rather than under OPTIONS: it hides the same
+        # windows the checkboxes above do, just on a condition instead of a
+        # click.
         self.btn_hide_ooc = button(self._enqueue(self._toggle_hide_ooc))
-        self.btn_reset_pos = button(self._enqueue(self._reset_pos))
-        self.btn_reset_pos.config(text="Reset window positions")
+
+        section("ACTIONS")
+        self.btn_parse = button(self._enqueue(self._toggle_parse))
+        self.btn_parses = button(self._enqueue(self._open_parses))
+        self.btn_parses.config(text="Parse Screenshots")
         self.menu.minsize(230, 0)
 
     def _build_hint(self):
@@ -814,6 +975,250 @@ class Overlay:
                       fill=BG_BORDER, anchor="nw")
         c.create_text(pad, pad, text=RESET_HOTKEY_TEXT, font=f,
                       fill=BG_BODY, anchor="nw")
+
+    def _build_prompt(self):
+        """The rift prompt: a modal box in the middle of the game window. It is
+        the only overlay window on screen while it's up, so there's nothing to
+        read or click except the question."""
+        border = tk.Frame(self.promptwin, bg=BG_BORDER, padx=2, pady=2)
+        border.pack(fill="both", expand=True)
+        header = tk.Frame(border, bg=BG_HEADER_UNLOCKED)
+        header.pack(fill="x")
+        tk.Label(header, text="Farever+", bg=BG_HEADER_UNLOCKED, fg=FG_HEADER,
+                 font=("Segoe UI", 10, "bold"), anchor="w",
+                 padx=10, pady=5).pack(side="left")
+
+        body = tk.Frame(border, bg=BG_BODY, padx=16, pady=14)
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="You have entered a rift", bg=BG_BODY, fg=FG_VALUE,
+                 font=("Segoe UI", 12, "bold"), anchor="w").pack(fill="x")
+        tk.Label(body, text="Enable 'View All Players'?", bg=BG_BODY,
+                 fg=FG_TEXT, font=("Segoe UI", 10), anchor="w",
+                 pady=6).pack(fill="x")
+
+        btns = tk.Frame(body, bg=BG_BODY)
+        btns.pack(fill="x", pady=(8, 0))
+
+        def answer_button(text, on, yes):
+            b = tk.Button(btns, text=text, command=on, font=("Segoe UI", 10, "bold"),
+                          bg=BTN_ON_BG if yes else BG_BODY_SOFT,
+                          fg=FG_HEADER if yes else FG_TEXT,
+                          activebackground=BTN_ON_BG_ACTIVE if yes else BG_BAR_TRACK,
+                          activeforeground=FG_HEADER if yes else FG_VALUE,
+                          relief="flat", bd=0, padx=26, pady=7,
+                          highlightthickness=1, cursor="hand2",
+                          highlightbackground=BTN_ON_BG_ACTIVE if yes
+                          else BG_BAR_TRACK)
+            b.pack(side="left", expand=True, fill="x", padx=3)
+            return b
+
+        answer_button("Yes", self._enqueue(lambda: self._answer_rift(True)), True)
+        answer_button("No", self._enqueue(lambda: self._answer_rift(False)), False)
+        self.promptwin.minsize(300, 0)
+
+    def _open_rift_prompt(self):
+        self._prompt_open = True
+        self.promptwin.update_idletasks()
+        l, t, r, b = self._game_rect()
+        w = max(self.promptwin.winfo_reqwidth(), 300)
+        h = max(self.promptwin.winfo_reqheight(), 120)
+        self.promptwin.geometry(f"+{l + ((r - l) - w) // 2}+{t + ((b - t) - h) // 2}")
+        self._apply_clickthrough()      # the prompt has to be clickable
+        self._refresh_visibility()
+        print("[meter] entered a rift — asking about View All Players.",
+              file=sys.stderr)
+
+    def _close_rift_prompt(self):
+        self._prompt_open = False
+        self._refresh_visibility()
+
+    def _answer_rift(self, yes):
+        """Yes switches to all-players. That resets the encounter the same way
+        the mode button does — party-only and all-players numbers can't share
+        one encounter without the percentages lying."""
+        if yes and self.mode != "all":
+            self.mode = "all"
+            self.focus_player = None
+            self.session.reset()
+        self._close_rift_prompt()
+        print(f"[meter] rift prompt answered: {'yes' if yes else 'no'}",
+              file=sys.stderr)
+
+    def _tick_rift(self):
+        """One prompt per rift entry, and it goes away by itself if the rift
+        does — an unanswered box shouldn't outlive what it was asking about."""
+        in_rift = self.ui_state.in_rift()
+        if in_rift and not self._rift_seen:
+            self._rift_seen = True
+            self._open_rift_prompt()
+        elif not in_rift:
+            self._rift_seen = False
+            if self._prompt_open:
+                self._close_rift_prompt()
+
+    def _build_parse(self):
+        """The parse banner — the same drop-shadowed floating text as the
+        keybind hint, but its content changes every second, so the canvas and
+        the window are re-measured on each update instead of sized once."""
+        from tkinter import font as tkfont
+        self._parse_font = tkfont.Font(family="Segoe UI", size=15, weight="bold")
+        self._parse_canvas = tk.Canvas(self.parsewin, bg=TRANSPARENT_KEY,
+                                       highlightthickness=0, bd=0)
+        self._parse_canvas.pack()
+        self._parse_text = None        # last text drawn, to skip redundant work
+
+    def _set_parse_banner(self, text, fill=BG_BODY):
+        """Draw `text` centred over the top of the game window. Cheap to call
+        every tick: unchanged text redraws nothing (and re-measuring costs a
+        game-window lookup, which is why that matters)."""
+        if text == self._parse_text:
+            return
+        self._parse_text = text
+        f, c = self._parse_font, self._parse_canvas
+        pad, off = 8, 2
+        w = f.measure(text) + pad * 2 + off
+        h = f.metrics("linespace") + pad * 2 + off
+        c.config(width=w, height=h)
+        c.delete("all")
+        c.create_text(pad + off, pad + off, text=text, font=f, fill=BG_BORDER,
+                      anchor="nw")
+        c.create_text(pad, pad, text=text, font=f, fill=fill, anchor="nw")
+        self.parsewin.update_idletasks()
+        l, t, r, _b = self._game_rect()
+        # Below the keybind hint, which owns the strip at t+24 whenever the
+        # escape menu is open — and it is, for the first few seconds of a parse.
+        self.parsewin.geometry(f"+{l + ((r - l) - w) // 2}+{t + 64}")
+
+    def _hide_parse_banner(self):
+        self._parse_text = None
+        self.parsewin.withdraw()
+
+    def _toggle_parse(self):
+        if self._parse_state is None:
+            self._parse_state = "countdown"
+            self._parse_until = time.time() + PARSE_PREROLL_SECS
+            self.parsewin.deiconify()
+            self.parsewin.attributes("-topmost", True)
+            self._set_parse_banner(f"PARSE STARTS IN {PARSE_PREROLL_SECS}")
+        else:
+            self._stop_parse()
+
+    def _begin_parse(self, now):
+        """Pre-roll over: clear the meter and start the fixed-length sample."""
+        self.session.reset()
+        self.session.set_capture_window(PARSE_LENGTH_SECS)
+        # Our own reset, so don't let the epoch watcher read it as the player
+        # resetting out of parse mode.
+        self._last_epoch = self.session.epoch
+        self.focus_player = None
+        self._parse_state = "parsing"
+        self._parse_until = now + PARSE_LENGTH_SECS
+        self._set_parse_banner(f"PARSE  {PARSE_LENGTH_SECS}s")
+
+    def _finish_parse(self):
+        """Nothing to switch off: the session's capture window has already
+        elapsed, which stops both new data and the duration clock. This just
+        moves the UI into its 'sample is sitting there to be read' state, and
+        writes the result out before anything can clear it."""
+        self._parse_state = "done"
+        self._set_parse_banner(f"PARSE COMPLETE  {PARSE_LENGTH_SECS}s",
+                               fill=BG_HEADER_UNLOCKED)
+        self._save_parse_image()
+
+    def _parse_snapshot(self):
+        """Everything the image needs, as plain data — same rows, same focus and
+        the same merged skill tables the overlay is displaying."""
+        duration, _ = self.session.current()
+        rows = self._apply_mode(self.session.snapshot()[2])
+        party_total = sum(p.total for p in rows)
+        focus_name = self._resolve_focus(rows)
+        fp = next((p for p in rows if p.name == focus_name), None)
+
+        focus = None
+        if fp is not None:
+            fdps = fp.total / duration if duration > 0 else 0.0
+            crit_pct = (fp.crits / fp.hits * 100) if fp.hits else 0.0
+            stats = [f"{int(fp.total)} dmg", f"{fdps:.0f} dps",
+                     f"{fp.hits} hits", f"{crit_pct:.0f}% crit",
+                     f"{int(fp.heal_total)} heal"]
+            if fp.kills:
+                stats.append(f"{fp.kills} kills")
+            el = sorted(fp.elements.items(), key=lambda kv: -kv[1][1])
+            focus = {
+                "name": fp.name,
+                "total": fp.total,
+                "heal": fp.heal_total,
+                "stats": " · ".join(stats),
+                "skills": self._merge_named(fp.skills),
+                "heals": self._merge_named(fp.heals),
+                "elements": "  ".join(f"{k}:{int(v[1])}" for k, v in el[:6]),
+            }
+        return {
+            "title": f"Farever+ {PARSE_LENGTH_SECS}s Parse",
+            "when": time.strftime("%Y-%m-%d %H:%M"),
+            "duration": duration,
+            "mode": "PARTY" if self.mode == "party" else "ALL PLAYERS",
+            "rows": [{
+                "name": p.name, "total": p.total, "heal": p.heal_total,
+                "dps": p.total / duration if duration > 0 else 0.0,
+                "pct": (p.total / party_total * 100) if party_total else 0.0,
+                "is_me": p.is_me,
+            } for p in rows],
+            "focus": focus,
+        }
+
+    def _open_parses(self):
+        """Open the parse folder in Explorer. Created on demand, so the button
+        does something sensible before the first parse has ever been saved
+        rather than failing on a folder that doesn't exist yet."""
+        try:
+            PARSES_DIR.mkdir(parents=True, exist_ok=True)
+            os.startfile(PARSES_DIR)
+        except Exception as e:
+            print(f"[meter] couldn't open {PARSES_DIR}: {e}", file=sys.stderr)
+
+    def _save_parse_image(self):
+        """Write the finished parse to parses/. Never fatal: a missing Pillow or
+        an unwritable folder costs you the picture, not the parse that's sitting
+        on screen."""
+        try:
+            name = f"parse-{time.strftime('%Y%m%d-%H%M%S')}.png"
+            out = render_parse_image(self._parse_snapshot(), PARSES_DIR / name)
+            print(f"[meter] parse saved to {out}", file=sys.stderr)
+        except ImportError:
+            print("[meter] parse image skipped — Pillow isn't installed "
+                  "(pip install pillow).", file=sys.stderr)
+        except Exception as e:
+            print(f"[meter] couldn't save the parse image: {e}", file=sys.stderr)
+
+    def _stop_parse(self):
+        """Back to live metering — which clears the sample. Resuming capture
+        into a finished parse would quietly append live hits to the numbers you
+        were reading, so leaving them would be worse than dropping them."""
+        self._parse_state = None
+        self._hide_parse_banner()
+        self.session.reset()
+        self._last_epoch = self.session.epoch
+        self.focus_player = None
+
+    def _tick_parse(self):
+        """Drive the countdown from the refresh loop. Only the phase changes
+        matter for correctness — the exact 60 s cutoff is enforced inside the
+        session, not here, so a late tick can't lengthen the sample."""
+        if self._parse_state is None or self._parse_state == "done":
+            return
+        now = time.time()
+        left = self._parse_until - now
+        if self._parse_state == "countdown":
+            if left <= 0:
+                self._begin_parse(now)
+            else:
+                self._set_parse_banner(f"PARSE STARTS IN {math.ceil(left)}")
+        elif self._parse_state == "parsing":
+            if left <= 0:
+                self._finish_parse()
+            else:
+                self._set_parse_banner(f"PARSE  {math.ceil(left)}s")
 
     # ---- drag / lock ----
     def _is_locked(self):
@@ -857,14 +1262,38 @@ class Overlay:
         parent = ctypes.windll.user32.GetParent(hwnd)
         _set_clickthrough(parent or hwnd, enabled)
 
+    def _round_win_corners(self, win):
+        """Round one window, on the wrapper hwnd click-through also targets.
+        DWM keeps the shape as the window resizes, so this only needs redoing
+        when the hwnd itself is replaced — see _on_map_round."""
+        if sys.platform != "win32":
+            return
+        hwnd = win.winfo_id()
+        parent = ctypes.windll.user32.GetParent(hwnd)
+        _set_rounded_corners(parent or hwnd)
+
+    def _on_map_round(self, event):
+        # <Map> fires for the initial show, for every deiconify, and after Tk
+        # swaps a toplevel's wrapper — i.e. exactly when the rounding needs
+        # reasserting. Child widgets bubble their own <Map> here, so only act
+        # on the toplevel's.
+        win = event.widget
+        if isinstance(win, (tk.Tk, tk.Toplevel)):
+            self._round_win_corners(win)
+
     def _apply_clickthrough(self):
         locked = self._is_locked()
         for win in (self.root, self.detail):
             self._set_win_clickthrough(win, locked)
         # The control menu is always interactive (it is only ever shown while
-        # the cursor is free); the floating hint is always click-through.
+        # the cursor is free); the floating hint and parse banner are text over
+        # the game and must never take a click.
         self._set_win_clickthrough(self.menu, False)
         self._set_win_clickthrough(self.hintwin, True)
+        self._set_win_clickthrough(self.parsewin, True)
+        # The prompt must take clicks whenever it's up, regardless of lock
+        # state — it's the one overlay window that has to be answered.
+        self._set_win_clickthrough(self.promptwin, False)
 
     def _sync_game_ui(self):
         """Follow the game's UI: while a cursor-freeing window (escape menu) is
@@ -874,16 +1303,9 @@ class Overlay:
             return
         self._menu_unlock = want
         self._apply_clickthrough()
-        self._refresh_visibility()   # the escape menu overrides OOC hiding
-        if want:
-            self.menu.deiconify()
-            self.hintwin.deiconify()
-            self._place_hint()
-            for w in (self.menu, self.hintwin):
-                w.attributes("-topmost", True)   # re-assert over the game's UI
-        else:
-            self.menu.withdraw()
-            self.hintwin.withdraw()
+        self._refresh_visibility()   # owns every window's target, menu included
+        if want and not self._prompt_open:
+            self._place_hint()       # after the map: it measures the window
         # Logged because it's the one state change with no keypress behind it —
         # if someone reports "the meter won't take my clicks", this line says
         # whether the game-menu signal is arriving at all.
@@ -903,24 +1325,7 @@ class Overlay:
 
     def _install_hotkeys(self):
         start_hotkeys({HK_RESET: self._enqueue(self.session.reset)},
-                      self.target_pid, hit_test=self._hit_test_row)
-
-    def _hit_test_row(self, x, y):
-        """Ctrl+click handler, called from the mouse-hook thread: if (x, y)
-        lands on a player row, queue the focus change and consume the click.
-        Works while locked/click-through — no need to unlock (which would make
-        the overlay grab the mouse and pop the game's hidden cursor)."""
-        if not self._shown["meter"]:
-            return False
-        with self._rects_lock:
-            rects = self._row_rects
-        for x1, y1, x2, y2, name in rects:
-            if x1 <= x < x2 and y1 <= y < y2:
-                with self._q_lock:
-                    self._action_q.append(
-                        lambda n=name: setattr(self, "focus_player", n))
-                return True
-        return False
+                      self.target_pid)
 
     def _drain(self):
         with self._q_lock:
@@ -942,27 +1347,81 @@ class Overlay:
         self._refresh_visibility()
 
     def _refresh_visibility(self):
-        """Map/unmap each element from its own show/hide setting plus the global
-        "hide out of combat" rule.
+        """Fade each element in/out from its own show/hide setting plus the two
+        global rules: "hide out of combat", and hiding behind the game's own
+        screens.
 
         Out-of-combat hiding keeps things up for a few seconds after the
         fighting stops (HIDE_OOC_LINGER_SECS) — the game's isInCombat flag drops
         between pulls, and without the grace period the overlay would flicker
-        away and back through a trash pack. The escape menu always forces
-        everything visible, so the control menu can never be the only thing on
-        screen (and you can always re-tick what you hid)."""
+        away and back through a trash pack.
+
+        The escape menu overrides all of it — including a window you ticked off
+        yourself. Being able to see what a checkbox does while you're clicking
+        it matters more than honouring the setting for those few seconds, and it
+        means the control menu is never the only thing on screen."""
         ooc_hidden = (self._hide_ooc and not self._menu_unlock and
                       (time.time() - self._combat_seen_at) >= HIDE_OOC_LINGER_SECS)
-        for key, win in self._element_win.items():
-            shown = self._show[key] and not ooc_hidden
-            if shown == self._shown[key]:
+        # Any game window that isn't the escape menu (inventory, map, ...) owns
+        # the screen while it's up — see MENU_IGNORE_WINDOWS. Unlike the OOC
+        # rule this is unconditional: it isn't a setting the player can untick.
+        menu_hidden = (not self._menu_unlock and
+                       self.ui_state.any_open_except(MENU_IGNORE_WINDOWS))
+        # The rift prompt is modal: while it's up nothing else is on screen, not
+        # even the control menu. That's deliberate — it leaves Esc free to hand
+        # the cursor back so the question can actually be clicked.
+        hidden = ooc_hidden or menu_hidden or self._prompt_open
+        changed = False
+        for key in self._element_win:
+            changed |= self._want_visible(
+                key, (self._show[key] or self._menu_unlock) and not hidden)
+        menu_visible = self._menu_unlock and not self._prompt_open
+        changed |= self._want_visible("menu", menu_visible)
+        changed |= self._want_visible("hint", menu_visible)
+        changed |= self._want_visible("prompt", self._prompt_open)
+        if changed:
+            self._start_fade()
+
+    def _want_visible(self, key, visible):
+        """Point one faded window at a target state, returning whether that
+        changed anything. Mapping happens here, at whatever opacity the fade
+        last left it (0 for a fully hidden window, mid-fade for one caught on
+        the way out); unmapping happens in _step_fade once it reaches zero."""
+        if visible == self._shown[key]:
+            return False
+        self._shown[key] = visible
+        if visible:
+            win = self._fade_win[key]
+            win.attributes("-alpha", self._alpha[key])
+            win.deiconify()
+            win.attributes("-topmost", True)   # re-assert over the game's UI
+        return True
+
+    def _start_fade(self):
+        if self._fade_job is None:
+            self._fade_job = self.root.after(FADE_STEP_MS, self._step_fade)
+
+    def _step_fade(self):
+        """Walk every faded window one step towards its target opacity, and
+        unmap it once it reaches zero. Reversing mid-fade needs no special
+        handling: the target flips and the next step walks back from here."""
+        self._fade_job = None
+        fading = False
+        for key, win in self._fade_win.items():
+            target = OVERLAY_ALPHA if self._shown[key] else 0.0
+            a = self._alpha[key]
+            if a == target:
                 continue
-            self._shown[key] = shown
-            if shown:
-                win.deiconify()
-                win.attributes("-topmost", True)
-            else:
+            step = OVERLAY_ALPHA * FADE_STEP_MS / (self._fade_secs[key] * 1000)
+            a = min(target, a + step) if target > a else max(target, a - step)
+            self._alpha[key] = a
+            win.attributes("-alpha", a)
+            if a <= 0.0:
                 win.withdraw()
+            else:
+                fading = True
+        if fading:
+            self._fade_job = self.root.after(FADE_STEP_MS, self._step_fade)
 
     def _reset_pos(self):
         try:
@@ -1032,6 +1491,18 @@ class Overlay:
         # meter is showing more than the group. Switching either way calls
         # session.reset(), so the label warns about that up front rather than
         # silently binning the encounter mid-fight.
+        # Tinted while a parse is live for the same reason the mode button is:
+        # it's a state you can forget you're in, and the meter looks normal.
+        parsing = self._parse_state is not None
+        self.btn_parse.config(
+            text=(f"Stop {PARSE_LENGTH_SECS}s Parse" if parsing
+                  else f"{PARSE_LENGTH_SECS}s Parse Mode"),
+            bg=BTN_ON_BG if parsing else BG_BODY_SOFT,
+            fg=FG_HEADER if parsing else FG_TEXT,
+            activebackground=BTN_ON_BG_ACTIVE if parsing else BG_BAR_TRACK,
+            activeforeground=FG_HEADER if parsing else FG_VALUE,
+            highlightbackground=BTN_ON_BG_ACTIVE if parsing else BG_BAR_TRACK)
+
         all_players = self.mode == "all"
         self.btn_mode.config(
             text=("Show party only" if all_players else "Show all players")
@@ -1044,12 +1515,24 @@ class Overlay:
 
     def _refresh(self):
         self._drain()
-        self._sync_game_ui()
-        self._refresh_menu()
-        self._apply_heal_columns()
+        # Before the epoch check below: starting a parse resets the session
+        # itself, and syncs _last_epoch so that isn't mistaken for the player
+        # resetting back out of parse mode.
+        self._tick_rift()
+        self._tick_parse()
+        # Ahead of _refresh_menu, so a reset that drops parse mode is reflected
+        # in the button on the same tick rather than the next one.
         if self.session.epoch != self._last_epoch:
             self._last_epoch = self.session.epoch
             self.focus_player = None    # snap the breakdown back to my hero
+            # A reset from anywhere else — the hotkey, the menu button, a zone
+            # change — drops parse mode too: the sample it was building is gone.
+            if self._parse_state is not None:
+                self._parse_state = None
+                self._hide_parse_banner()
+        self._sync_game_ui()
+        self._refresh_menu()
+        self._apply_heal_columns()
         _, _, rows = self.session.snapshot()
         rows = self._apply_mode(rows)
         # The capture clock only advances while at least one *displayed*
@@ -1102,19 +1585,6 @@ class Overlay:
             else:
                 row.hide()
 
-        # Screen rects of the visible rows, for the global Ctrl+click
-        # hit-test (works while the overlay is locked/click-through). Keyed on
-        # what's actually mapped — a withdrawn window reports stale coords.
-        rects = []
-        if self._shown["meter"]:
-            for row in self.player_rows:
-                if row._packed and row._name:
-                    rx, ry = row.f.winfo_rootx(), row.f.winfo_rooty()
-                    rects.append((rx, ry, rx + row.f.winfo_width(),
-                                  ry + row.f.winfo_height(), row._name))
-        with self._rects_lock:
-            self._row_rects = rects
-
         # ---- breakdown window ----
         fp = next((p for p in rows if p.name == focus), None)
         if fp is None:
@@ -1149,6 +1619,14 @@ class Overlay:
 
     def run(self):
         def loop():
+            # Checked before the refresh and without rescheduling, so a stand-
+            # down request costs at most one tick. quit() (not destroy()) leaves
+            # main()'s finally to unload the hook and detach.
+            if quit_requested():
+                print("[meter] a newer instance asked us to exit — shutting "
+                      "down.", file=sys.stderr)
+                self.root.quit()
+                return
             self._refresh()
             self.root.after(REFRESH_MS, loop)
         loop()
@@ -1387,6 +1865,285 @@ def find_game_process(device):
             return infos[int(ans) - 1][0]
 
 
+# ---------------------------------------------------------------------------
+# Parse image
+# ---------------------------------------------------------------------------
+# Drawn from the numbers rather than screenshotted from the overlay: the live
+# windows are layered and transparent, the breakdown only ever shows one player,
+# and a capture would be at the mercy of whatever the game had drawn behind
+# them. Same palette and the same monospace column layout, so it still reads as
+# the meter.
+PARSE_IMG_W = 620
+PARSE_FONT_UI = "segoeuib.ttf"      # Segoe UI Bold, to match the headers
+PARSE_FONT_MONO = "consola.ttf"     # Consolas, to match the columns
+
+
+def _parse_font(name, size):
+    """Load a Windows font by filename, falling back to PIL's built-in bitmap
+    font so a missing/odd font install degrades the image instead of losing it."""
+    from PIL import ImageFont
+    for path in (Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts" / name,
+                 Path(name)):
+        try:
+            return ImageFont.truetype(str(path), size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def render_parse_image(data, path):
+    """Draw a finished parse to `path` as a PNG. `data` is the plain dict built
+    by Overlay._parse_snapshot — no Tk or session access from in here."""
+    from PIL import Image, ImageDraw
+
+    ui = _parse_font(PARSE_FONT_UI, 15)
+    ui_small = _parse_font(PARSE_FONT_UI, 11)
+    mono = _parse_font(PARSE_FONT_MONO, 14)
+    mono_small = _parse_font(PARSE_FONT_MONO, 12)
+
+    pad, bar_h, line_h, row_gap = 12, 6, 19, 6
+    x0, x1 = 12, PARSE_IMG_W - 13
+    rows, focus = data["rows"], data["focus"]
+
+    # Drawn onto a canvas that's certainly tall enough and cropped to the ink at
+    # the end — cheaper to get right than keeping a height formula in step with
+    # the layout below, and it can't clip a long skill list.
+    img = Image.new("RGB", (PARSE_IMG_W, 2000), BG_BODY)
+    d = ImageDraw.Draw(img)
+
+    d.rectangle((0, 0, PARSE_IMG_W - 1, 35), fill=BG_HEADER)
+    d.text((x0, 9), data["title"], font=ui, fill=FG_HEADER)
+    stamp = f"{data['when']}   {data['duration']:.0f}s"
+    d.text((x1 - d.textlength(stamp, font=mono_small), 13), stamp,
+           font=mono_small, fill=FG_HEADER)
+    y = 36 + pad
+
+    def bar(x, y, w, frac, colour, thick):
+        d.rectangle((x, y, x + w, y + thick - 1), fill=BG_BAR_TRACK)
+        filled = int(w * min(1.0, max(0.0, frac)))
+        if filled > 0:
+            d.rectangle((x, y, x + filled, y + thick - 1), fill=colour)
+
+    d.text((x0, y), f"{data['mode']}   ({len(rows)})", font=ui_small, fill=ACCENT)
+    y += 18
+    d.text((x0, y), f"  #  {'NAME':<12}{'DMG':>9} {'DPS':>6} {'%':>4}{'HEAL':>9}",
+           font=mono, fill=FG_DIM)
+    y += line_h
+
+    top_dmg = max((r["total"] for r in rows), default=0.0) or 1.0
+    top_heal = max((r["heal"] for r in rows), default=0.0) or 1.0
+    for i, r in enumerate(rows, 1):
+        me = "*" if r["is_me"] else " "
+        d.text((x0, y), f"  {i}.{me}{r['name'][:12]:<12}{int(r['total']):>9} "
+                        f"{r['dps']:>6.0f} {r['pct']:>3.0f}%{int(r['heal']):>9}",
+               font=mono, fill=FG_VALUE if r["is_me"] else FG_TEXT)
+        y += line_h
+        bar(x0, y, x1 - x0, r["total"] / top_dmg, DMG_BAR, bar_h)
+        y += bar_h
+        bar(x0, y, x1 - x0, r["heal"] / top_heal, HEAL_BAR, bar_h)
+        y += bar_h + row_gap
+
+    if focus:
+        y += 6
+        d.line((x0, y, x1, y), fill=BG_BAR_TRACK)
+        y += 10
+        d.text((x0, y), f"BREAKDOWN — {focus['name']}", font=ui, fill=FG_TEXT)
+        y += 24
+        d.text((x0, y), focus["stats"], font=mono_small, fill=FG_DIM)
+        y += line_h + 4
+
+        # Damage left, healing right — each column's bars scale to that column's
+        # own biggest entry, exactly like the live breakdown.
+        colw = (x1 - x0 - 18) // 2
+        columns = ((x0, "DAMAGE", focus["skills"], DMG_BAR, focus["total"]),
+                   (x0 + colw + 18, "HEALING", focus["heals"], HEAL_BAR,
+                    focus["heal"]))
+        for cx, title, _entries, _colour, _denom in columns:
+            d.text((cx, y), title, font=ui_small, fill=ACCENT)
+        y += 16
+        col_bottom = y
+        for cx, _title, entries, colour, denom in columns:
+            # Same denominator and same line format as SkillColumn.show: the %
+            # is of the player's overall total, not of the listed rows.
+            scale = max((e[1] for e in entries), default=0.0) or 1.0
+            cy = y
+            for label, amount, hits, _crits in entries:
+                pct = (amount / denom * 100) if denom else 0.0
+                d.text((cx, cy),
+                       f"{label[:16]:<16}{int(amount):>8} {pct:>3.0f}% {hits:>3}h",
+                       font=mono_small, fill=FG_TEXT)
+                cy += line_h
+                bar(cx, cy, colw, amount / scale, colour, 4)
+                cy += 4 + 3
+            col_bottom = max(col_bottom, cy)
+        y = col_bottom
+
+        if focus["elements"]:
+            y += 4
+            d.text((x0, y), focus["elements"], font=mono_small, fill=FG_DIM)
+            y += line_h
+
+    img = img.crop((0, 0, PARSE_IMG_W, y + pad))
+    # Border last, so it frames the cropped height rather than the scratch one.
+    ImageDraw.Draw(img).rectangle((0, 0, PARSE_IMG_W - 1, img.height - 1),
+                                 outline=BG_BORDER, width=2)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(path)
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Single instance
+# ---------------------------------------------------------------------------
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+PROCESS_TERMINATE = 0x0001
+STILL_ACTIVE = 259
+
+
+def _open_process(pid, access):
+    if sys.platform != "win32" or pid <= 0:
+        return None
+    k32 = ctypes.windll.kernel32
+    k32.OpenProcess.restype = ctypes.c_void_p
+    k32.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+    return k32.OpenProcess(access, 0, pid) or None
+
+
+def _close_handle(h):
+    k32 = ctypes.windll.kernel32
+    k32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    k32.CloseHandle(h)
+
+
+def _process_alive(pid):
+    """True while `pid` is still running. Note this can't be os.kill(pid, 0):
+    on Windows os.kill TERMINATES the target instead of probing it."""
+    h = _open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)
+    if not h:
+        return False
+    try:
+        k32 = ctypes.windll.kernel32
+        k32.GetExitCodeProcess.argtypes = (ctypes.c_void_p,
+                                           ctypes.POINTER(ctypes.c_ulong))
+        code = ctypes.c_ulong()
+        ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+        return bool(ok) and code.value == STILL_ACTIVE
+    finally:
+        _close_handle(h)
+
+
+def _process_image(pid):
+    """Full path of a pid's executable, or "". Guards the force-kill path: a
+    stale lock file can name a pid Windows has since recycled onto something
+    else entirely, and that must not be what gets terminated."""
+    h = _open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION)
+    if not h:
+        return ""
+    try:
+        k32 = ctypes.windll.kernel32
+        k32.QueryFullProcessImageNameW.argtypes = (
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_wchar_p,
+            ctypes.POINTER(ctypes.c_ulong))
+        size = ctypes.c_ulong(32768)
+        buf = ctypes.create_unicode_buffer(size.value)
+        ok = k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
+        return buf.value if ok else ""
+    finally:
+        _close_handle(h)
+
+
+def _quit_flag(pid):
+    return LOCK_DIR / f"quit-{pid}"
+
+
+def quit_requested():
+    """Has a newly-started instance asked us to stand down? Polled by the
+    overlay's own loop, so the answer is acted on within one refresh tick."""
+    try:
+        return _quit_flag(os.getpid()).exists()
+    except OSError:
+        return False
+
+
+def _stop_instance(pid):
+    """Ask pid to exit, and wait. The request is a file the running overlay
+    polls — it returns from its mainloop and takes main()'s normal shutdown
+    path, unloading the hook and detaching. Force-killing is the fallback only,
+    because that's what leaves a half-attached agent in the game."""
+    flag = _quit_flag(pid)
+    try:
+        flag.write_text("quit")
+    except OSError:
+        return
+    deadline = time.monotonic() + QUIT_WAIT_SECS
+    while time.monotonic() < deadline:
+        if not _process_alive(pid):
+            print(f"[meter] pid {pid} shut down cleanly.", file=sys.stderr)
+            break
+        time.sleep(0.25)
+    else:
+        print(f"[meter] pid {pid} didn't respond within {QUIT_WAIT_SECS:.0f}s — "
+              "forcing it. If the hook then fails to attach, fully close "
+              "Farever and reopen it.", file=sys.stderr)
+        h = _open_process(pid, PROCESS_TERMINATE)
+        if h:
+            ctypes.windll.kernel32.TerminateProcess.argtypes = (ctypes.c_void_p,
+                                                                ctypes.c_uint)
+            ctypes.windll.kernel32.TerminateProcess(h, 1)
+            _close_handle(h)
+    try:
+        flag.unlink()
+    except OSError:
+        pass
+
+
+def claim_single_instance():
+    """Become the only meter running, then record ourselves in the lock file.
+
+    Two overlays on screen at once is confusing enough; two hooks in the game is
+    worse. The usual way into it is launching a *second copy* of this script
+    from a different folder while the first is still up — which is why the lock
+    lives in LOCK_DIR rather than beside the script."""
+    try:
+        LOCK_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return                       # no lock dir => skip the mechanism entirely
+
+    try:
+        other = json.loads(LOCK_FILE.read_text())
+    except Exception:
+        other = {}
+    pid = int(other.get("pid") or 0)
+    if pid and pid != os.getpid() and _process_alive(pid):
+        image = _process_image(pid)
+        if "python" in Path(image).name.lower():
+            print(f"[meter] another meter is already running (pid {pid}, "
+                  f"{other.get('script') or 'unknown script'}) — asking it to "
+                  "exit ...", file=sys.stderr)
+            _stop_instance(pid)
+        else:
+            print(f"[meter] ignoring a stale lock: pid {pid} is "
+                  f"{image or 'something unidentifiable'}, not a meter.",
+                  file=sys.stderr)
+
+    try:
+        LOCK_FILE.write_text(json.dumps({
+            "pid": os.getpid(),
+            "script": str(Path(__file__).resolve()),
+            "started": time.time(),
+        }))
+    except OSError:
+        pass
+
+
+def release_instance_lock():
+    for p in (LOCK_FILE, _quit_flag(os.getpid())):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
 def locate_hlboot(pid):
     """Find the hlboot.dat matching the *running* game. Priority: explicit
     FAREVER_HLBOOT override, then the file next to the process's own exe (which
@@ -1427,6 +2184,7 @@ def locate_hlboot(pid):
 
 
 def main():
+    claim_single_instance()
     session = PartySession()
     ui_state = GameUIState()
 
@@ -1459,6 +2217,7 @@ def main():
     ready = {"ok": None}
     ready_evt = threading.Event()
     liveness = {"t": time.monotonic(), "printed": 0.0}
+    hero_id = {"name": None}           # last local hero, to keep the log quiet
 
     def on_message(message, data):
         liveness["t"] = time.monotonic()   # any agent traffic counts as alive
@@ -1473,15 +2232,35 @@ def main():
             session.record_heal(p)
         elif k == "combat":
             session.set_combat(p.get("state") or {})
+        elif k == "rift":
+            state = bool(p.get("state"))
+            ui_state.set_rift(state)
+            print(f"[meter] rift: {state}", file=sys.stderr)
         elif k == "window":
-            ui_state.set_window(p.get("name"), bool(p.get("open")))
+            name, is_open = p.get("name"), bool(p.get("open"))
+            ui_state.set_window(name, is_open)
+            # Logged because every class the game opens now hides the overlay
+            # (MENU_IGNORE_WINDOWS aside) — if the meter goes missing and stays
+            # missing, these lines name the window that's holding it down.
+            print(f"[meter] game window {name} {'open' if is_open else 'closed'}",
+                  file=sys.stderr)
         elif k == "zone":
             ui_state.clear()      # the UI is rebuilt across a loading screen
             session.reset()
             print(f"[meter] zone change ({p.get('sig')!r}) — meter reset",
                   file=sys.stderr)
         elif k == "hero":
-            print(f"[meter] local hero: {p.get('name')}", file=sys.stderr)
+            # The hook re-reports the local hero every 3s so it survives a
+            # respawn or zone change, so only the first identification and a
+            # genuine change are worth a line. The name itself is tracked but
+            # never printed — the console is often on screen next to the game,
+            # and the overlay's own `*` row already says which player is you.
+            name = p.get("name")
+            if name and name != hero_id["name"]:
+                first = hero_id["name"] is None
+                hero_id["name"] = name
+                print("[meter] local hero "
+                      + ("identified." if first else "changed."), file=sys.stderr)
         elif k == "log":
             print("[hook]", p.get("msg"), file=sys.stderr)
         elif k == "progress":
@@ -1569,7 +2348,15 @@ def main():
             fsession.detach()
         except Exception:
             pass
+        release_instance_lock()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        # Ctrl+C is the documented way to stop the meter, so it shouldn't look
+        # like a crash: main()'s finally has already unloaded the hook and
+        # detached by the time this runs. Printing (and exiting 0) also lets a
+        # launcher tell a normal stop from a real failure.
+        print("[meter] stopped.", file=sys.stderr)
