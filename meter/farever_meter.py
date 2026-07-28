@@ -239,12 +239,17 @@ MINIMAP_RANGE_MIN, MINIMAP_RANGE_MAX = 80, 600
 
 # How each category is drawn: colour, radius in pixels, and shape. Kept in one
 # table so the legend, the draw pass and any future re-skin can't disagree.
-# Drawn in list order, so the things you most need to see land on top.
+# Drawn in list order, so later entries land on top — see the note inside.
 # Tuned for a DARK panel, which both themes now use — a map is easier to read
 # when the markers are the bright thing on it rather than the background being
 # brightest. The meter's own body colour is deliberately not reused here: the
 # damage tables want to look like parchment and a map does not.
 MINIMAP_STYLE = (
+    # Players go FIRST, which puts them UNDERNEATH everything else. There are
+    # usually several, they cluster on the same spot, and a stack of chevrons
+    # will happily bury the one chest you were looking for. The map is for
+    # finding things in the world; the people are the part already on screen.
+    ("hero",     {"fill": "#5FAEFF", "r": 4.2, "shape": "chevron"}),
     ("activity", {"fill": "#FFD95E", "r": 4.0, "shape": "diamond"}),
     ("obelisk",  {"fill": "#C48CFF", "r": 4.4, "shape": "monolith"}),
     ("respawn",  {"fill": "#5FE3C0", "r": 3.0, "shape": "square"}),
@@ -252,7 +257,6 @@ MINIMAP_STYLE = (
     ("orb",      {"fill": "#FFD400", "r": 3.6, "shape": "dot",
                   "ring": "#A24BE0"}),
     ("foe",      {"fill": "#FF5348", "r": 3.0, "shape": "dot"}),
-    ("hero",     {"fill": "#5FAEFF", "r": 4.2, "shape": "chevron"}),
 )
 MINIMAP_STYLE_MAP = dict(MINIMAP_STYLE)
 MINIMAP_ORDER = [k for k, _ in MINIMAP_STYLE]
@@ -273,10 +277,12 @@ MINIMAP_TIP_MAXLEN = 22
 
 # Hover labels. Separate from the style table because these are prose for a
 # human, not drawing instructions.
-# States that just mean "normal, still there" — not worth saying out loud.
-# Anything else (Locked, or something we haven't seen) is shown, which is also
-# how an unfamiliar state makes itself known instead of passing as ordinary.
-MINIMAP_PLAIN_STATES = ()
+# States that just mean "normal, still there". A marker only reaches the map if
+# it's still worth going to, so saying "Closed" on every chest and obelisk is
+# noise — "Obelisk" is the whole message. Anything NOT on this list is shown:
+# Locked, or a state no one has seen yet, which is how an unfamiliar one makes
+# itself known instead of passing for ordinary.
+MINIMAP_PLAIN_STATES = ("Closed", "Enabled", "Idle", "Active", "Default")
 
 # Short class tags for the meter. The game's own names come off ent.Unit.kind,
 # which for a hero is its class rather than a creature id.
