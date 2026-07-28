@@ -1,0 +1,54 @@
+{
+  "String": {
+    "bytes": 8,
+    "length": 16
+  },
+  "DamageResult": {
+    "_amount": 88,
+    "affinity": 56,
+    "_critical": 113,
+    "_kill": 112,
+    "_hitCount": 96,
+    "_block": 104,
+    "target": 48,
+    "serverSource": 32,
+    "ctx": 128,
+    "baseSkill": 8
+  },
+  "BaseSkill": {
+    "kind": 184,
+    "inf": 176,
+    "owner": 328,
+    "ownerPlayer": 16
+  },
+  "HitData": {
+    "baseSkill": 8
+  },
+  "UnitAttributes": {
+    "unit": 8,
+    "health": 240
+  },
+  "Hero": {
+    "name": 1272,
+    "player": 1208,
+    "isInCombat": 680
+  },
+  "Player": {
+    "name": 192,
+    "group": 256,
+    "isMe": 312,
+    "lobbyId": 264
+  },
+  "Group": {
+    "groupId": 176,
+    "players": 184
+  },
+  "SkillRow": {
+    "id_vidx": 7,
+    "texts_vidx": 16
+  },
+  "Texts": {
+    "name_vidx": 1,
+    "desc_vidx": 0
+  }
+}
