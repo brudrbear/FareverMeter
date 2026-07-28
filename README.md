@@ -49,6 +49,45 @@ the **notification area** by the clock, and draws its overlay over the game.
 Start it before the game if you like — it waits for Farever to launch, and you
 can still stop it from the tray while it's waiting.
 
+### Starting it with the game, from Steam (optional)
+
+Because the meter waits for Farever, you can let Steam start both at once and
+stop thinking about it.
+
+In Steam, right-click **Farever** → **Properties** → **General** → **Launch
+Options**, and paste this on one line:
+
+```
+cmd /c start "" "C:\Users\YOU\AppData\Local\Programs\FareverMeter\FareverMeter.exe" & %command%
+```
+
+Replace `YOU` with your Windows username. To get the path exactly right without
+typing it: find **Farever+ Meter** in the Start menu, right-click →
+**More** → **Open file location**, then right-click the shortcut → **Properties**
+and copy the **Target** box.
+
+Now launching Farever from Steam starts the meter first, then the game.
+
+**Why it's shaped like that.** Steam replaces `%command%` with the game and its
+arguments, but on Windows it doesn't run launch options through a shell — so
+`cmd /c` is what makes the `&` mean anything. `start ""` launches the meter
+*without waiting* for it, and the empty `""` is the window title `start` expects
+before a quoted path (leave it out and it treats the path as the title). Steam
+then waits on `cmd`, `cmd` waits on the game, so **playtime, the overlay and
+Rich Presence all keep working** — which they don't in the recipes that leave
+`start` off the game as well.
+
+Two things to know:
+
+* **The meter doesn't close when the game does.** Nothing in it watches for
+  Farever exiting, so the overlay stays on screen with the last numbers. Stop it
+  from the tray icon when you're finished.
+* **Launching Farever outside Steam** — from a desktop shortcut, say — skips the
+  launch options entirely, so start the meter yourself that time.
+
+If this feels like more machinery than you want, it is entirely optional: the
+meter waits for the game, so starting it whenever you like works just as well.
+
 ### Stopping it
 
 Two ways, and both shut down cleanly:
