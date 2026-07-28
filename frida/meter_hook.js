@@ -420,6 +420,14 @@ const ORB_KIND = /orb/i;
 const SPENT_STATES = { "Opened": 1, "Disabled": 1, "Collected": 1,
                        "Used": 1, "Empty": 1, "Done": 1 };
 
+// Per-category overrides, because the same word means different things to
+// different objects. A chest reading "Closed" is one you've already been to;
+// an obelisk reading "Closed" is simply an obelisk, and hiding those on the
+// same word emptied the category once already.
+const SPENT_BY_CAT = {
+    chest: { "Closed": 1 },
+};
+
 // Runtime type names are resolved through typeName(), which caches by type
 // pointer — a zone holds hundreds of entities but only a couple of dozen
 // distinct classes, so classification is a map hit after the first of each.
@@ -522,7 +530,8 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
                     // chest or an obelisk it reads "Opened" while the thing is
                     // plainly shut — measured, on every one of them — so
                     // consulting it there hides the entire category.
-                    if (SPENT_STATES[st]) continue;
+                    const catSpent = SPENT_BY_CAT[cat];
+                    if (SPENT_STATES[st] || (catSpent && catSpent[st])) continue;
                     if (cat === "orb" && SPENT_STATES[vis]) continue;
                     if (st) ent.s = st;
                     if (vis && vis !== st) ent.v = vis;
