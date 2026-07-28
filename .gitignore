@@ -8,3 +8,10 @@ __pycache__/
 
 # Where you dragged the overlay windows. Per-machine, and rewritten constantly.
 .meter_position.json
+
+# Release build output from packaging/build.ps1 — a few hundred megabytes of
+# regenerated bundle. The installer it produces belongs on a GitHub release,
+# not in the repo. (assets/farevermeter.ico IS tracked: a from-source run wants
+# the tray icon without needing Pillow to draw it first.)
+/build/
+/dist/

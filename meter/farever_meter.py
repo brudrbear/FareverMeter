@@ -23,6 +23,16 @@ party/all mode switches.
 
 Run:  python meter/farever_meter.py   (with Farever running)
 
+Shipped as a windowed executable (see packaging/), which has no console — so it
+logs to %LOCALAPPDATA%\\FareverMeter\\meter.log, asks its startup questions as
+dialogs, and puts a tray icon in the notification area whose menu holds the
+clean shutdown. Run from source it keeps the console and all three still work.
+
+Stopping it matters: both the tray icon's "Stop the meter" and the control
+menu's Quit button return from the Tk mainloop so the Frida hook is unloaded and
+detached on the way out. Force-killing the process skips that, and a
+half-attached agent is what destabilises the game across relaunches.
+
 The only surviving hotkey (fires while Farever has focus):
   Shift+\\   reset the current encounter
 """
@@ -37,6 +47,7 @@ import tempfile
 import threading
 import time
 import tkinter as tk
+from ctypes import wintypes
 from tkinter import font as tkfont
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -44,11 +55,39 @@ from pathlib import Path
 
 import frida
 
-ROOT = Path(__file__).resolve().parent.parent
-ANALYSIS = ROOT / "analysis_out"
-FRIDA_DIR = ROOT / "frida"
-POSITION_CACHE = ROOT / ".meter_position.json"
-PARSES_DIR = ROOT / "parses"        # finished-parse images land here (gitignored)
+# ---------------------------------------------------------------------------
+# Where things live
+# ---------------------------------------------------------------------------
+# Two layouts, one codebase.
+#
+#   From source — everything stays in the project folder, exactly as it always
+#   has, so the developer workflow is untouched.
+#
+#   From the installed build — the code and the data part company. PyInstaller
+#   unpacks the bundle into a temporary directory that is a *different path on
+#   every launch* and is deleted on exit, so anything we WRITE (regenerated
+#   offsets, window positions, parse images, the log) has to go somewhere
+#   durable and user-writable instead. Everything we only READ — the agent JS,
+#   the shipped JSON — comes out of the bundle.
+FROZEN = bool(getattr(sys, "frozen", False))
+# Bundled resources go under res/ rather than at the bundle root, so our own
+# "frida" folder of agent JS can't collide with the frida *package* PyInstaller
+# unpacks alongside it. Inside res/ the layout is the project's, unchanged.
+ROOT = (Path(sys._MEIPASS) / "res") if FROZEN else Path(__file__).resolve().parent.parent
+
+# %LOCALAPPDATA%\FareverMeter. Already the home of the single-instance lock, so
+# the installed build isn't inventing a location — just keeping more there.
+DATA_HOME = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()) / "FareverMeter"
+_WRITABLE = DATA_HOME if FROZEN else ROOT
+
+FRIDA_DIR = ROOT / "frida"                  # read-only: the agent's JS
+SHIPPED_ANALYSIS = ROOT / "analysis_out"    # read-only: the JSON we ship with
+# Regenerated on nearly every launch, so it has to be writable — which the
+# bundle isn't (usefully). Seeded from SHIPPED_ANALYSIS on first run.
+ANALYSIS = (_WRITABLE / "analysis_out") if FROZEN else SHIPPED_ANALYSIS
+POSITION_CACHE = _WRITABLE / ".meter_position.json"
+PARSES_DIR = _WRITABLE / "parses"   # finished-parse images land here (gitignored)
+LOG_FILE = DATA_HOME / "meter.log"
 TARGET_PROCESS = "Farever.exe"
 
 # One meter at a time. The lock deliberately lives OUTSIDE the project folder:
@@ -56,8 +95,19 @@ TARGET_PROCESS = "Farever.exe"
 # and that's the case that actually bites — an old copy left running while a
 # newer one is launched from somewhere else, with only the old overlay on screen
 # to show for it. A per-project lock would miss exactly that.
-LOCK_DIR = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()) / "FareverMeter"
+LOCK_DIR = DATA_HOME
 LOCK_FILE = LOCK_DIR / "instance.json"
+# Process images that count as "another meter" when the lock file names them.
+# The installed executable's name is here as a literal rather than read from
+# sys.executable, so a source run recognises an installed one and vice versa.
+EXE_NAME = "FareverMeter.exe"
+METER_IMAGE_NAMES = frozenset({EXE_NAME.lower(), "python.exe", "pythonw.exe"})
+
+# Set once at startup, before stderr is redirected: is there a console for a
+# human to read? False under the installed (windowed) build and under
+# pythonw.exe. Decides whether a prompt is a terminal question or a dialog, and
+# whether the control menu still warns about closing the console window.
+HAS_CONSOLE = sys.stderr is not None and sys.stdout is not None
 # How long to let a running instance shut itself down before forcing it. It has
 # to unload the hook and detach, which is the whole point of asking nicely.
 QUIT_WAIT_SECS = 12.0
@@ -257,6 +307,255 @@ WS_EX_NOACTIVATE = 0x08000000
 # nothing needs re-applying as the meter grows and shrinks with the party.
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
 DWMWCP_ROUND = 2                   # 3 = DWMWCP_ROUNDSMALL, a tighter radius
+
+
+# ---------------------------------------------------------------------------
+# Running without a console
+# ---------------------------------------------------------------------------
+# The installed build is a windowed executable: no console, so nothing to press
+# Ctrl+C in, nowhere for a print() to land, and no stdin to answer a prompt on.
+# Each of those needs a replacement rather than a removal — the diagnostics in
+# particular are the entire support process ("send me the log").
+
+# Re-invoking ourselves to run one of the hltools generators. Frozen, there is
+# no python.exe to call and sys.executable is *this* program, so the exe has to
+# be able to act as its own interpreter for the two bundled tool scripts.
+TOOL_FLAG = "--run-hltool"
+CREATE_NO_WINDOW = 0x08000000   # ...or every regenerate flashes a console up
+
+
+def run_bundled_tool(name, argv_rest):
+    """Entry point for `FareverMeter.exe --run-hltool build_targets.py ...`.
+
+    The tools are plain top-level scripts that do their work on import and exit
+    via SystemExit, so they're run as scripts rather than imported — which also
+    keeps them in their own process, as they are when run from source."""
+    tool = ROOT / "hltools" / name
+    if not tool.is_file():
+        sys.exit(f"[!] bundled tool missing: {tool}")
+    import runpy
+    sys.argv = [str(tool), *argv_rest]
+    sys.path.insert(0, str(tool.parent))
+    runpy.run_path(str(tool), run_name="__main__")
+
+
+def seed_analysis():
+    """Make ANALYSIS exist and hold something usable.
+
+    Only the installed build needs this: its writable data directory starts
+    empty, while the JSON it should start from is inside the read-only bundle.
+    Copying rather than symlinking means the first launch after an install has
+    working data even if the game is mid-patch and regeneration fails."""
+    if not FROZEN:
+        return
+    try:
+        ANALYSIS.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"[meter] can't create {ANALYSIS}: {e}", file=sys.stderr)
+        return
+    import shutil
+    for src in SHIPPED_ANALYSIS.glob("*.json"):
+        dst = ANALYSIS / src.name
+        if not dst.exists():
+            try:
+                shutil.copyfile(src, dst)
+            except OSError as e:
+                print(f"[meter] couldn't seed {dst.name}: {e}", file=sys.stderr)
+
+
+def setup_logging():
+    """Point stdout/stderr at a log file when there's no console behind them.
+
+    Without this the windowed build is silent in the one situation where output
+    matters most — it failed to start and the user wants to know why. The
+    previous run is kept as meter.log.1, because "it worked yesterday" is
+    usually asked after today's run has already overwritten the evidence."""
+    if HAS_CONSOLE:
+        return
+    try:
+        DATA_HOME.mkdir(parents=True, exist_ok=True)
+        prev = LOG_FILE.with_suffix(".log.1")
+        if LOG_FILE.exists():
+            try:
+                LOG_FILE.replace(prev)
+            except OSError:
+                pass
+        # Line-buffered: a crash mid-write still leaves the lines before it,
+        # which is exactly the log you want to read after a crash.
+        f = open(LOG_FILE, "w", buffering=1, encoding="utf-8", errors="replace")
+    except OSError:
+        return          # nowhere to log => run silently rather than not at all
+    sys.stdout = sys.stderr = f
+    print(f"[meter] log started {time.strftime('%Y-%m-%d %H:%M:%S')} "
+          f"(frozen={FROZEN}, pid {os.getpid()})", file=sys.stderr)
+
+    def hook(exc_type, exc, tb):
+        import traceback
+        print("[meter] unhandled exception:", file=sys.stderr)
+        traceback.print_exception(exc_type, exc, tb, file=sys.stderr)
+        f.flush()
+    sys.excepthook = hook
+    # Overlay work happens on the Tk thread but the hook, hotkeys and tray all
+    # run on their own; a thread dying quietly would otherwise take a feature
+    # with it and leave no trace.
+    def thook(args):
+        hook(args.exc_type, args.exc_value, args.exc_traceback)
+    threading.excepthook = thook
+
+
+# The meter can be asked to stop long before there's an overlay to stop — most
+# obviously while it sits waiting for Farever to launch, which with no console
+# is a stretch where the tray icon is the only sign of life and so must be the
+# way out too. STOP is what the pre-overlay waits watch; once the overlay
+# exists it takes over, because only it can unload the hook on the way down.
+STOP = threading.Event()
+_OVERLAY = {"ref": None}
+
+
+def request_stop():
+    """Stop the meter. Safe from any thread and at any point in startup."""
+    STOP.set()
+    ov = _OVERLAY["ref"]
+    if ov is not None:
+        ov.request_quit()
+
+
+def message_box(text, title="Farever+ Meter", flags=0x40):
+    """A dialog is the only way to reach a user who has no console. Used for
+    the failures that stop the meter starting at all — anything softer belongs
+    in the log."""
+    try:
+        ctypes.windll.user32.MessageBoxW(None, str(text), str(title),
+                                         flags | 0x1000)   # MB_SETFOREGROUND
+    except Exception:
+        pass
+
+
+def _hidden_tk():
+    """A throwaway root so the startup dialogs can exist before the overlay
+    does. Destroyed by the caller — the overlay builds its own."""
+    r = tk.Tk()
+    r.withdraw()
+    r.attributes("-topmost", True)
+    return r
+
+
+def ask_choice(title, prompt, labels):
+    """Pick one of `labels`, returning its index (or 0 if the user just closes
+    the dialog — the same default the console prompt uses for a bare Enter)."""
+    root = _hidden_tk()
+    picked = {"i": 0}
+    win = tk.Toplevel(root)
+    win.title(title)
+    win.configure(bg=BG_BODY, padx=14, pady=12)
+    win.attributes("-topmost", True)
+    win.resizable(False, False)
+    tk.Label(win, text=prompt, bg=BG_BODY, fg=FG_TEXT, justify="left",
+             anchor="w", font=("Segoe UI", 10)).pack(fill="x", pady=(0, 10))
+
+    def choose(i):
+        picked["i"] = i
+        win.destroy()
+
+    for i, label in enumerate(labels):
+        tk.Button(win, text=label, command=lambda i=i: choose(i), anchor="w",
+                  bg=BG_BODY_SOFT, fg=FG_TEXT, relief="flat", bd=0,
+                  padx=10, pady=6, cursor="hand2",
+                  font=("Segoe UI", 9)).pack(fill="x", pady=2)
+    win.protocol("WM_DELETE_WINDOW", lambda: choose(0))
+    win.update_idletasks()
+    win.geometry(f"+{(win.winfo_screenwidth() - win.winfo_width()) // 2}"
+                 f"+{(win.winfo_screenheight() - win.winfo_height()) // 3}")
+    win.grab_set()
+    root.wait_window(win)
+    root.destroy()
+    return picked["i"]
+
+
+def ask_directory(title):
+    """Folder picker, for when the game install can't be found automatically.
+    Returns a Path or None."""
+    from tkinter import filedialog
+    root = _hidden_tk()
+    try:
+        d = filedialog.askdirectory(title=title, parent=root)
+    finally:
+        root.destroy()
+    return Path(d) if d else None
+
+
+def _version_tuple(s):
+    """(2, 1) from "2.1" or "v2.1"; None for anything that isn't a plain
+    numeric version. The repo also carries a `farever` tag, and a name-shaped
+    tag is not something to compare a version against."""
+    parts = (s or "").strip().lstrip("vV").split(".")
+    if not parts or not all(p.isdigit() for p in parts):
+        return None
+    return tuple(int(p) for p in parts)
+
+
+def _fetch_json(url):
+    import urllib.request
+    req = urllib.request.Request(url, headers={
+        "User-Agent": f"FareverMeter/{VERSION}",
+        "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def _latest_version():
+    """The newest published version as (tuple, name, url), or None.
+
+    Releases first, tags as the fallback: the repo has so far shipped tags
+    without a Release object behind them, and /releases/latest answers 404 in
+    that state — so tags-only has to work or the check never fires."""
+    try:
+        rel = _fetch_json(UPDATE_API_RELEASE)
+        v = _version_tuple(rel.get("tag_name"))
+        if v:
+            return v, rel.get("tag_name"), rel.get("html_url") or REPO_URL
+    except Exception:
+        pass            # no published release yet — normal, fall through
+    try:
+        tags = _fetch_json(UPDATE_API_TAGS)
+    except Exception as e:
+        print(f"[update] check skipped: {e}", file=sys.stderr)
+        return None
+    best = None
+    for t in tags or []:
+        v = _version_tuple(t.get("name"))
+        # The tag list is not ordered by version, so this takes the highest
+        # rather than trusting the first entry.
+        if v and (best is None or v > best[0]):
+            best = (v, t.get("name"), f"{REPO_URL}/releases")
+    return best
+
+
+def check_for_update():
+    """Ask GitHub whether there's a newer version, on a background thread.
+
+    Never blocks startup and never fails loudly: being offline, rate-limited or
+    caught in a GitHub outage should cost the notice, not the meter. Set
+    FAREVER_NO_UPDATE_CHECK to skip the request entirely."""
+    if os.environ.get("FAREVER_NO_UPDATE_CHECK"):
+        print("[update] check disabled by FAREVER_NO_UPDATE_CHECK.",
+              file=sys.stderr)
+        return
+
+    def work():
+        mine = _version_tuple(VERSION)
+        found = _latest_version()
+        if not found or mine is None:
+            return
+        v, name, url = found
+        if v > mine:
+            UPDATE["latest"], UPDATE["url"] = name, url
+            print(f"[update] {name} is available (running {VERSION}) — {url}",
+                  file=sys.stderr)
+        else:
+            print(f"[update] up to date (running {VERSION}).", file=sys.stderr)
+
+    threading.Thread(target=work, daemon=True, name="update-check").start()
 
 
 def _pretty_id(sid: str) -> str:
@@ -595,8 +894,33 @@ HK_RESET = 1
 RESET_HOTKEY_KEYS = "Shift + \\"
 RESET_HOTKEY_TEXT = f"Reset FareverPlus - {RESET_HOTKEY_KEYS}"
 
+# ---------------------------------------------------------------------------
+# Version / update check
+# ---------------------------------------------------------------------------
+# Bump this on every release, and tag the repo with the same string — it's the
+# left-hand side of the comparison below, so a release that forgets it tells
+# everyone they're out of date forever.
+VERSION = "2.1"
+
+REPO = "brudrbear/FareverMeter"
+REPO_URL = f"https://github.com/{REPO}"
+UPDATE_API_RELEASE = f"https://api.github.com/repos/{REPO}/releases/latest"
+UPDATE_API_TAGS = f"https://api.github.com/repos/{REPO}/tags"
+UPDATE_TIMEOUT = 5.0
+# Filled in by the checker thread, read by the overlay's refresh tick.
+UPDATE = {"latest": None, "url": REPO_URL}
+
+QUIT_LABEL = "Stop the meter"
+
+# What the top of the control menu says about shutting down, which depends on
+# what there is to shut down *with*. Run from a console there's still a window
+# someone can close — force-killing the process before it can unload the hook —
+# so that build keeps the warning. The installed build has no console to close
+# and two proper exits instead, so it gets told where they are.
 SHUTDOWN_WARNING = ("ALWAYS CLOSE FAREVER+ BY CTRL+C "
                     "NOT BY CLOSING THE COMMAND WINDOW")
+SHUTDOWN_HINT = ("To stop the meter, use the Stop button below — or right-click "
+                 "the Farever+ icon in the notification area by the clock.")
 
 
 def start_hotkeys(callbacks: dict, target_pid):
@@ -698,6 +1022,285 @@ def start_hotkeys(callbacks: dict, target_pid):
 
 
 # ---------------------------------------------------------------------------
+# Tray icon
+# ---------------------------------------------------------------------------
+# With no console there is no Ctrl+C, and the overlay windows are borderless and
+# click-through — so without this there would be no way to stop the meter except
+# Task Manager, which is exactly the force-kill that leaves a half-attached
+# agent in the game. The icon exists to make the clean exit reachable.
+#
+# Hand-rolled on ctypes rather than pystray: the file already talks to user32
+# directly for click-through, hotkeys and window enumeration, and a tray icon is
+# one window and one message pump. It also keeps `pip install frida` as the only
+# thing a from-source run needs.
+ICON_FILE = ROOT / "assets" / "farevermeter.ico"
+
+WM_TRAY = 0x0400 + 1                      # WM_APP + 1
+NIM_ADD, NIM_MODIFY, NIM_DELETE = 0, 1, 2
+NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_INFO = 0x01, 0x02, 0x04, 0x10
+NIIF_INFO = 0x01
+WM_DESTROY, WM_CLOSE, WM_COMMAND = 0x0002, 0x0010, 0x0111
+WM_LBUTTONUP, WM_RBUTTONUP = 0x0202, 0x0205
+MF_STRING, MF_SEPARATOR = 0x0000, 0x0800
+TPM_RIGHTBUTTON, TPM_RETURNCMD = 0x0002, 0x0100
+IMAGE_ICON, LR_LOADFROMFILE = 1, 0x0010
+SM_CXSMICON, SM_CYSMICON = 49, 50
+
+TRAY_QUIT, TRAY_LOG, TRAY_PARSES = 1001, 1002, 1003
+
+WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT,
+                             wintypes.WPARAM, wintypes.LPARAM)
+
+
+class WNDCLASSW(ctypes.Structure):
+    _fields_ = [("style", wintypes.UINT), ("lpfnWndProc", WNDPROC),
+                ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                ("hInstance", wintypes.HINSTANCE), ("hIcon", wintypes.HICON),
+                ("hCursor", wintypes.HANDLE), ("hbrBackground", wintypes.HBRUSH),
+                ("lpszMenuName", wintypes.LPCWSTR),
+                ("lpszClassName", wintypes.LPCWSTR)]
+
+
+class GUID(ctypes.Structure):
+    _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD), ("Data4", ctypes.c_byte * 8)]
+
+
+class NOTIFYICONDATAW(ctypes.Structure):
+    """The full (Vista+) layout. cbSize is set to sizeof(), which is what tells
+    the shell which version it's being handed."""
+    _fields_ = [("cbSize", wintypes.DWORD), ("hWnd", wintypes.HWND),
+                ("uID", wintypes.UINT), ("uFlags", wintypes.UINT),
+                ("uCallbackMessage", wintypes.UINT), ("hIcon", wintypes.HICON),
+                ("szTip", wintypes.WCHAR * 128), ("dwState", wintypes.DWORD),
+                ("dwStateMask", wintypes.DWORD), ("szInfo", wintypes.WCHAR * 256),
+                ("uVersion", wintypes.UINT), ("szInfoTitle", wintypes.WCHAR * 64),
+                ("dwInfoFlags", wintypes.DWORD), ("guidItem", GUID),
+                ("hBalloonIcon", wintypes.HICON)]
+
+
+class TrayIcon:
+    """A notification-area icon whose menu holds the clean shutdown.
+
+    Owns a hidden window on its own thread: tray callbacks are window messages,
+    and they're delivered to the thread that created the window, so it needs a
+    pump of its own rather than sharing Tk's."""
+
+    def __init__(self, on_quit, tip="Farever+ Meter"):
+        self.on_quit = on_quit
+        self.tip = tip
+        self.hwnd = None
+        self._ready = threading.Event()
+        self._thread = None
+
+    # ---- lifecycle ----
+    def start(self):
+        if sys.platform != "win32":
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="tray")
+        self._thread.start()
+        # Bounded: a tray that fails to come up must not stop the meter from
+        # starting — the in-game menu's Quit button is the other way out.
+        self._ready.wait(timeout=5.0)
+
+    def stop(self):
+        """Called from the Tk thread on the way out. PostMessage rather than a
+        direct call because the window belongs to the tray thread."""
+        if self.hwnd:
+            try:
+                ctypes.windll.user32.PostMessageW(self.hwnd, WM_CLOSE, 0, 0)
+            except Exception:
+                pass
+
+    # ---- internals ----
+    def _load_icon(self):
+        u = ctypes.windll.user32
+        if ICON_FILE.is_file():
+            h = u.LoadImageW(None, str(ICON_FILE), IMAGE_ICON,
+                             u.GetSystemMetrics(SM_CXSMICON),
+                             u.GetSystemMetrics(SM_CYSMICON), LR_LOADFROMFILE)
+            if h:
+                return h
+            print(f"[tray] couldn't load {ICON_FILE} — using the stock icon.",
+                  file=sys.stderr)
+        return u.LoadIconW(None, ctypes.c_wchar_p(32512))   # IDI_APPLICATION
+
+    def _notify(self, action, data):
+        return bool(ctypes.windll.shell32.Shell_NotifyIconW(action,
+                                                            ctypes.byref(data)))
+
+    def _base_data(self):
+        d = NOTIFYICONDATAW()
+        d.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+        d.hWnd = self.hwnd
+        d.uID = 1
+        return d
+
+    def _add(self):
+        d = self._base_data()
+        d.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
+        d.uCallbackMessage = WM_TRAY
+        d.hIcon = self.hicon
+        d.szTip = self.tip
+        self._notify(NIM_ADD, d)
+
+    def _balloon(self, title, text):
+        """Windows 11 files a brand-new tray icon into the overflow flyout by
+        default, so a first-run user would never find it. The toast is what
+        tells them it's there — and how to get it back."""
+        d = self._base_data()
+        d.uFlags = NIF_INFO
+        d.szInfoTitle = title
+        d.szInfo = text
+        d.dwInfoFlags = NIIF_INFO
+        self._notify(NIM_MODIFY, d)
+
+    def _menu(self):
+        u = ctypes.windll.user32
+        m = u.CreatePopupMenu()
+        u.AppendMenuW(m, MF_STRING, TRAY_PARSES, "Open the parse folder")
+        u.AppendMenuW(m, MF_STRING, TRAY_LOG, "Open the log folder")
+        u.AppendMenuW(m, MF_SEPARATOR, 0, None)
+        u.AppendMenuW(m, MF_STRING, TRAY_QUIT, "Stop the meter")
+        pt = wintypes.POINT()
+        u.GetCursorPos(ctypes.byref(pt))
+        # Required by TrackPopupMenu, or the menu refuses to close when the user
+        # clicks away from it.
+        u.SetForegroundWindow(self.hwnd)
+        cmd = u.TrackPopupMenu(m, TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                               pt.x, pt.y, 0, self.hwnd, None)
+        u.PostMessageW(self.hwnd, 0x0000, 0, 0)     # WM_NULL, same reason
+        u.DestroyMenu(m)
+        return cmd
+
+    def _on_command(self, cmd):
+        if cmd == TRAY_QUIT:
+            self.on_quit()
+        elif cmd == TRAY_LOG:
+            try:
+                DATA_HOME.mkdir(parents=True, exist_ok=True)
+                os.startfile(DATA_HOME)
+            except Exception as e:
+                print(f"[tray] couldn't open {DATA_HOME}: {e}", file=sys.stderr)
+        elif cmd == TRAY_PARSES:
+            try:
+                PARSES_DIR.mkdir(parents=True, exist_ok=True)
+                os.startfile(PARSES_DIR)
+            except Exception as e:
+                print(f"[tray] couldn't open {PARSES_DIR}: {e}", file=sys.stderr)
+
+    @staticmethod
+    def _prototypes():
+        """Declare every call this class makes.
+
+        Not optional on 64-bit: ctypes defaults an unprototyped argument to C
+        int, so any handle or pointer — a module handle, an lParam carrying a
+        struct — overflows on the way through. Declared here in one place
+        rather than at each call site, because the failure mode is a call that
+        looks correct and raises at runtime on some machines and not others."""
+        u, k32 = ctypes.windll.user32, ctypes.windll.kernel32
+        k32.GetModuleHandleW.restype = ctypes.c_void_p
+        k32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+        u.DefWindowProcW.restype = ctypes.c_ssize_t
+        u.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                     wintypes.WPARAM, wintypes.LPARAM]
+        u.RegisterClassW.restype = wintypes.ATOM
+        u.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASSW)]
+        u.CreateWindowExW.restype = wintypes.HWND
+        u.CreateWindowExW.argtypes = [
+            wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            wintypes.HWND, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+        u.DestroyWindow.argtypes = [wintypes.HWND]
+        u.SetForegroundWindow.argtypes = [wintypes.HWND]
+        u.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                   wintypes.WPARAM, wintypes.LPARAM]
+        u.LoadImageW.restype = ctypes.c_void_p
+        u.LoadImageW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR,
+                                 wintypes.UINT, ctypes.c_int, ctypes.c_int,
+                                 wintypes.UINT]
+        u.LoadIconW.restype = ctypes.c_void_p
+        u.LoadIconW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        u.CreatePopupMenu.restype = ctypes.c_void_p
+        u.AppendMenuW.argtypes = [ctypes.c_void_p, wintypes.UINT,
+                                  ctypes.c_size_t, wintypes.LPCWSTR]
+        u.TrackPopupMenu.argtypes = [ctypes.c_void_p, wintypes.UINT,
+                                     ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                     wintypes.HWND, ctypes.c_void_p]
+        u.DestroyMenu.argtypes = [ctypes.c_void_p]
+        shell = ctypes.windll.shell32
+        shell.Shell_NotifyIconW.restype = wintypes.BOOL
+        shell.Shell_NotifyIconW.argtypes = [wintypes.DWORD,
+                                            ctypes.POINTER(NOTIFYICONDATAW)]
+
+    def _run(self):
+        u = ctypes.windll.user32
+        self._prototypes()
+        # Explorer drops every tray icon when it restarts and broadcasts this to
+        # ask for them back. Without it an explorer crash silently costs the
+        # user their only way to stop the meter.
+        taskbar_created = u.RegisterWindowMessageW("TaskbarCreated")
+
+        def wndproc(hwnd, msg, wparam, lparam):
+            if msg == WM_TRAY:
+                if lparam in (WM_RBUTTONUP, WM_LBUTTONUP):
+                    self._on_command(self._menu())
+                return 0
+            if msg == WM_COMMAND:
+                # The popup is read with TPM_RETURNCMD, so a click comes back
+                # from _menu() rather than through here. This is the standard
+                # route into the same commands for anything that drives the icon
+                # by message — and it's how the shutdown path gets tested
+                # without a human clicking the menu.
+                self._on_command(wparam & 0xFFFF)
+                return 0
+            if msg == taskbar_created:
+                self._add()
+                return 0
+            if msg == WM_CLOSE:
+                d = self._base_data()
+                self._notify(NIM_DELETE, d)
+                u.DestroyWindow(hwnd)
+                return 0
+            if msg == WM_DESTROY:
+                u.PostQuitMessage(0)
+                return 0
+            return u.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+        self._wndproc = WNDPROC(wndproc)      # kept alive: Windows holds a raw
+        cls = WNDCLASSW()                     # pointer to it for the window's life
+        cls.lpfnWndProc = self._wndproc
+        cls.lpszClassName = "FareverMeterTray"
+        cls.hInstance = ctypes.windll.kernel32.GetModuleHandleW(None)
+        try:
+            if not u.RegisterClassW(ctypes.byref(cls)):
+                raise OSError(ctypes.get_last_error())
+            u.CreateWindowExW.restype = wintypes.HWND
+            self.hwnd = u.CreateWindowExW(0, "FareverMeterTray", "Farever+ Meter",
+                                          0, 0, 0, 0, 0, None, None,
+                                          cls.hInstance, None)
+            if not self.hwnd:
+                raise OSError("CreateWindowExW failed")
+            self.hicon = self._load_icon()
+            self._add()
+        except Exception as e:
+            print(f"[tray] icon unavailable ({e}) — use the control menu's Quit "
+                  "button to stop the meter.", file=sys.stderr)
+            self._ready.set()
+            return
+        print("[meter] tray icon active.", file=sys.stderr)
+        self._balloon("Farever+ Meter is running",
+                      "Right-click this icon to stop it. If it's hidden, click "
+                      "the ^ arrow by the clock and drag it out.")
+        self._ready.set()
+        msg = wintypes.MSG()
+        while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            u.TranslateMessage(ctypes.byref(msg))
+            u.DispatchMessageW(ctypes.byref(msg))
+
+
+# ---------------------------------------------------------------------------
 # Overlay
 # ---------------------------------------------------------------------------
 class Overlay:
@@ -723,6 +1326,8 @@ class Overlay:
         self._theme_mode = THEME_MODES[0]   # what the player asked for
         self._action_q = []
         self._q_lock = threading.Lock()
+        self._quit_armed = False       # the Quit button's second-click window
+        self._update_shown = False     # the update notice is applied once
         self._last_epoch = session.epoch
         # Parse mode: None | "countdown" (pre-roll) | "parsing" | "done" (the
         # finished sample, frozen on screen until it's cleared).
@@ -1044,12 +1649,18 @@ class Overlay:
         body = tk.Frame(border, bg=BG_BODY, padx=8, pady=8)
         body.pack(fill="both", expand=True)
 
-        # Top of the menu, above everything: closing the console window kills the
-        # process before it can unload the hook and detach, which is what
-        # destabilises the game across relaunches. Worth shouting about — it's
-        # the one way to break things that looks like a normal way to quit.
-        self.warn_lbl = tk.Label(body, text=SHUTDOWN_WARNING, bg=BG_BODY,
-                                 fg=FG_WARN, font=self.fonts["ui_sm_b"],
+        # Top of the menu, above everything. From a console this is a warning:
+        # closing that window kills the process before it can unload the hook and
+        # detach, which is what destabilises the game across relaunches, and it's
+        # the one way to break things that looks like a normal way to quit. From
+        # the installed build there's no such window, so the same line is used to
+        # point at the two clean exits instead.
+        self.warn_lbl = tk.Label(body,
+                                 text=SHUTDOWN_WARNING if HAS_CONSOLE
+                                 else SHUTDOWN_HINT,
+                                 bg=BG_BODY,
+                                 fg=FG_WARN if HAS_CONSOLE else FG_DIM,
+                                 font=self.fonts["ui_sm_b"],
                                  anchor="w", justify="left",
                                  wraplength=WARN_WRAP)
         self.warn_lbl.pack(fill="x", pady=(0, 8))
@@ -1158,6 +1769,15 @@ class Overlay:
             text=f"Reset encounter data   ({RESET_HOTKEY_KEYS})")
         self.btn_reset_pos = button(right, self._enqueue(self._reset_pos))
         self.btn_reset_pos.config(text="Reset window positions")
+
+        # Bottom of the menu, on its own: the one button that ends the session.
+        # It's here as well as on the tray icon because this is where the user
+        # already is — mid-game, escape menu open — and because a tray icon
+        # Windows 11 has filed into the overflow flyout is not somewhere you can
+        # count on them finding.
+        section(right, "QUIT")
+        self.btn_quit = button(right, self._enqueue(self._quit_clicked))
+        self.btn_quit.config(text=QUIT_LABEL, fg=FG_WARN)
         self.menu.minsize(MIN_W["menu"], 0)
 
     def _build_hint(self):
@@ -1686,6 +2306,65 @@ class Overlay:
                 self._action_q.append(fn)
         return handler
 
+    def _apply_update_notice(self):
+        """Turn the control menu's top line into an update notice, once.
+
+        Polled from the refresh tick rather than pushed by the checker, because
+        the check runs on its own thread and Tk is not thread-safe. It replaces
+        the shutdown hint — that line has done its job by the time someone has
+        the menu open, and a new version is the more useful thing to say."""
+        if self._update_shown or not UPDATE["latest"]:
+            return
+        self._update_shown = True
+        self.warn_lbl.config(
+            text=f"Farever+ {UPDATE['latest']} is available — you're running "
+                 f"{VERSION}.  Click here to download it.",
+            fg=FG_WARN, cursor="hand2")
+        self.warn_lbl.bind("<Button-1>", lambda _e: self._open_update())
+
+    def _open_update(self):
+        import webbrowser
+        try:
+            webbrowser.open(UPDATE["url"])
+        except Exception as e:
+            print(f"[update] couldn't open {UPDATE['url']}: {e}",
+                  file=sys.stderr)
+
+    def request_quit(self):
+        """Stop the meter, safely callable from any thread — the tray icon runs
+        on its own. Routed through the action queue so the quit itself happens
+        on the Tk thread like every other action."""
+        self._enqueue(self._quit)()
+
+    def _quit(self):
+        """quit(), not destroy(): returning from the mainloop hands control back
+        to main()'s finally, which is what unloads the hook and detaches. That
+        ordering is the entire point of having a Quit button at all."""
+        print("[meter] stop requested — shutting down.", file=sys.stderr)
+        self.root.quit()
+
+    def _quit_clicked(self):
+        """Two clicks to quit. The button sits in the same menu as the display
+        toggles, and a misclick that ends the meter mid-fight — taking the
+        encounter with it — is worth one extra click to rule out."""
+        if self._quit_armed:
+            self._quit()
+            return
+        self._quit_armed = True
+        self.btn_quit.config(text="Click again to stop", bg=FG_WARN,
+                             fg=FG_HEADER, activebackground=FG_WARN,
+                             activeforeground=FG_HEADER)
+        self.root.after(4000, self._disarm_quit)
+
+    def _disarm_quit(self):
+        self._quit_armed = False
+        try:
+            self.btn_quit.config(text=QUIT_LABEL, bg=BG_BODY_SOFT, fg=FG_WARN,
+                                 activebackground=BG_BAR_TRACK,
+                                 activeforeground=FG_VALUE)
+        except tk.TclError:
+            pass        # the window went away while the timer was pending
+
     def _install_hotkeys(self):
         start_hotkeys({HK_RESET: self._enqueue(self.session.reset)},
                       self.target_pid)
@@ -1950,6 +2629,7 @@ class Overlay:
 
     def _refresh(self):
         self._drain()
+        self._apply_update_notice()
         # Before the epoch check below: starting a parse resets the session
         # itself, and syncs _last_epoch so that isn't mistaken for the player
         # resetting back out of parse mode.
@@ -2275,12 +2955,23 @@ def regenerate_data(hlboot=None, force=False):
                     return True
             except Exception:
                 pass
+    # The tools write beside their own location, which frozen is the bundle's
+    # temp directory — the output would be thrown away with it on exit. Point
+    # them at the writable copy instead. Harmless from source, where the two
+    # paths are already the same.
+    env = dict(os.environ, FAREVER_ANALYSIS_OUT=str(ANALYSIS))
     for t in tools:
         print(f"[meter] regenerating {t.name} for this build ...", file=sys.stderr)
-        cmd = [sys.executable, str(t)]
+        # Frozen there is no python.exe to hand a script to, and sys.executable
+        # is this program — so it re-invokes itself in tool mode instead.
+        cmd = ([sys.executable, TOOL_FLAG, t.name] if FROZEN
+               else [sys.executable, str(t)])
         if hlboot is not None:
             cmd.append(str(hlboot))
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        # Without CREATE_NO_WINDOW a console flashes up for each tool on every
+        # launch of the windowed build — twice, right as the game is loading.
+        r = subprocess.run(cmd, capture_output=True, text=True, env=env,
+                           creationflags=CREATE_NO_WINDOW)
         if r.returncode != 0:
             print(f"[meter] {t.name} failed:\n{r.stdout}\n{r.stderr}",
                   file=sys.stderr)
@@ -2325,9 +3016,15 @@ def find_game_process(device):
     procs = matches()
     if not procs:
         print(f"[*] {TARGET_PROCESS} isn't running — waiting for it to start "
-              "(launch the game; Ctrl+C to quit) ...", file=sys.stderr)
+              "(launch the game) ...", file=sys.stderr)
         while not procs:
-            time.sleep(1.5)
+            # This can be a long wait, and with no console it's an invisible
+            # one — so it has to be abandonable from the tray icon rather than
+            # only by Ctrl+C.
+            if STOP.wait(timeout=1.5):
+                print("[meter] stopped while waiting for the game.",
+                      file=sys.stderr)
+                return None
             procs = matches()
         print(f"[*] {TARGET_PROCESS} is up.", file=sys.stderr)
     if len(procs) == 1:
@@ -2337,11 +3034,22 @@ def find_game_process(device):
     for i, (p, path) in enumerate(infos, 1):
         print(f"      {i}. pid {p.pid:>6}  {path or '(path unavailable)'}",
               file=sys.stderr)
+    if not HAS_CONSOLE:
+        # No stdin to answer on, so the question becomes a dialog. Rare enough
+        # that it doesn't need to be pretty — but it does need to be asked,
+        # since guessing wrong means metering the wrong client.
+        i = ask_choice(
+            "Farever+ Meter",
+            f"{len(infos)} copies of Farever are running.\n"
+            "Which one should the meter attach to?",
+            [f"pid {p.pid} — {path or '(path unavailable)'}"
+             for p, path in infos])
+        return infos[i][0]
     while True:
         try:
             ans = input(f"    Which one is your game? [1-{len(infos)}] "
                         "(Enter = 1): ").strip()
-        except EOFError:
+        except (EOFError, RuntimeError):
             return infos[0][0]
         if not ans:
             return infos[0][0]
@@ -2600,7 +3308,12 @@ def claim_single_instance():
     pid = int(other.get("pid") or 0)
     if pid and pid != os.getpid() and _process_alive(pid):
         image = _process_image(pid)
-        if "python" in Path(image).name.lower():
+        # A meter is either a python interpreter running the script or the
+        # installed executable, and BOTH have to be recognised from either side
+        # — the case this exists for is one build being started while the other
+        # is already up, and each has to see the other as a meter to displace.
+        name = Path(image).name.lower()
+        if "python" in name or name in METER_IMAGE_NAMES:
             print(f"[meter] another meter is already running (pid {pid}, "
                   f"{other.get('script') or 'unknown script'}) — asking it to "
                   "exit ...", file=sys.stderr)
@@ -2652,11 +3365,26 @@ def locate_hlboot(pid):
         return Path(find_hlboot(argv_index=99))
     except (SystemExit, Exception):
         pass
+    if not HAS_CONSOLE:
+        # Asked at most once per install in practice: the file normally sits
+        # next to the running exe, and that's checked first.
+        p = ask_directory("Farever+ Meter — where is Farever installed? "
+                          "(the folder containing hlboot.dat)")
+        if p is None:
+            return None
+        cand = p if p.is_file() else p / "hlboot.dat"
+        if cand.is_file():
+            return cand
+        message_box(f"No hlboot.dat in:\n{p}\n\nThe meter will start with the "
+                    "data it shipped with, which is fine unless Farever has "
+                    "patched since this version was built.",
+                    "Farever+ Meter", 0x30)      # MB_ICONWARNING
+        return None
     while True:
         try:
             d = input("    Where is Farever installed? (folder containing "
                       "hlboot.dat, Enter to skip): ").strip().strip('"')
-        except EOFError:
+        except (EOFError, RuntimeError):
             return None
         if not d:
             return None
@@ -2668,12 +3396,30 @@ def locate_hlboot(pid):
 
 
 def main():
+    seed_analysis()
+    check_for_update()          # background; the notice lands when it lands
     claim_single_instance()
     session = PartySession()
     ui_state = GameUIState()
 
+    # Up before anything that can block. Attaching waits for the game to launch
+    # and the hook's memory scan can run for minutes on a slow machine — with no
+    # console, an icon that only appeared afterwards would leave the user
+    # staring at nothing, with Task Manager as their only way to change their
+    # mind. Its quit callback works throughout, overlay or not.
+    tray = TrayIcon(request_stop)
+    tray.start()
+    try:
+        return _run(tray, session, ui_state)
+    finally:
+        tray.stop()
+
+
+def _run(tray, session, ui_state):
     device = frida.get_local_device()
     proc = find_game_process(device)
+    if proc is None:
+        return                      # stopped from the tray before we attached
     pid = proc.pid
 
     # Match the data files to the build that is ACTUALLY RUNNING before
@@ -2774,6 +3520,8 @@ def main():
         while True:
             if ready_evt.wait(timeout=0.5):
                 return True
+            if STOP.is_set():
+                return False        # asked to quit mid-scan
             now = time.monotonic()
             if now - start > max_total:
                 print("[meter] hook scan exceeded the time cap.", file=sys.stderr)
@@ -2789,6 +3537,8 @@ def main():
     # the game when people force-kill and relaunch repeatedly).
     script = None
     for attempt in range(1, 4):
+        if STOP.is_set():
+            break
         ready["ok"] = None
         ready_evt.clear()
         liveness["t"] = time.monotonic()
@@ -2811,6 +3561,20 @@ def main():
             regenerate_data(hlboot, force=True)   # => refresh data and retry
         time.sleep(1.0)
 
+    if STOP.is_set():
+        # Stopped from the tray during startup. Same teardown the overlay's
+        # finally does — the hook may be half-loaded, and leaving it attached is
+        # what destabilises the game.
+        print("[meter] stopped during startup.", file=sys.stderr)
+        try:
+            if script is not None:
+                script.unload()
+            fsession.detach()
+        except Exception:
+            pass
+        release_instance_lock()
+        return
+
     if script is None or ready["ok"] is not True:
         print("[meter] could not initialise the hook after 3 attempts.\n"
               "        Fully close Farever and reopen it, then relaunch the meter.\n"
@@ -2818,15 +3582,31 @@ def main():
               "        gave you the meter — the [hook] lines say where it stopped.\n"
               "        (Avoid repeatedly relaunching against a stuck session — "
               "that can crash the game.)", file=sys.stderr)
+        # The overlay still comes up, so without this the windowed build would
+        # put two empty windows on screen and never say why they stay empty.
+        if not HAS_CONSOLE:
+            message_box(
+                "The meter couldn't hook into Farever, so it won't show any "
+                "numbers.\n\nFully close Farever, reopen it, and start the "
+                f"meter again.\n\nThe details are in:\n{LOG_FILE}",
+                "Farever+ Meter — couldn't attach", 0x30)   # MB_ICONWARNING
 
     print("[*] overlay starting. Open the game's escape menu for the control "
           "menu (and to drag the windows / click a row to inspect). Only "
           "hotkey: Shift+\\ resets the encounter.", file=sys.stderr)
 
     overlay = Overlay(session, pid, ui_state)
+    # From here the overlay owns shutdown: it's the only thing that can return
+    # from the mainloop and let the finally below unload the hook and detach.
+    _OVERLAY["ref"] = overlay
+    if STOP.is_set():
+        # Asked to stop during the hook's setup, which the overlay didn't exist
+        # to hear. Honour it rather than putting windows on screen.
+        overlay.request_quit()
     try:
         overlay.run()
     finally:
+        _OVERLAY["ref"] = None
         try:
             script.unload()
             fsession.detach()
@@ -2835,12 +3615,40 @@ def main():
         release_instance_lock()
 
 
-if __name__ == "__main__":
+def _cli():
+    # Tool mode first: this is the frozen build standing in for python.exe to
+    # run one of the bundled hltools generators, and it must not start a meter.
+    if len(sys.argv) > 2 and sys.argv[1] == TOOL_FLAG:
+        run_bundled_tool(sys.argv[2], sys.argv[3:])
+        return
+    setup_logging()
     try:
         main()
     except KeyboardInterrupt:
-        # Ctrl+C is the documented way to stop the meter, so it shouldn't look
-        # like a crash: main()'s finally has already unloaded the hook and
+        # Ctrl+C is a documented way to stop a from-source run, so it shouldn't
+        # look like a crash: main()'s finally has already unloaded the hook and
         # detached by the time this runs. Printing (and exiting 0) also lets a
         # launcher tell a normal stop from a real failure.
         print("[meter] stopped.", file=sys.stderr)
+    except SystemExit as e:
+        # sys.exit() carries the startup failures — messages written for a
+        # console that the windowed build doesn't have. Put them on screen
+        # instead of exiting silently, which would look like nothing happened.
+        if not HAS_CONSOLE and e.code not in (0, None):
+            print(f"[meter] {e.code}", file=sys.stderr)
+            message_box(e.code, "Farever+ Meter — can't start", 0x10)
+        raise
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        if not HAS_CONSOLE:
+            message_box(
+                "The meter hit an unexpected error and stopped.\n\n"
+                f"The details are in:\n{LOG_FILE}\n\n"
+                "Send that file to whoever gave you the meter.",
+                "Farever+ Meter — error", 0x10)
+        raise
+
+
+if __name__ == "__main__":
+    _cli()

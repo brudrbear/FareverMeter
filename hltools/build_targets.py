@@ -1,13 +1,19 @@
 """Build resolver_data.json with anchors + a curated candidate map of combat
 functions to hook-and-count, so we can discover which one actually fires."""
-import json, re, sys
+import json, os, re, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from hlbc_parser import HLCode, HOBJ, HSTRUCT
 from gamepath import find_hlboot
 
 HLBOOT = find_hlboot()
-OUT = Path(__file__).resolve().parent.parent / "analysis_out"
+# Normally the project's own analysis_out. The meter overrides it when it runs
+# us from its installed build, where this file lives in a temporary bundle
+# directory that is deleted on exit — writing beside ourselves would throw the
+# result away.
+OUT = Path(os.environ.get("FAREVER_ANALYSIS_OUT")
+           or Path(__file__).resolve().parent.parent / "analysis_out")
+OUT.mkdir(parents=True, exist_ok=True)
 print(f"[*] parsing {HLBOOT}")
 
 code = HLCode(HLBOOT).parse()

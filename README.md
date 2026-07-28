@@ -1,9 +1,10 @@
 # Farever+ Party Meter (memory-reading edition)
 
-> ### 📥 **[Download the latest release](../../releases)**, then follow **[Setup](#setup)** below.
+> ### 📥 **[Download the installer](../../releases)** — run it, start the game, done.
 >
-> Extract it anywhere on your PC — it doesn't go in your Farever folder, and
-> nothing in the game is touched or modified.
+> There is nothing else to install. Python, Frida and Pillow all live inside it.
+> It doesn't go in your Farever folder, and nothing in the game is touched or
+> modified.
 
 A party/raid damage meter for **Farever** that reads the game's own combat
 functions in memory via Frida — giving **real spell IDs, damage elements,
@@ -17,82 +18,79 @@ symbol name, then recompute offsets from the shipped bytecode).
 
 ## Setup
 
-Five steps, once. **Everything after "You're all set" is optional reading.**
+Two steps, once. **Everything after "You're all set" is optional reading.**
 
-### Step 1 — Download it
+### Step 1 — Install it
 
-Open **[Releases](../../releases)**, download the latest version, and extract it
-anywhere on your PC. Desktop, Downloads, wherever — it does **not** go in your
-Farever folder, and nothing in the game is touched or modified.
+Download **`FareverMeter-x.y-Setup.exe`** from
+**[Releases](../../releases)** and run it.
 
-### Step 2 — Install Python
+It installs for you alone, inside your own user folder, so there's no
+administrator prompt — and nothing goes anywhere near your Farever install.
 
-Get **Python 3.10 or newer** from [python.org](https://www.python.org/downloads/).
-Windows only.
-
-> ### ⚠️ Tick **"Add python.exe to PATH"** in the installer
+> ### ⚠️ Windows will warn you, and that's expected
 >
-> It's the checkbox at the **bottom of the first installer screen**, and it is
-> **off by default**. Miss it and `python` won't work — not because Python is
-> broken, but because Windows ships zero-byte stubs called `python.exe` and
-> `python3.exe` that open the Microsoft Store instead. That's what "I installed
-> Python and it still doesn't work" almost always turns out to be.
+> The installer isn't code-signed (a certificate is an annual bill this meter
+> doesn't earn), so SmartScreen shows **"Windows protected your PC"**. Click
+> **More info** → **Run anyway**.
 >
-> **Already installed it without ticking?** Re-run the same installer →
-> **Modify** → Next → tick **"Add Python to environment variables"** → Install.
-> Nothing is reinstalled and no reboot is needed — just open a *new* terminal
-> afterwards, since an already-open one keeps the old PATH.
+> Antivirus tools sometimes object too, for an honest reason: reading another
+> program's memory is exactly what a memory-reading damage meter does, and it's
+> also what a lot of malware does. See [If it won't start](#if-it-wont-start).
 
-### Step 3 — Install the one dependency
+### Step 2 — Start Farever, then the meter
 
-Open a terminal and run:
+Log in to your character first, then start **Farever+ Meter** from the Start
+menu (or the desktop shortcut, if you asked the installer for one).
 
-```
-pip install frida
-```
+**There's no window and no console.** It runs in the background, puts an icon in
+the **notification area** by the clock, and draws its overlay over the game.
 
-### Step 4 — Start Farever
-
-Launch the game and log in to your character. The meter attaches to a running
-game; it won't do anything useful before you're in.
-
-### Step 5 — Run the meter
-
-From the folder you extracted:
-
-```
-python meter/farever_meter.py
-```
-
-Or just **double-click `meter/farever_meter.py`** — that goes through Windows'
-file association and doesn't depend on PATH at all. The tradeoff is that if it
-fails at startup the window closes before you can read the error, so use a
-terminal when something's wrong.
-
-If Farever isn't running yet, the meter waits for it to launch. If several
-Farever processes are running it asks which one to attach to, and if it can't
-find your `hlboot.dat` it asks for your install folder.
+Start it before the game if you like — it waits for Farever to launch, and you
+can still stop it from the tray while it's waiting.
 
 ### Stopping it
 
-**Press `Ctrl+C` in the console. Don't close the window with the X.** Closing
-the console terminates the process outright, skipping the unload/detach — and a
-half-attached agent is what destabilises the game across repeated relaunches.
-`Ctrl+C` breaks the overlay's mainloop and takes the normal shutdown path.
+Two ways, and both shut down cleanly:
+
+* **right-click the tray icon** by the clock → **Stop the meter**; or
+* open the game's **`Esc`** menu and use **Stop the meter** at the bottom of the
+  Farever+ control menu (it wants a second click to confirm, so a misclick
+  mid-fight doesn't end your session).
+
+> ### 🔎 Windows 11 hides new tray icons
+>
+> First run, click the **`^`** arrow by the clock and **drag the Farever+ icon
+> out** onto the taskbar, so it's there when you want it. The meter pops a
+> notification on first run to say so.
+
+**Don't end it from Task Manager.** That kills the process before it can unload
+its hook and detach, and a half-attached agent is what destabilises Farever
+across repeated relaunches. Both buttons above take the proper path.
 
 ### If it won't start
 
+The log is the first place to look — **`%LOCALAPPDATA%\FareverMeter\meter.log`**,
+which is also the Start menu's **Farever+ log folder** shortcut. The run before
+it is kept as `meter.log.1`.
+
 | What you see | What it means | Fix |
 |---|---|---|
-| The Microsoft Store opens, or `Python was not found; run without arguments to install from the Microsoft Store` | `python` is hitting Windows' zero-byte alias stub — PATH was never set | Tick **Add to PATH** (Step 2), or use `py meter/farever_meter.py`, or just double-click the `.py` |
-| `'python' is not recognized as an internal or external command` | Same cause, or the terminal predates the install | Same fix — and open a **new** terminal |
-| `ModuleNotFoundError: No module named 'frida'` | Python is fine, the dependency isn't installed | `pip install frida` |
-| `[!] permission denied attaching` | Farever is running as administrator | Run the meter from an elevated terminal too |
-| `[meter] could not initialise the hook after 3 attempts` | A previous run was force-killed and left a half-attached agent | Fully close Farever, reopen it, then start the meter — and stop it with `Ctrl+C` in future, not by closing the window |
+| "Windows protected your PC" | The installer is unsigned | **More info** → **Run anyway** |
+| Antivirus quarantines or silently deletes it | It reads another process's memory, which is a genuine heuristic hit | Add an exclusion for the install folder, or download it again from [Releases](../../releases) and keep the copy you trust |
+| No overlay, no tray icon, nothing at all | It failed during startup | Read `meter.log`; the last lines say where it stopped |
+| Overlay appears but stays empty, and you got a "couldn't attach" dialog | A previous run was force-killed and left a half-attached agent | Fully close Farever, reopen it, then start the meter — and stop it from the tray in future |
+| "permission denied attaching" in the log | Farever is running as administrator | Right-click the Farever+ shortcut → **Run as administrator** so they match |
+| The tray icon isn't there | Windows 11 filed it into the overflow flyout | Click the **`^`** arrow by the clock and drag it out |
 
-`py` works even when `python` doesn't: the launcher installs to its own folder
-and is registered separately. Double-clicking the `.py` sidesteps PATH entirely,
-since that goes through the file association.
+### Updating
+
+On startup the meter asks GitHub whether there's a newer version. If there is,
+the top of the control menu (`Esc` in game) turns into a notice you can click to
+open the download page. Nothing installs itself; it just tells you.
+
+It's one request to `api.github.com` at launch and nothing is sent about you.
+Set the environment variable `FAREVER_NO_UPDATE_CHECK=1` to turn it off.
 
 ---
 
@@ -161,6 +159,12 @@ again.
 | Actions | Parse Screenshots | opens `parses/` in Explorer (created on the spot if you haven't run one yet) |
 | Reset | Reset encounter data (`Shift+\`) | the same reset the hotkey fires — the label carries the keybind because that's the one you want mid-fight, when the escape menu isn't an option |
 | Reset | Reset window positions | snaps every window back to its default and clears the saved positions |
+| Quit | Stop the meter | shuts down properly — unloads the hook and detaches from the game. Wants a second click to confirm |
+
+Above the buttons sits a single line of text: normally a reminder of how to stop
+the meter, replaced by a clickable notice when a [newer version](#updating) is
+out. (From a source run it's the `Ctrl+C` warning instead, since that build
+still has a console window someone can close.)
 
 ### 60s Parse Mode
 
@@ -175,13 +179,14 @@ happened to be" never is. Click it and:
    clock stops, so the numbers stay readable for as long as you want them;
 4. and the result is written to `parses/parse-YYYYmmdd-HHMMSS.png` — the party
    table and the inspected player's skill breakdown, drawn in the meter's own
-   palette. `parses/` is gitignored.
+   palette. See [Where your files live](#where-your-files-live) for where
+   `parses/` is; the **Parse Screenshots** button opens it either way.
 
 The image is drawn from the numbers rather than screenshotted from the overlay:
 the live windows are layered and semi-transparent, the breakdown only ever shows
 one player, and a capture would pick up whatever the game had drawn behind them.
-It needs Pillow (`pip install pillow`); without it you lose the picture, not the
-parse.
+It's drawn with Pillow, which ships inside the installed build — from source
+that's `pip install pillow`, and without it you lose the picture, not the parse.
 
 The cutoff is enforced on the data path rather than by the UI's 250 ms refresh,
 so the window is the length asked for regardless of tick timing. The usual
@@ -269,7 +274,12 @@ mismatch is impossible), skipping the reparse when the file hasn't changed
 since last time. If the hook still can't find the function table, it
 regenerates once more and retries — no action needed.
 
-To regenerate manually (e.g. setting up on another PC before first run):
+This works in the installed build too: both generators are bundled inside it,
+and it re-runs them by invoking itself in tool mode, writing the refreshed JSON
+to your data folder rather than into the install. So a Farever patch does *not*
+need a new release of the meter.
+
+To regenerate manually from a source checkout:
 
 ```
 py hltools\build_targets.py     # -> resolver_data.json  (findexes, anchors, map fn)
@@ -285,8 +295,9 @@ stable across patches, so regenerating by name recovers the new indices/offsets.
 ## Window positions
 
 All three windows — meter, breakdown and control menu — remember where you drag
-them (`.meter_position.json`; the old single-window format is still read for the
-meter). If a saved position lands off-screen — e.g. the file was copied from a
+them (`.meter_position.json`, in your data folder — see [Where your files
+live](#where-your-files-live); the old single-window format is still read for
+the meter). If a saved position lands off-screen — e.g. the file was copied from a
 machine with a different monitor layout — that window snaps back to its default
 spot instead of hiding. **Reset window positions** in the control menu clears the
 cache and restores all three defaults.
@@ -297,12 +308,64 @@ whichever monitor Windows calls primary — so on a multi-monitor setup it opens
 where you're actually looking. The floating reset hint is centred the same way
 and is not draggable or saved.
 
+## Where your files live
+
+The installed build keeps its code and your data apart, because the code is a
+read-only bundle that Windows unpacks somewhere different on every launch.
+
+| | Installed build | From source |
+|---|---|---|
+| Log | `%LOCALAPPDATA%\FareverMeter\meter.log` | the console you ran it in |
+| Window positions | `%LOCALAPPDATA%\FareverMeter\.meter_position.json` | `.meter_position.json` in the project |
+| Parse screenshots | `%LOCALAPPDATA%\FareverMeter\parses\` | `parses/` in the project |
+| Regenerated offsets | `%LOCALAPPDATA%\FareverMeter\analysis_out\` | `analysis_out/` in the project |
+
+Uninstalling leaves `%LOCALAPPDATA%\FareverMeter` alone — your parses and window
+positions survive it, and survive upgrades.
+
+## Running from source
+
+You don't need this to *use* the meter; the installer is the supported route.
+It's here for hacking on it.
+
+```
+pip install frida pillow
+python meter/farever_meter.py
+```
+
+Behaviour is identical except where a console changes things: output goes to the
+terminal instead of a log file, prompts are asked there instead of as dialogs,
+and `Ctrl+C` works as a third way to stop it (the control menu's warning line
+changes to say so). The tray icon is there either way.
+
+## Building a release
+
+```
+powershell -ExecutionPolicy Bypass -File packaging\build.ps1
+```
+
+Draws the icon, freezes the app with PyInstaller, and compiles the Inno Setup
+wizard — leaving `dist\FareverMeter-<version>-Setup.exe` to attach to a GitHub
+release. One-time prerequisites:
+
+```
+py -m pip install pyinstaller pillow frida
+winget install JRSoftware.InnoSetup
+```
+
+The version comes from the `VERSION` constant in `meter/farever_meter.py` and
+nowhere else — the build script reads it for the installer and its filename, and
+the update check compares against it. **Tag the repo with the same string when
+you publish,** or every user is told they're out of date.
+
 ## Layout
 
 ```
 hltools/     self-contained HashLink bytecode parser + analysis scripts
 frida/       Frida scripts: resolver, probes, and the persistent meter hook
 meter/       the meter app (aggregation + Tk overlay + Frida host)
+packaging/   icon generator, PyInstaller spec, Inno Setup script, build script
+assets/      the generated icon (tray, executable, installer)
 analysis_out/ generated: resolver_data.json, meter_offsets.json, reports
 ```
 

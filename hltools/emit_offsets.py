@@ -6,6 +6,7 @@ Offsets come from hlbc_parser.field_offsets() (mirrors hl_get_obj_rt) and the
 HL virtual vfield indices for the skill-name chain.
 """
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -13,7 +14,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 from hlbc_parser import HLCode, HOBJ, HSTRUCT, HVIRTUAL
 from gamepath import find_hlboot
 
-OUT = Path(__file__).resolve().parent.parent / "analysis_out" / "meter_offsets.json"
+# Overridable for the same reason as build_targets.py's: the installed meter
+# runs this from a bundle directory that doesn't survive the process.
+_OUT_DIR = Path(os.environ.get("FAREVER_ANALYSIS_OUT")
+                or Path(__file__).resolve().parent.parent / "analysis_out")
+_OUT_DIR.mkdir(parents=True, exist_ok=True)
+OUT = _OUT_DIR / "meter_offsets.json"
 
 
 def main():
