@@ -65,9 +65,25 @@ Python 3.10+. Windows. Farever must be running and logged in.
 python meter/farever_meter.py
 ```
 
+Double-clicking `meter/farever_meter.py` works too — it goes through whatever
+Windows associates with `.py`, which on a machine with one Python install is the
+right interpreter. The tradeoff is that a startup failure closes the window
+before you can read it, so reach for a terminal when something's wrong.
+
 If Farever isn't running yet, the meter waits for it to launch. If several
 Farever processes are running it asks which one to attach to, and if it can't
 find your `hlboot.dat` it asks for your install folder.
+
+**Stop it with `Ctrl+C` in the console, not by closing the window.** Closing the
+console terminates the process outright, skipping the unload/detach — and a
+half-attached agent is what destabilises the game across repeated relaunches.
+`Ctrl+C` breaks the overlay's mainloop and takes the normal shutdown path.
+
+Only one meter runs at a time. A new instance finds any other through a lock
+file in `%LOCALAPPDATA%\FareverMeter` — deliberately outside the project folder,
+so a copy of this script launched from a *different* directory is still found —
+and asks it to shut down cleanly first. It force-kills only if that instance
+doesn't answer within 12 seconds.
 
 Two overlay windows appear top-right:
 
@@ -92,21 +108,67 @@ While the escape menu is open:
 
 * both windows **unlock** — drag either by its header, and a click on a player
   row points the breakdown at them;
-* a **control menu** appears in the middle of the game window with the settings
-  that used to be hotkeys. Drag it anywhere; its position is remembered like the
-  other two windows';
+* a **control menu** fades in over the middle of the game window with the
+  settings that used to be hotkeys. Drag it anywhere; its position is remembered
+  like the other two windows';
+* anything you'd hidden — with a Show/hide tick, or by out-of-combat hiding —
+  **comes back for as long as the menu is open**, so you can see what a checkbox
+  does while you're clicking it;
 * the one surviving keybind is spelled out as floating text at the top of the
   screen.
 
-Close the escape menu and everything goes back to click-through.
+Close the escape menu and everything fades back to how you had it, click-through
+again.
 
 ### Control menu
 
-| Button | Does |
-|---|---|
-| Hide / Show meter windows | hides both overlay windows (the control menu stays, so you can bring them back) |
-| Show all players / Show party only | switches between your group and everyone nearby; resets the encounter |
-| Reset window positions | snaps all three windows back to their defaults and clears the saved positions |
+| Section | Button | Does |
+|---|---|---|
+| Options | Show all players / Show party only | switches between your group and everyone nearby; resets the encounter |
+| Options | Reset encounter data (`Shift+\`) | the same reset the hotkey fires — the label carries the keybind because that's the one you want mid-fight, when the escape menu isn't an option |
+| Options | Reset window positions | snaps all three windows back to their defaults and clears the saved positions |
+| Show / hide | Damage meter / Breakdown / Healing columns | hides that piece of the overlay (the control menu stays, so you can bring it back) |
+| Show / hide | Hide out of combat | fades both windows away a few seconds after the fighting stops |
+| Actions | 60s Parse Mode | see below |
+| Actions | Parse Screenshots | opens `parses/` in Explorer (created on the spot if you haven't run one yet) |
+
+### 60s Parse Mode
+
+A fixed-length sample, so two runs are comparable in a way "whatever that pull
+happened to be" never is. Click it and:
+
+1. an 8-second countdown appears over the top of the game window — long enough
+   to close the escape menu and get your hands back on the keyboard;
+2. the meter clears and records for **exactly 60 seconds**, ending on time even
+   if you're still swinging;
+3. the sample then freezes on screen. New hits are ignored and the duration
+   clock stops, so the numbers stay readable for as long as you want them;
+4. and the result is written to `parses/parse-YYYYmmdd-HHMMSS.png` — the party
+   table and the inspected player's skill breakdown, drawn in the meter's own
+   palette. `parses/` is gitignored.
+
+The image is drawn from the numbers rather than screenshotted from the overlay:
+the live windows are layered and semi-transparent, the breakdown only ever shows
+one player, and a capture would pick up whatever the game had drawn behind them.
+It needs Pillow (`pip install pillow`); without it you lose the picture, not the
+parse.
+
+The cutoff is enforced on the data path rather than by the UI's 250 ms refresh,
+so the window is the length asked for regardless of tick timing. The usual
+"quiet for 25 s means a new encounter" rule is suspended inside a parse — a lull
+mid-run is part of the sample, not the start of a new one.
+
+**DPS in a parse divides by the full 60 seconds**, not by in-combat time the way
+live metering does. The window *is* the measurement, so downtime counts against
+you — and the game's `isInCombat` flag drops between pulls, which would
+otherwise inflate a parse by however much of it the flag happened to miss (a
+real 60 s run measured 27 s of "combat"). Reset back to live metering and DPS
+goes back to dividing by combat time.
+
+The button reads **Stop 60s Parse** while a parse is live. Pressing it, or
+resetting the data (`Shift+\`, the menu button, or a zone change), returns to
+normal live metering. Either route clears the sample: resuming capture into a
+finished parse would quietly append live hits to the numbers you were reading.
 
 ### The only hotkey
 
@@ -117,12 +179,31 @@ Close the escape menu and everything goes back to click-through.
 It fires while Farever has focus, with a global `RegisterHotKey` fallback if the
 low-level hook is blocked.
 
-### Also available any time
+### Rifts
 
-**Ctrl+click a player's line on the meter** points the breakdown at them without
-opening anything — a global mouse hook hit-tests the click, so it works while the
-overlay is locked and click-through. The breakdown snaps back to *you* on
-encounter reset, zone change, and party/all mode switches.
+The hook reads `st.GameLayer.isRift` — reached by a pointer walk from the local
+hero (`ent.Hero` inherits `st.State.layer`), so it's plain memory reads on the
+heartbeat timer rather than an HL call that would have to ride inside the damage
+hook. That matters: you enter a rift well before you hit anything in it.
+
+On entering one, a prompt appears in the middle of the game window asking
+**"Enable 'View All Players'?"**. While it's up it is the *only* overlay window
+on screen — meter, breakdown and control menu all fade out. **Yes** switches to
+all-players and resets the encounter (the mode button does the same; party-only
+and all-players numbers can't share one encounter without the percentages
+lying). **No** just dismisses it. It re-arms when you leave the rift, and closes
+itself if the rift ends before you answer.
+
+The prompt takes clicks even while the overlay is otherwise click-through. If
+the game still owns the cursor when it appears, press `Esc` to free it — the
+control menu stays hidden while the prompt is up precisely so `Esc` does nothing
+but hand the mouse back.
+
+### Also worth knowing
+
+**Click a player's line on the meter** while the escape menu is open to point the
+breakdown at them. It snaps back to *you* on encounter reset, zone change, and
+party/all mode switches.
 
 **By default the meter shows only your party** (read from your group's roster in
 memory); the control menu switches it to all nearby players.
@@ -196,10 +277,12 @@ live. Solo (no group) shows just you in party mode.
 
 ## Known limitations / next steps
 
-- The window feed is generic (every `ui.win.*` class reports itself), but only
-  `ui.win.EscapeMenu` currently wakes the overlay — add more class names to
-  `UNLOCK_ON_WINDOWS` in `meter/farever_meter.py` to extend it (inventory, map,
-  ...).
+- The window feed is generic (every `ui.win.*` class reports itself). Only
+  `ui.win.EscapeMenu` *unlocks* the overlay (`UNLOCK_ON_WINDOWS`); every other
+  class fades it out for as long as that window is up, so the game's own screens
+  are never covered. If some always-on HUD class turns out to report itself as
+  open — the names are logged as `[meter] game window ...` — add it to
+  `MENU_IGNORE_WINDOWS` in `meter/farever_meter.py` and it stops counting.
 - `Shift+\` is the last keybind. It survives because a reset is wanted *mid-fight*,
   which is exactly when the escape menu isn't an option.
 - Summon/pet damage (non-`ent.Hero` dealers) is not yet attributed to its owner.
