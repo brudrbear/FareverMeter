@@ -246,7 +246,7 @@ MINIMAP_RANGE_MIN, MINIMAP_RANGE_MAX = 80, 600
 # damage tables want to look like parchment and a map does not.
 MINIMAP_STYLE = (
     ("activity", {"fill": "#FFD95E", "r": 4.0, "shape": "diamond"}),
-    ("obelisk",  {"fill": "#C48CFF", "r": 3.5, "shape": "square"}),
+    ("obelisk",  {"fill": "#C48CFF", "r": 4.4, "shape": "monolith"}),
     ("respawn",  {"fill": "#5FE3C0", "r": 3.0, "shape": "square"}),
     ("chest",    {"fill": "#FF9E3D", "r": 3.5, "shape": "square"}),
     ("orb",      {"fill": "#FFD400", "r": 3.6, "shape": "dot",
@@ -2680,6 +2680,19 @@ class Overlay:
                 x - dx * 0.35 * r, y - dy * 0.35 * r,
                 x - dx * r - px * 0.85 * r, y - dy * r - py * 0.85 * r,
                 fill=fill, outline=edge or "", width=1)
+            return
+        if shape == "monolith":
+            # A standing stone seen from above doesn't read as anything, so
+            # this is the stone seen from the side: a tall block with a single
+            # dark eye in its upper half. Distinct in silhouette from the
+            # squares and dots around it, which is what a glance is sorting by.
+            hw, hh = r * 0.62, r * 1.15
+            c.create_rectangle(x - hw, y - hh, x + hw, y + hh,
+                               fill=fill, outline=edge or "", width=1)
+            dr = max(1.0, r * 0.30)
+            dy = y - hh * 0.44
+            c.create_oval(x - dr, dy - dr, x + dr, dy + dr,
+                          fill="#000000", outline="")
             return
         if shape in ("dot", "chevron"):
             # `ring` is a second colour around the dot, for markers the game
