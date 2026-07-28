@@ -1,14 +1,9 @@
 # Farever+ Party Meter (memory-reading edition)
 
-> ## 📥 Getting it
+> ### 📥 **[Download the latest release](../../releases)**, then follow **[Setup](#setup)** below.
 >
-> Open **[Releases](../../releases)** and download the latest version, then
-> **extract it anywhere on your PC** — Desktop, Downloads, wherever. It does
-> **not** need to go in your Farever folder, and nothing in the game is touched
-> or modified.
->
-> Then see [Requirements](#requirements) — there's one Python checkbox that
-> catches almost everyone.
+> Extract it anywhere on your PC — it doesn't go in your Farever folder, and
+> nothing in the game is touched or modified.
 
 A party/raid damage meter for **Farever** that reads the game's own combat
 functions in memory via Frida — giving **real spell IDs, damage elements,
@@ -20,52 +15,22 @@ which broke when a patch changed the wire format. Reading the game's typed
 objects is both richer (per-spell breakdowns) and more patch-robust (we hook by
 symbol name, then recompute offsets from the shipped bytecode).
 
-## How it works
+## Setup
 
-Farever is a **HashLink JIT** game: `Farever.exe` runs `hlboot.dat` (bytecode,
-*with debug symbols*) via `libhl.dll`. That lets us:
+Five steps, once. **Everything after "You're all set" is optional reading.**
 
-1. **Parse `hlboot.dat`** (`hltools/hlbc_parser.py`) to get every class's fields
-   and every method's function index — no guessing byte offsets.
-2. **Resolve functions at runtime** (`frida/*.js`): find the HL `functions_ptrs`
-   table and map any function index → live JIT address. The table is located by
-   a pointer walk from libhl's own statics (its loaded-modules registry reaches
-   `hl_module.functions_ptrs` in ≤2 hops — sub-second, no layout assumptions:
-   candidates are verified against known hdll native exports at their expected
-   indices). If the walk misses, a full anchored memory scan runs as fallback,
-   with progress heartbeats so the host waits instead of assuming a dead hook.
-3. **Hook `ent.Unit.onInflictDamage`** and read the `st.skill.DamageResult`
-   argument: `_amount`, `affinity` (element), `_critical`, `_kill`, and
-   `baseSkill.kind` (the spell ID). Filter dealers to `ent.Hero` (players) and
-   tag each hit with the player's name; the local player is found via
-   `ui.Console.getMyHero()`. **Healing** works differently: heals are computed
-   server-side only (`receiveHeal`/`computeHeal` never run on clients), so the
-   meter reads what *is* replicated — a rise in a unit's health attribute
-   (`ent.UnitAttributes.set_health`) is the effective heal amount, and the heal
-   FX played on the target (`ent.Unit.playHitHealFX`) names the healing skill
-   and its owner. Each health rise is attributed to the most recent heal FX on
-   that unit; FX-less in-combat rises count as "Regen" (self), and
-   out-of-combat regen / spawn replication is dropped.
-4. **Follow the game's own UI.** `ui.BaseUI.displayWindow(ui, win)` and
-   `removeWindow(ui, win)` are the game's window manager — every window (escape
-   menu, inventory, map, ...) passes through them with the window instance as
-   the second argument. Hooking the pair and reading each instance's runtime
-   type name gives a live "which game windows are open" feed, which the overlay
-   uses to unlock itself while the escape menu is up. (`displayWindow` fires
-   twice per open, so instances are tracked by pointer and a class is only
-   reported when its live count crosses zero; `ui.win.BaseWindow.onRemove` is
-   the safety net for windows torn down without going through `removeWindow`,
-   and a zone change clears the whole set.)
-5. **Resolve display names** from the game's CastleDB: `baseSkill.inf` is the
-   CDB skill row; its `texts.name` is the localized name (e.g. `Warrior_Rage_Strike`
-   → "Raging Smash"). Read via libhl's `hl_obj_get_field` + `hl_hash_utf8`,
-   cached per skill id.
+### Step 1 — Download it
 
-## Requirements
+Open **[Releases](../../releases)**, download the latest version, and extract it
+anywhere on your PC. Desktop, Downloads, wherever — it does **not** go in your
+Farever folder, and nothing in the game is touched or modified.
 
-Python 3.10+. Windows. Farever must be running and logged in.
+### Step 2 — Install Python
 
-> ### ⚠️ When installing Python, tick **"Add python.exe to PATH"**
+Get **Python 3.10 or newer** from [python.org](https://www.python.org/downloads/).
+Windows only.
+
+> ### ⚠️ Tick **"Add python.exe to PATH"** in the installer
 >
 > It's the checkbox at the **bottom of the first installer screen**, and it is
 > **off by default**. Miss it and `python` won't work — not because Python is
@@ -78,32 +43,48 @@ Python 3.10+. Windows. Farever must be running and logged in.
 > Nothing is reinstalled and no reboot is needed — just open a *new* terminal
 > afterwards, since an already-open one keeps the old PATH.
 
-Then install the one dependency:
+### Step 3 — Install the one dependency
+
+Open a terminal and run:
 
 ```
 pip install frida
 ```
 
-## Run
+### Step 4 — Start Farever
+
+Launch the game and log in to your character. The meter attaches to a running
+game; it won't do anything useful before you're in.
+
+### Step 5 — Run the meter
+
+From the folder you extracted:
 
 ```
 python meter/farever_meter.py
 ```
 
-Double-clicking `meter/farever_meter.py` works too — it goes through whatever
-Windows associates with `.py`, which on a machine with one Python install is the
-right interpreter. The tradeoff is that a startup failure closes the window
-before you can read it, so reach for a terminal when something's wrong.
+Or just **double-click `meter/farever_meter.py`** — that goes through Windows'
+file association and doesn't depend on PATH at all. The tradeoff is that if it
+fails at startup the window closes before you can read the error, so use a
+terminal when something's wrong.
 
 If Farever isn't running yet, the meter waits for it to launch. If several
 Farever processes are running it asks which one to attach to, and if it can't
 find your `hlboot.dat` it asks for your install folder.
 
+### Stopping it
+
+**Press `Ctrl+C` in the console. Don't close the window with the X.** Closing
+the console terminates the process outright, skipping the unload/detach — and a
+half-attached agent is what destabilises the game across repeated relaunches.
+`Ctrl+C` breaks the overlay's mainloop and takes the normal shutdown path.
+
 ### If it won't start
 
 | What you see | What it means | Fix |
 |---|---|---|
-| The Microsoft Store opens, or `Python was not found; run without arguments to install from the Microsoft Store` | `python` is hitting Windows' zero-byte alias stub — PATH was never set | Tick **Add to PATH** (see Requirements), or use `py meter/farever_meter.py`, or just double-click the `.py` |
+| The Microsoft Store opens, or `Python was not found; run without arguments to install from the Microsoft Store` | `python` is hitting Windows' zero-byte alias stub — PATH was never set | Tick **Add to PATH** (Step 2), or use `py meter/farever_meter.py`, or just double-click the `.py` |
 | `'python' is not recognized as an internal or external command` | Same cause, or the terminal predates the install | Same fix — and open a **new** terminal |
 | `ModuleNotFoundError: No module named 'frida'` | Python is fine, the dependency isn't installed | `pip install frida` |
 | `[!] permission denied attaching` | Farever is running as administrator | Run the meter from an elevated terminal too |
@@ -113,16 +94,17 @@ find your `hlboot.dat` it asks for your install folder.
 and is registered separately. Double-clicking the `.py` sidesteps PATH entirely,
 since that goes through the file association.
 
-**Stop it with `Ctrl+C` in the console, not by closing the window.** Closing the
-console terminates the process outright, skipping the unload/detach — and a
-half-attached agent is what destabilises the game across repeated relaunches.
-`Ctrl+C` breaks the overlay's mainloop and takes the normal shutdown path.
+---
 
-Only one meter runs at a time. A new instance finds any other through a lock
-file in `%LOCALAPPDATA%\FareverMeter` — deliberately outside the project folder,
-so a copy of this script launched from a *different* directory is still found —
-and asks it to shut down cleanly first. It force-kills only if that instance
-doesn't answer within 12 seconds.
+## ✅ You're all set
+
+**That's the whole setup — everything below is reference.** Read it if you want
+to know what a button does or how the thing works; skip it entirely and the
+meter still works fine.
+
+---
+
+## What you'll see
 
 Two overlay windows appear top-right:
 
@@ -134,6 +116,14 @@ Two overlay windows appear top-right:
   per-skill healing side by side, each ordered greatest → least with a bar
   under every row (blue for damage, green for healing), plus per-element
   totals.
+
+### Only one at a time
+
+Starting a second copy doesn't give you two meters. A new instance finds any
+other through a lock file in `%LOCALAPPDATA%\FareverMeter` — deliberately
+outside the project folder, so a copy launched from a *different* directory is
+still found — and asks it to shut down cleanly first. It force-kills only if
+that instance doesn't answer within 12 seconds.
 
 ## Controls
 
@@ -358,3 +348,46 @@ live. Solo (no group) shows just you in party mode.
 - DPS is computed over the shared encounter window (fair cross-player compare).
 - No persistence/logging of past encounters yet.
 - Offsets are for the current build; see "After a Farever patch".
+
+---
+
+## How it works
+
+Farever is a **HashLink JIT** game: `Farever.exe` runs `hlboot.dat` (bytecode,
+*with debug symbols*) via `libhl.dll`. That lets us:
+
+1. **Parse `hlboot.dat`** (`hltools/hlbc_parser.py`) to get every class's fields
+   and every method's function index — no guessing byte offsets.
+2. **Resolve functions at runtime** (`frida/*.js`): find the HL `functions_ptrs`
+   table and map any function index → live JIT address. The table is located by
+   a pointer walk from libhl's own statics (its loaded-modules registry reaches
+   `hl_module.functions_ptrs` in ≤2 hops — sub-second, no layout assumptions:
+   candidates are verified against known hdll native exports at their expected
+   indices). If the walk misses, a full anchored memory scan runs as fallback,
+   with progress heartbeats so the host waits instead of assuming a dead hook.
+3. **Hook `ent.Unit.onInflictDamage`** and read the `st.skill.DamageResult`
+   argument: `_amount`, `affinity` (element), `_critical`, `_kill`, and
+   `baseSkill.kind` (the spell ID). Filter dealers to `ent.Hero` (players) and
+   tag each hit with the player's name; the local player is found via
+   `ui.Console.getMyHero()`. **Healing** works differently: heals are computed
+   server-side only (`receiveHeal`/`computeHeal` never run on clients), so the
+   meter reads what *is* replicated — a rise in a unit's health attribute
+   (`ent.UnitAttributes.set_health`) is the effective heal amount, and the heal
+   FX played on the target (`ent.Unit.playHitHealFX`) names the healing skill
+   and its owner. Each health rise is attributed to the most recent heal FX on
+   that unit; FX-less in-combat rises count as "Regen" (self), and
+   out-of-combat regen / spawn replication is dropped.
+4. **Follow the game's own UI.** `ui.BaseUI.displayWindow(ui, win)` and
+   `removeWindow(ui, win)` are the game's window manager — every window (escape
+   menu, inventory, map, ...) passes through them with the window instance as
+   the second argument. Hooking the pair and reading each instance's runtime
+   type name gives a live "which game windows are open" feed, which the overlay
+   uses to unlock itself while the escape menu is up. (`displayWindow` fires
+   twice per open, so instances are tracked by pointer and a class is only
+   reported when its live count crosses zero; `ui.win.BaseWindow.onRemove` is
+   the safety net for windows torn down without going through `removeWindow`,
+   and a zone change clears the whole set.)
+5. **Resolve display names** from the game's CastleDB: `baseSkill.inf` is the
+   CDB skill row; its `texts.name` is the localized name (e.g. `Warrior_Rage_Strike`
+   → "Raging Smash"). Read via libhl's `hl_obj_get_field` + `hl_hash_utf8`,
+   cached per skill id.
