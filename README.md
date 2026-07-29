@@ -16,6 +16,9 @@ which broke when a patch changed the wire format. Reading the game's typed
 objects is both richer (per-spell breakdowns) and more patch-robust (we hook by
 symbol name, then recompute offsets from the shipped bytecode).
 
+<img width="2559" height="1439" alt="image" src="https://github.com/user-attachments/assets/07feedb5-bd3d-45ff-bc8c-52e53dd67cb2" />
+
+
 ## Setup
 
 Two steps, once. **Everything after "You're all set" is optional reading.**
