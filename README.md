@@ -18,6 +18,9 @@ symbol name, then recompute offsets from the shipped bytecode).
 
 <img width="2559" height="1439" alt="image" src="https://github.com/user-attachments/assets/07feedb5-bd3d-45ff-bc8c-52e53dd67cb2" />
 
+<img width="2559" height="1439" alt="image" src="https://github.com/user-attachments/assets/a8b05998-0d87-4bbd-a2ef-a40e77b1beba" />
+
+
 
 ## Setup
 
