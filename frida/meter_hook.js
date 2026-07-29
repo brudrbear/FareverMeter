@@ -399,6 +399,149 @@ function hookCamera(base) {
     }
 }
 
+// ---- boss / elite healthbar ----
+// ui.hud.BossesInfo.bossInfos is the game's own list of on-screen boss bars.
+// Measured against a live King Ratsar pull and an elite:
+//
+//   * fetchBosses runs at a steady 2/s — a timer, not a per-frame call — so
+//     this hook body can afford to walk the array rather than defer it.
+//   * the array is not a fixed pool: it is empty with no bar and holds one
+//     entry with a bar up, so its length alone answers "is a bar on screen".
+//   * a bar comes up for ELITES too (a plain ent.Foe raised one), which is why
+//     boss-only rules go through isBoss rather than through the bar.
+//   * the bar tracks ENGAGEMENT, not existence — it dropped with the boss
+//     alive at 22824 HP when the player walked off and the boss reset. That is
+//     exactly the pull-start/pull-end boundary the meter wants.
+//
+// Kill vs disengage is decided from the last health seen while the bar was up:
+// on the real kill the final sample read 0, on the walk-away it did not.
+const bossClass = {};            // unit kind -> {boss, elite}, classified once
+let bossBars = {};               // unit ptr string -> {kind, boss, elite, hp}
+let bossLast = "";               // last state signature, to send only on change
+let bossFnIsBoss = null, bossFnIsElite = null;
+
+function bossUnitHealth(u) {
+    try {
+        if (!OFF.Unit || OFF.Unit.attr == null || !OFF.UnitAttributes) return null;
+        const attr = u.add(OFF.Unit.attr).readPointer();
+        if (!attr || attr.isNull() || attr.compare(ptr("0x10000")) <= 0) return null;
+        return attr.add(OFF.UnitAttributes.health).readDouble();
+    } catch (e) { return null; }
+}
+
+// Runs on the GAME thread (inside the fetchBosses hook), the only safe place
+// for HL calls. Cached per unit KIND: a zone has few boss/elite types and the
+// answer can't change for a given one.
+function classifyBossUnit(u, kind) {
+    let hit = bossClass[kind];
+    if (hit) return hit;
+    hit = { boss: false, elite: false };
+    try { if (bossFnIsBoss) hit.boss = !!bossFnIsBoss(u); } catch (e) {}
+    try { if (bossFnIsElite) hit.elite = !!bossFnIsElite(u); } catch (e) {}
+    bossClass[kind] = hit;
+    return hit;
+}
+
+function pollBossBars(bi) {
+    if (!bi || bi.isNull() || !OFF.BossesInfo || !OFF.BossInfo || !OFF.ArrayObj)
+        return;
+    const A = OFF.ArrayObj;
+    const now = {};
+    try {
+        const arr = bi.add(OFF.BossesInfo.bossInfos).readPointer();
+        if (arr && !arr.isNull()) {
+            const n = arr.add(A.length).readS32();
+            if (n > 0 && n < 64) {
+                const data = arr.add(A.array).readPointer();
+                if (data && !data.isNull()) {
+                    for (let i = 0; i < n; i++) {
+                        let slot;
+                        try { slot = data.add(A.data + i * 8).readPointer(); }
+                        catch (x) { continue; }
+                        if (!slot || slot.isNull() || slot.compare(ptr("0x10000")) <= 0)
+                            continue;
+                        if (!slot.add(OFF.BossInfo.active).readU8()) continue;
+                        const u = slot.add(OFF.BossInfo.unit).readPointer();
+                        if (!u || u.isNull() || u.compare(ptr("0x10000")) <= 0) continue;
+                        const kind = hlStr(u.add(OFF.Unit.kind).readPointer());
+                        if (!kind) continue;
+                        const cls = classifyBossUnit(u, kind);
+                        const hp = bossUnitHealth(u);
+                        const key = u.toString();
+                        const prev = bossBars[key];
+                        now[key] = { kind: kind, boss: cls.boss, elite: cls.elite,
+                                     // Keep the last non-null reading: at
+                                     // teardown the unit may already be gone.
+                                     hp: hp === null ? (prev ? prev.hp : null) : hp };
+                    }
+                }
+            }
+        }
+    } catch (e) { return; }
+
+    const up = [], down = [];
+    for (const k in now) if (!(k in bossBars)) up.push(now[k]);
+    for (const k in bossBars) {
+        if (k in now) continue;
+        const b = bossBars[k];
+        // hp === null means we never got a reading; don't claim a kill.
+        down.push({ kind: b.kind, boss: b.boss, elite: b.elite,
+                    killed: b.hp !== null && b.hp <= 0 });
+    }
+    bossBars = now;
+
+    let anyBoss = false, anyElite = false, count = 0;
+    for (const k in now) {
+        count++;
+        if (now[k].boss) anyBoss = true;
+        if (now[k].elite) anyElite = true;
+    }
+    // Only talk when something changed. At 2/s an unconditional send would be
+    // 2 messages a second forever, for a state that changes twice a pull.
+    const sig = count + "|" + anyBoss + "|" + anyElite;
+    if (!up.length && !down.length && sig === bossLast) return;
+    bossLast = sig;
+    send({ kind: "bossbar", n: count, boss: anyBoss, elite: anyElite,
+           up: up, down: down });
+}
+
+function hookBossBar(base) {
+    const fi = DATA.boss_targets && DATA.boss_targets["ui.hud.BossesInfo.fetchBosses"];
+    if (fi == null) {
+        log("!! boss target missing (ui.hud.BossesInfo.fetchBosses); boss-bar "
+            + "detection disabled — re-run hltools/build_targets.py");
+        return;
+    }
+    if (!OFF.BossesInfo || !OFF.BossInfo) {
+        log("!! boss offsets missing (BossesInfo/BossInfo); boss-bar detection "
+            + "disabled. The offsets file predates this build — delete "
+            + "analysis_out and restart to regenerate it.");
+        return;
+    }
+    const fns = DATA.boss_fns || {};
+    function nf(nm) {
+        const f = fns[nm];
+        if (f == null) return null;
+        try {
+            return new NativeFunction(base.add(f * 8).readPointer(),
+                                      "uint8", ["pointer"]);
+        } catch (e) { return null; }
+    }
+    bossFnIsBoss = nf("ent.Unit.isBoss");
+    bossFnIsElite = nf("ent.Unit.isElite");
+    if (!bossFnIsBoss)
+        log("!! ent.Unit.isBoss unavailable; every bar will count as an elite "
+            + "and boss-only rules will never fire");
+    try {
+        Interceptor.attach(base.add(fi * 8).readPointer(), {
+            onEnter: function () { pollBossBars(this.context.rcx); }
+        });
+        log("boss bar tracking active");
+    } catch (e) {
+        log("!! boss bar hook failed (" + e + ")");
+    }
+}
+
 function cameraDirection() {
     if (!camPtr || camPtr.isNull() || !OFF.Camera) return null;
     // Re-check the type on every read. A zone change (which is also what a
@@ -657,6 +800,14 @@ function resetWindows() {
     for (const nm in winOpenCount) send({ kind: "window", name: nm, open: 0 });
     for (const k in winClassOf) delete winClassOf[k];
     for (const k in winOpenCount) delete winOpenCount[k];
+    // A bar that was up when the agent went away must not leave the compass
+    // hidden forever. No up/down events: the pull isn't ending, we're just
+    // no longer able to see it, and a phantom "boss died" fanfare on unload
+    // would be worse than saying nothing.
+    if (Object.keys(bossBars).length) send({ kind: "bossbar", n: 0, boss: false,
+                                             elite: false, up: [], down: [] });
+    bossBars = {};
+    bossLast = "";
 }
 
 // ---- skill display-name resolution (CDB, via libhl dynamic field access) ----
@@ -792,6 +943,7 @@ function main() {
     // timer is cheaper than it looks. The host resets this from the Refresh
     // setting as soon as it connects.
     hookCamera(base);
+    hookBossBar(base);
     // Say so if the sweep can't run. sweepWorld bails on its first line when
     // an offset it needs is absent, and it does that inside a try/catch on a
     // timer — so without this the minimap simply stays on "waiting for the

@@ -623,6 +623,13 @@
   "cam_targets": {
     "client.BaseCamera.postUpdate": 10884
   },
+  "boss_targets": {
+    "ui.hud.BossesInfo.fetchBosses": 12226
+  },
+  "boss_fns": {
+    "ent.Unit.isBoss": 4728,
+    "ent.Unit.isElite": 4730
+  },
   "funcs": {
     "ui.Console.getMyHero": 12336,
     "GameApp.getCameraHero": 11581

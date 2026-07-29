@@ -72,7 +72,8 @@
   },
   "Unit": {
     "kind": 592,
-    "inf": 632
+    "inf": 632,
+    "attr": 976
   },
   "Foe": {
     "summonOwner": 1224,
@@ -105,6 +106,13 @@
   "Group": {
     "groupId": 176,
     "players": 184
+  },
+  "BossesInfo": {
+    "bossInfos": 1096
+  },
+  "BossInfo": {
+    "active": 1096,
+    "unit": 1120
   },
   "SkillRow": {
     "id_vidx": 7,

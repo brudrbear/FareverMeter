@@ -19,6 +19,10 @@ datas = [
     (str(ROOT / "analysis_out" / "resolver_data.json"), "res/analysis_out"),
     (str(ROOT / "analysis_out" / "meter_offsets.json"), "res/analysis_out"),
     (str(ROOT / "assets" / "farevermeter.ico"), "res/assets"),
+    # Boss-fight cues. Played through Windows' own MCI, so they add two files
+    # rather than an audio dependency.
+    (str(ROOT / "assets" / "boss_pulled.wav"), "res/assets"),
+    (str(ROOT / "assets" / "boss_victory.mp3"), "res/assets"),
 ]
 
 # The self-heal path re-runs these against the running game's hlboot.dat after a

@@ -42,6 +42,7 @@ import ctypes
 import json
 import math
 import os
+import queue
 import sys
 import tempfile
 import threading
@@ -1416,6 +1417,7 @@ class GameUIState:
         self._lock = threading.Lock()
         self._open: set[str] = set()
         self._rift = False
+        self._boss_bar = 0
 
     def set_rift(self, state: bool):
         with self._lock:
@@ -1424,6 +1426,19 @@ class GameUIState:
     def in_rift(self) -> bool:
         with self._lock:
             return self._rift
+
+    def set_boss_bar(self, count: int):
+        """How many of the game's own boss/elite healthbars are on screen.
+
+        The hook reads ui.hud.BossesInfo, so this counts bars the player can
+        actually see — it goes to zero when they walk away and the boss resets,
+        not just when something dies."""
+        with self._lock:
+            self._boss_bar = max(0, int(count))
+
+    def boss_bar_up(self) -> bool:
+        with self._lock:
+            return self._boss_bar > 0
 
     def set_window(self, name: str, is_open: bool):
         if not name:
@@ -1437,6 +1452,9 @@ class GameUIState:
     def clear(self):
         with self._lock:
             self._open.clear()
+            # A loading screen tears the HUD down with it, so a bar that was up
+            # on the way out must not leave the compass hidden in the new zone.
+            self._boss_bar = 0
 
     def any_open(self, names) -> bool:
         with self._lock:
@@ -1838,6 +1856,168 @@ def start_hotkeys(callbacks: dict, target_pid):
 # thing a from-source run needs.
 ICON_FILE = ROOT / "assets" / "farevermeter.ico"
 
+# ---- boss-fight sounds ----
+SOUND_FILES = {
+    "pull": ROOT / "assets" / "boss_pulled.wav",
+    "victory": ROOT / "assets" / "boss_victory.mp3",
+}
+SOUND_VOLUME_DEFAULT = 60         # percent
+SOUND_VOLUME_MAX = 100
+
+
+class SoundPlayer:
+    """Plays the boss-fight cues through Windows' MCI, via ctypes.
+
+    MCI rather than winsound because winsound is WAV-only and has no volume
+    control at all, and rather than a bundled audio library because this ships
+    as a PyInstaller build where every dependency is megabytes the user
+    downloads. Both files are opened with `type mpegvideo`: measured, that
+    driver handles the .wav and the .mp3 alike AND honours `setaudio volume`,
+    which the waveaudio driver does not.
+
+    EVERY MCI call happens on this class's own worker thread, and that is not
+    tidiness — it's required. MCI ties a device's lifetime to the thread that
+    opened it. Opening the files on a short-lived helper thread and playing
+    them from another looks fine (the open returns success) and is then
+    silent: every later command fails with "the specified device is not open".
+    Measured, and the reason this class owns a thread instead of a lock.
+
+    Commands are queued, so callers never block: MCI `play` is asynchronous
+    anyway, and the Tk thread must not wait on audio. Files are opened once and
+    kept open, so a cue starts when it's asked for rather than after a disk
+    read.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()         # guards _enabled/_volume/_broken
+        self._enabled = False
+        self._volume = SOUND_VOLUME_DEFAULT
+        self._broken = False                  # give up quietly after a failure
+        self._q: queue.Queue = queue.Queue()
+        self._thread = None
+        # Worker-thread-only state; no lock needed, nothing else touches it.
+        self._open: dict[str, str] = {}       # key -> MCI alias
+        self._checked = False                 # verified a cue actually played
+        try:
+            self._mci = ctypes.windll.winmm.mciSendStringW
+        except Exception:
+            self._mci = None
+            self._broken = True
+
+    # ---- worker thread ----
+
+    def _send(self, cmd: str) -> str | None:
+        """Returns MCI's reply on success (often ""), or None on failure."""
+        if self._mci is None:
+            return None
+        try:
+            buf = ctypes.create_unicode_buffer(256)
+            if self._mci(cmd, buf, 256, None) != 0:
+                return None
+            return buf.value
+        except Exception:
+            return None
+
+    def _alias_for(self, key: str) -> str | None:
+        if key in self._open:
+            return self._open[key]
+        path = SOUND_FILES.get(key)
+        if path is None or not path.is_file():
+            return None
+        alias = f"fmsnd_{key}_{os.getpid()}"
+        if self._send(f'open "{path}" type mpegvideo alias {alias}') is None:
+            return None
+        self._open[key] = alias
+        with self._lock:
+            vol = self._volume
+        self._send(f"setaudio {alias} volume to {vol * 10}")
+        return alias
+
+    def _do_play(self, key: str):
+        alias = self._alias_for(key)
+        if alias is None:
+            with self._lock:
+                self._broken = True       # missing/unplayable: stop retrying
+            print(f"[meter] sound {key!r} unavailable; sounds disabled",
+                  file=sys.stderr)
+            return
+        # `from 0` so a second pull retriggers the cue instead of being ignored
+        # because the previous play hasn't finished.
+        self._send(f"stop {alias}")
+        if self._send(f"play {alias} from 0") is None:
+            print(f"[meter] sound {key!r} failed to play", file=sys.stderr)
+            return
+        # Once per session, confirm the device really is producing audio rather
+        # than accepting commands into the void — that failure mode has already
+        # happened once here, and it is completely silent without this.
+        if not self._checked:
+            self._checked = True
+            mode = self._send(f"status {alias} mode")
+            if mode is not None and mode.strip() and mode.strip() != "playing":
+                print(f"[meter] sound device reports {mode.strip()!r} rather "
+                      "than 'playing' — cues may be silent", file=sys.stderr)
+
+    def _run(self):
+        while True:
+            job = self._q.get()
+            try:
+                op = job[0]
+                if op == "quit":
+                    for alias in self._open.values():
+                        self._send(f"stop {alias}")
+                        self._send(f"close {alias}")
+                    self._open.clear()
+                    return
+                if op == "prime":
+                    for key in SOUND_FILES:
+                        self._alias_for(key)
+                elif op == "volume":
+                    for alias in self._open.values():
+                        self._send(f"setaudio {alias} volume to {job[1] * 10}")
+                elif op == "play":
+                    self._do_play(job[1])
+            except Exception:
+                pass          # a bad cue must never take the meter with it
+
+    # ---- public API, callable from any thread ----
+
+    def start(self):
+        """Spin the worker up and open both files on it. Must be called before
+        anything will play — the worker is the only thread MCI will accept
+        commands from for these devices."""
+        with self._lock:
+            if self._mci is None or self._thread is not None:
+                return
+            self._thread = threading.Thread(target=self._run, daemon=True,
+                                            name="farever-meter-sound")
+            self._thread.start()
+        self._q.put(("prime",))
+
+    def set_enabled(self, on: bool):
+        with self._lock:
+            self._enabled = bool(on)
+
+    def set_volume(self, pct: int):
+        with self._lock:
+            self._volume = max(0, min(SOUND_VOLUME_MAX, int(pct)))
+            vol = self._volume
+        self._q.put(("volume", vol))
+
+    def play(self, key: str):
+        with self._lock:
+            if not self._enabled or self._broken or not self._volume:
+                return
+        self._q.put(("play", key))
+
+    def close(self):
+        with self._lock:
+            if self._thread is None:
+                return
+            thread = self._thread
+        self._q.put(("quit",))
+        thread.join(timeout=2.0)
+
+
 WM_TRAY = 0x0400 + 1                      # WM_APP + 1
 NIM_ADD, NIM_MODIFY, NIM_DELETE = 0, 1, 2
 NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_INFO = 0x01, 0x02, 0x04, 0x10
@@ -2158,6 +2338,13 @@ class Overlay:
         self._compass_filters = {key: True
                                  for key, _label, _cats in COMPASS_FILTERS}
         self._map_rate = "High"        # Ultra exists but is opt-in
+        # Boss cues. Off by default: an overlay that starts making noise on its
+        # own the first time you meet a boss is a bad first impression, and the
+        # checkbox plays a sample the moment you turn it on.
+        self._sounds_on = False
+        self._sound_volume = SOUND_VOLUME_DEFAULT
+        self._auto_reset_boss = False
+        self.sounds = SoundPlayer()
         # One scale per window group. Each window wants a size that suits its
         # job — the meter one that suits reading numbers, the map one that
         # suits the screen it covers — and a single slider means at least one
@@ -2299,6 +2486,13 @@ class Overlay:
                 self._scale_vars[group].set(int(round(factor * 100)))
                 self._set_group_scale(group, factor)
         self._pending_scales = None
+        # Push the restored audio settings into the player, then start its
+        # worker — the files are opened there, off this thread, because MCI
+        # `open` touches the disk and would otherwise sit in front of the first
+        # frame the overlay draws.
+        self.sounds.set_enabled(self._sounds_on)
+        self.sounds.set_volume(self._sound_volume)
+        self.sounds.start()
         # The control menu and its hint only exist while the game's escape menu
         # is up; _sync_game_ui maps them in. The parse banner is mapped by parse
         # mode itself, and deliberately answers to nothing else — a countdown
@@ -2493,6 +2687,13 @@ class Overlay:
             self.mode = data["mode"]
         if isinstance(data.get("hide_ooc"), bool):
             self._hide_ooc = data["hide_ooc"]
+        if isinstance(data.get("sounds_on"), bool):
+            self._sounds_on = data["sounds_on"]
+        if isinstance(data.get("auto_reset_boss"), bool):
+            self._auto_reset_boss = data["auto_reset_boss"]
+        vol = data.get("sound_volume")
+        if isinstance(vol, int) and 0 <= vol <= SOUND_VOLUME_MAX:
+            self._sound_volume = vol
         # Scales can only be applied once the fonts exist, so they're parked
         # here and used after the windows are built.
         saved = data.get("scales")
@@ -2549,6 +2750,9 @@ class Overlay:
                     for k, _label, _cats in COMPASS_FILTERS},
                 "mode": self.mode,
                 "hide_ooc": self._hide_ooc,
+                "sounds_on": bool(self._sounds_on),
+                "sound_volume": int(self._sound_volume),
+                "auto_reset_boss": bool(self._auto_reset_boss),
                 "scales": {g: round(self._scales[g], 3)
                            for g, _label in SCALE_GROUPS},
                 "show": {k: self._show.get(k, ELEMENT_SHOW)
@@ -2758,6 +2962,22 @@ class Overlay:
         # the refresh loop also touches, and _drain runs them on the Tk thread.
         section(left, "OPTIONS", first=True)
         self.btn_mode = button(left, self._enqueue(self._toggle_mode))
+        # Directly under the mode button: both are "what the meter does during
+        # a fight" rather than "how it looks".
+        self.btn_sounds = button(left, self._enqueue(self._toggle_sounds))
+        # Live rather than on release, unlike Transparency — this one costs a
+        # single MCI call, and hearing the level while you drag is the point.
+        row = field(left, "Volume")
+        self._volume_var = tk.IntVar(value=self._sound_volume)
+        scl_vol = tk.Scale(
+            row, from_=0, to=SOUND_VOLUME_MAX, resolution=5,
+            orient="horizontal", variable=self._volume_var, showvalue=True,
+            bg=BG_BODY, fg=FG_DIM, troughcolor=BG_BAR_TRACK,
+            activebackground=BTN_ON_BG, highlightthickness=0, bd=0,
+            sliderrelief="flat", font=self.fonts_m["ui_tiny_i"], length=120,
+            cursor="hand2")
+        scl_vol.bind("<ButtonRelease-1>", lambda _e: self._on_volume_pick())
+        scl_vol.pack(side="right", expand=True, fill="x", padx=(8, 0))
 
         row = field(left, "Theme")
         self._theme_var = tk.StringVar(value=self._theme_mode)
@@ -2888,6 +3108,12 @@ class Overlay:
         self.btn_bind.pack(side="right", expand=True, fill="x", padx=(8, 0))
         # True while the button is listening for a keypress.
         self._binding_now = False
+        # Under the reset binding because it IS a reset trigger, just an
+        # automatic one. Bosses only: an elite raises the same healthbar, and
+        # wiping the meter for every elite on the way to a boss would be
+        # useless — see the bossbar handler.
+        self.btn_auto_reset = button(right,
+                                     self._enqueue(self._toggle_auto_reset_boss))
 
         section(right, "COMPASS")
         self.btn_compass_filter = {}
@@ -4430,6 +4656,44 @@ class Overlay:
         self._save_settings()
         self._refresh_visibility()
 
+    def auto_reset_boss(self) -> bool:
+        """Read by the hook thread, so it stays a plain attribute read."""
+        return bool(self._auto_reset_boss)
+
+    def on_boss_pull(self):
+        """A boss (not an elite) raised its healthbar and the meter was reset.
+        Called from the hook thread — everything real happens on the Tk one."""
+        self._enqueue(lambda: self.sounds.play("pull"))()
+
+    def on_boss_kill(self):
+        """A boss died: its bar went down with its last health reading at 0."""
+        self._enqueue(lambda: self.sounds.play("victory"))()
+
+    def _toggle_sounds(self):
+        self._sounds_on = not self._sounds_on
+        self.sounds.set_enabled(self._sounds_on)
+        self._save_settings()
+        # Play the pull cue as confirmation when switching them ON, so the
+        # checkbox proves the audio path works instead of leaving you to pull a
+        # boss to find out. Nothing on the way off, for obvious reasons.
+        if self._sounds_on:
+            self.sounds.play("pull")
+
+    def _toggle_auto_reset_boss(self):
+        self._auto_reset_boss = not self._auto_reset_boss
+        self._save_settings()
+
+    def _on_volume_pick(self):
+        self._enqueue(lambda: self._set_volume(self._volume_var.get()))()
+
+    def _set_volume(self, pct):
+        pct = max(0, min(SOUND_VOLUME_MAX, int(pct)))
+        if pct == self._sound_volume:
+            return
+        self._sound_volume = pct
+        self.sounds.set_volume(pct)
+        self._save_settings()
+
     def _refresh_visibility(self):
         """Fade each element in/out from its own show/hide setting plus the two
         global rules: "hide out of combat", and hiding behind the game's own
@@ -4489,6 +4753,15 @@ class Overlay:
             # escape menu still brings it back, like every other hidden thing,
             # so the Show/hide tick can be seen to do something.
             if key == "rift" and self._rift_idle and not self._menu_unlock:
+                want = False
+            # The game puts its boss/elite healthbar across the top of the
+            # screen, which is exactly where the compass sits. Unconditional,
+            # like the rift rule above: the two are fighting for the same
+            # pixels, and during a boss pull the game's bar is the one you
+            # want. The escape menu still brings it back, so the compass is
+            # never unreachable while a long fight is running.
+            if key == "compass" and self.ui_state.boss_bar_up() \
+                    and not self._menu_unlock:
                 want = False
             changed |= self._want_visible(key, want)
         # ...and the control menu goes with everything else when you alt-tab.
@@ -4873,6 +5146,12 @@ class Overlay:
         self.btn_hide_ooc.config(
             text=("☑  Hide out of combat" if self._hide_ooc
                   else "☐  Hide out of combat"))
+        self.btn_sounds.config(
+            text=("☑  Enable sounds" if self._sounds_on
+                  else "☐  Enable sounds"))
+        self.btn_auto_reset.config(
+            text=("☑  Auto reset on boss pull" if self._auto_reset_boss
+                  else "☐  Auto reset on boss pull"))
         # Labelled with the action, but tinted by the *state*: green while
         # all-players is the live mode, so it's obvious at a glance that the
         # meter is showing more than the group. Switching either way calls
@@ -5270,15 +5549,15 @@ DATA_STAMP = ANALYSIS / ".data_stamp.json"
 # present, so the currency check passed; and sweepWorld's first line is
 # `if (!OFF.Entity || !OFF.ArrayObj) return`, which fails silently forever.
 # Add to these lists whenever the hook starts reading something new.
-REQUIRED_RESOLVER_KEYS = ("anchors", "cam_targets", "count_targets", "funcs",
-                          "ui_targets")
+REQUIRED_RESOLVER_KEYS = ("anchors", "boss_fns", "boss_targets", "cam_targets",
+                          "count_targets", "funcs", "ui_targets")
 # The minimap's half of the offsets. The combat half (DamageResult, HitData,
 # ...) is deliberately not listed: it has been there since the first release,
 # so it can't be what an upgrade is missing, and a list that mentions
 # everything is a list nobody maintains.
-REQUIRED_OFFSET_KEYS = ("Activity", "ArrayObj", "Camera", "Element", "Entity",
-                        "Foe", "GameLayer", "Hero", "Interactible", "State",
-                        "String", "Unit")
+REQUIRED_OFFSET_KEYS = ("Activity", "ArrayObj", "BossInfo", "BossesInfo",
+                        "Camera", "Element", "Entity", "Foe", "GameLayer",
+                        "Hero", "Interactible", "State", "String", "Unit")
 
 
 def _data_is_current():
@@ -5933,6 +6212,33 @@ def _run(tray, session, ui_state, world):
             # missing, these lines name the window that's holding it down.
             print(f"[meter] game window {name} {'open' if is_open else 'closed'}",
                   file=sys.stderr)
+        elif k == "bossbar":
+            # The game's own boss/elite healthbar went up or down. `n` drives
+            # the compass auto-hide; the up/down lists drive the boss-only
+            # rules, which is why the hook classifies each unit — an elite
+            # raises the same bar and must NOT reset the meter or play a cue.
+            ui_state.set_boss_bar(p.get("n") or 0)
+            ov = _OVERLAY["ref"]
+            for b in (p.get("up") or []):
+                if not b.get("boss"):
+                    continue
+                print(f"[meter] boss pulled: {b.get('kind')}", file=sys.stderr)
+                if ov is None or not ov.auto_reset_boss():
+                    continue
+                session.reset()
+                # Queued rather than called: this is the hook's thread, and
+                # both the reset banner and the cue belong to the Tk thread.
+                ov.on_boss_pull()
+            for b in (p.get("down") or []):
+                # `killed` is decided in the hook from the last health seen
+                # while the bar was up — a bar that drops because the player
+                # walked away and the boss reset is not a kill, and measured
+                # it is the common case.
+                if b.get("boss") and b.get("killed"):
+                    print(f"[meter] boss killed: {b.get('kind')}",
+                          file=sys.stderr)
+                    if ov is not None:
+                        ov.on_boss_kill()
         elif k == "zone":
             ui_state.clear()      # the UI is rebuilt across a loading screen
             session.reset()
@@ -6079,6 +6385,10 @@ def _run(tray, session, ui_state, world):
         overlay.run()
     finally:
         _OVERLAY["ref"] = None
+        try:
+            overlay.sounds.close()      # release the MCI devices we opened
+        except Exception:
+            pass
         try:
             script.unload()
             fsession.detach()

@@ -102,6 +102,22 @@ ui_targets = {nm: fi for fi, nm in names.items() if nm in UI_TARGETS}
 CAM_TARGETS = ["client.BaseCamera.postUpdate"]
 cam_targets = {nm: fi for fi, nm in names.items() if nm in CAM_TARGETS}
 
+# ---- the boss / elite healthbar ----
+# ui.hud.BossesInfo.fetchBosses is the game's own boss-bar refresh and `this` is
+# the BossesInfo holding the live bar list, so hooking it gives a persistent
+# pointer AND a natural tick. Measured at a steady 2/s — it's a timer, not a
+# per-frame call, which is why the hook body can afford to walk the array.
+BOSS_TARGETS = ["ui.hud.BossesInfo.fetchBosses"]
+boss_targets = {nm: fi for fi, nm in names.items() if nm in BOSS_TARGETS}
+
+# A bar goes up for ELITES as well as bosses (measured: "Krabby Jacob", a plain
+# ent.Foe, raised one), so the bar alone can't drive a boss-only rule. These two
+# predicates are what separate them. Both are (ent.Unit)->bool and safe to call
+# on the game thread. ent.Foe.shouldShowBossInfo is deliberately NOT here: it
+# throws when called with only `this`.
+BOSS_FNS = ["ent.Unit.isBoss", "ent.Unit.isElite"]
+boss_fns = {nm: fi for fi, nm in names.items() if nm in BOSS_FNS}
+
 payload = {
     "nfunctions": code.counts["nfunctions"],
     "nnatives": code.counts["nnatives"],
@@ -110,6 +126,8 @@ payload = {
     "count_targets": count_targets,
     "ui_targets": ui_targets,
     "cam_targets": cam_targets,
+    "boss_targets": boss_targets,
+    "boss_fns": boss_fns,
     "funcs": funcs,
     "map_fn": map_fn,
 }
@@ -122,6 +140,9 @@ for nm in UI_TARGETS:
 for nm in CAM_TARGETS:
     if nm not in cam_targets:
         print(f"    [!] camera target not found in this build: {nm}")
+for nm in BOSS_TARGETS + BOSS_FNS:
+    if nm not in boss_targets and nm not in boss_fns:
+        print(f"    [!] boss target not found in this build: {nm}")
 for nm, fi in sorted(candidates.items()):
     print(f"    {nm:<45} findex={fi}")
 print(f"[written] {OUT / 'resolver_data.json'}")

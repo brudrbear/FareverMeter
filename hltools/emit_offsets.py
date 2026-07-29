@@ -53,6 +53,8 @@ def main():
     unit = offs("ent.Unit")
     elem = offs("ent.Element")
     cam = offs("client.BaseCamera")
+    bosses = offs("ui.hud.BossesInfo")
+    bossinfo = offs("ui.hud.BossInfo")
 
     # skill display-name chain: BaseSkill.inf (virtual #963) -> texts (#973) -> name
     row = code.types[963]
@@ -120,7 +122,12 @@ def main():
         # only reliable way to tell them apart — they're the same class.
         # `kind` is the internal id ("Crimson_Z2W_Sword"); `inf` is the CDB row
         # it came from, whose texts.name is the display name on the nameplate.
-        "Unit": {"kind": unit["kind"][0], "inf": unit["inf"][0]},
+        "Unit": {"kind": unit["kind"][0], "inf": unit["inf"][0],
+                 # attr.health is what the boss bar is actually reading. NOTE:
+                 # UnitAttributes.maxHealth reads 0 for the whole of a boss
+                 # fight (measured), so health is only good for "did it die",
+                 # never for a percentage.
+                 "attr": unit["attr"][0]},
         "Foe": {"summonOwner": foe["summonOwner"][0],
                 "persistantSummon": foe["persistantSummon"][0]},
         # hl.types.ArrayObj: length, then a pointer to an hl_varray whose
@@ -141,6 +148,14 @@ def main():
         "Player": {"name": player["name"][0], "group": player["group"][0],
                    "isMe": player["isMe"][0], "lobbyId": player["lobbyId"][0]},
         "Group": {"groupId": group["groupId"][0], "players": group["players"][0]},
+        # The game's boss/elite healthbar. `bossInfos` is NOT a fixed pool —
+        # measured lengths were only ever 0 (no bar) or 1 (bar up), so its
+        # length alone says whether a bar is on screen. Each entry's `active`
+        # is the per-slot gate; UIElement.visible tracks it but diverged on a
+        # couple of samples at transitions, so `active` is the one to read.
+        "BossesInfo": {"bossInfos": bosses["bossInfos"][0]},
+        "BossInfo": {"active": bossinfo["active"][0],
+                     "unit": bossinfo["unit"][0]},
         # HL virtual field indices for the skill display name
         "SkillRow": {"id_vidx": vidx(row, "id"), "texts_vidx": vidx(row, "texts")},
         "Texts": {"name_vidx": vidx(texts, "name"), "desc_vidx": vidx(texts, "desc")},
