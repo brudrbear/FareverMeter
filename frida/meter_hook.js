@@ -775,6 +775,19 @@ function main() {
     // timer is cheaper than it looks. The host resets this from the Refresh
     // setting as soon as it connects.
     hookCamera(base);
+    // Say so if the sweep can't run. sweepWorld bails on its first line when
+    // an offset it needs is absent, and it does that inside a try/catch on a
+    // timer — so without this the minimap simply stays on "waiting for the
+    // game" with nothing anywhere explaining why. That shipped once: an
+    // upgrade left offsets in %LOCALAPPDATA% that predated the minimap, and
+    // the only clue was a camera warning about something else.
+    const NEED = ["Entity", "ArrayObj", "GameLayer", "Element", "Interactible",
+                  "State", "Unit", "Foe", "Hero"];
+    const absent = NEED.filter(function (k) { return !OFF[k]; });
+    if (absent.length)
+        log("!! minimap offsets missing (" + absent.join(", ") +
+            ") — the map will stay empty. The offsets file is older than this " +
+            "build; delete analysis_out and restart to regenerate it.");
     setWorldTick(worldTickMs);
 
     // Host -> agent config. re-armed after each message, which is how frida's
