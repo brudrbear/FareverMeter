@@ -1021,17 +1021,36 @@ def _fetch_json(url):
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
+def _release_installer_asset(rel):
+    """(download_url, size) of the release's Setup.exe, or (None, 0).
+
+    Matched on the name the build script writes rather than "first asset":
+    a release can grow extra attachments (notes, checksums) without the
+    updater downloading one of those instead."""
+    for a in rel.get("assets") or []:
+        name = (a.get("name") or "")
+        if name.startswith("FareverMeter-") and name.endswith("-Setup.exe") \
+                and a.get("browser_download_url"):
+            return a["browser_download_url"], int(a.get("size") or 0)
+    return None, 0
+
+
 def _latest_version():
-    """The newest published version as (tuple, name, url), or None.
+    """The newest published version as (tuple, name, url, asset_url,
+    asset_size), or None.
 
     Releases first, tags as the fallback: the repo has so far shipped tags
     without a Release object behind them, and /releases/latest answers 404 in
-    that state — so tags-only has to work or the check never fires."""
+    that state — so tags-only has to work or the check never fires. Only a
+    real Release carries an installer asset; the tag fallback leaves it None,
+    which is what sends the notice down the open-the-browser path."""
     try:
         rel = _fetch_json(UPDATE_API_RELEASE)
         v = _version_tuple(rel.get("tag_name"))
         if v:
-            return v, rel.get("tag_name"), rel.get("html_url") or REPO_URL
+            asset_url, asset_size = _release_installer_asset(rel)
+            return (v, rel.get("tag_name"), rel.get("html_url") or REPO_URL,
+                    asset_url, asset_size)
     except Exception:
         pass            # no published release yet — normal, fall through
     try:
@@ -1045,7 +1064,7 @@ def _latest_version():
         # The tag list is not ordered by version, so this takes the highest
         # rather than trusting the first entry.
         if v and (best is None or v > best[0]):
-            best = (v, t.get("name"), f"{REPO_URL}/releases")
+            best = (v, t.get("name"), f"{REPO_URL}/releases", None, 0)
     return best
 
 
@@ -1065,15 +1084,112 @@ def check_for_update():
         found = _latest_version()
         if not found or mine is None:
             return
-        v, name, url = found
+        v, name, url, asset_url, asset_size = found
         if v > mine:
+            # "latest" last: the overlay's tick treats it as the ready flag,
+            # and the asset fields have to be in place before it fires.
+            UPDATE["asset"], UPDATE["asset_size"] = asset_url, asset_size
             UPDATE["latest"], UPDATE["url"] = name, url
-            print(f"[update] {name} is available (running {VERSION}) — {url}",
+            print(f"[update] {name} is available (running {VERSION}) — {url}"
+                  + ("" if asset_url else " (no installer asset — notice will "
+                     "open the browser instead of self-updating)"),
                   file=sys.stderr)
         else:
             print(f"[update] up to date (running {VERSION}).", file=sys.stderr)
 
     threading.Thread(target=work, daemon=True, name="update-check").start()
+
+
+# The half of the self-update that has to outlive the meter. A running exe
+# can't be overwritten on Windows, so the meter's part ends at "installer
+# downloaded" — this script waits for the process to be fully gone, runs the
+# installer silently (Inno shows its own small progress window), and starts
+# the new build. PowerShell 5.1 syntax only: it runs on user machines, and
+# Windows ships nothing newer.
+UPDATER_PS1 = r'''param(
+    [Parameter(Mandatory=$true)][int]$MeterPid,
+    [Parameter(Mandatory=$true)][string]$Installer,
+    [Parameter(Mandatory=$true)][string]$ExePath
+)
+$log = Join-Path (Split-Path -Parent $Installer) 'updater.log'
+function Say([string]$m) {
+    $line = ('[{0}] {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m)
+    try { Add-Content -Path $log -Value $line -Encoding utf8 } catch {}
+}
+function Fail([string]$m) {
+    Say ('FAILED: ' + $m)
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        [void][System.Windows.Forms.MessageBox]::Show(
+            $m + [Environment]::NewLine + [Environment]::NewLine +
+            'The downloaded installer was left at:' + [Environment]::NewLine +
+            $Installer + [Environment]::NewLine + [Environment]::NewLine +
+            'Run it yourself to finish the update.',
+            'Farever+ Meter - update failed',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning)
+    } catch {}
+    exit 1
+}
+
+try {
+    Say ('waiting for meter pid ' + $MeterPid + ' to exit')
+    $deadline = (Get-Date).AddSeconds(120)
+    while ($true) {
+        $p = Get-Process -Id $MeterPid -ErrorAction SilentlyContinue
+        if ($null -eq $p) { break }
+        if ((Get-Date) -gt $deadline) {
+            Fail 'The old meter never exited, so the update was not installed.'
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    # The pid can vanish a beat before its file locks do.
+    Start-Sleep -Milliseconds 500
+
+    Say ('running installer: ' + $Installer)
+    $proc = Start-Process -FilePath $Installer -PassThru -Wait `
+        -ArgumentList @('/SP-', '/SILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
+    if ($proc.ExitCode -ne 0) {
+        Fail ('The installer exited with code ' + $proc.ExitCode + '.')
+    }
+
+    if (-not (Test-Path $ExePath)) {
+        Fail ('The updated meter was not found at ' + $ExePath + '.')
+    }
+    Say ('relaunching: ' + $ExePath)
+    Start-Process -FilePath $ExePath `
+        -WorkingDirectory (Split-Path -Parent $ExePath)
+    Remove-Item -Path $Installer -Force -ErrorAction SilentlyContinue
+    Say 'done'
+} catch {
+    Fail $_.Exception.Message
+}
+'''
+
+
+def spawn_update_helper(installer: Path):
+    """Start the detached helper that finishes the update once we've exited.
+
+    Called with the installer already downloaded, immediately before the
+    meter quits. Detached (no console, its own process group) so it survives
+    the parent; hidden because the installer's own progress window is the
+    visible part. Raises on failure — the caller falls back to the browser."""
+    import subprocess
+    ps1 = UPDATE_DIR / "updater.ps1"
+    # utf-8-sig: without the BOM, PowerShell 5.1 reads a .ps1 as ANSI.
+    ps1.write_text(UPDATER_PS1, encoding="utf-8-sig")
+    powershell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / \
+        "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    CREATE_NO_WINDOW, CREATE_NEW_PROCESS_GROUP = 0x08000000, 0x00000200
+    subprocess.Popen(
+        [str(powershell), "-NoProfile", "-ExecutionPolicy", "Bypass",
+         "-WindowStyle", "Hidden", "-File", str(ps1),
+         "-MeterPid", str(os.getpid()),
+         "-Installer", str(installer),
+         "-ExePath", sys.executable],
+        creationflags=CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, close_fds=True, cwd=str(UPDATE_DIR))
 
 
 def _contrast_ink(bg, dark=MINIMAP_Z_MARK_DARK, light=MINIMAP_Z_MARK_LIGHT):
@@ -1741,7 +1857,18 @@ UPDATE_API_RELEASE = f"https://api.github.com/repos/{REPO}/releases/latest"
 UPDATE_API_TAGS = f"https://api.github.com/repos/{REPO}/tags"
 UPDATE_TIMEOUT = 5.0
 # Filled in by the checker thread, read by the overlay's refresh tick.
-UPDATE = {"latest": None, "url": REPO_URL}
+# `asset` is the Setup.exe download URL when the release has one — that's what
+# lets the notice self-update instead of just opening the browser.
+UPDATE = {"latest": None, "url": REPO_URL, "asset": None, "asset_size": 0}
+
+# The self-updater's working directory: the downloaded installer and the
+# helper script that runs it after the meter exits. Under DATA_HOME so an
+# update never needs to write into the install directory it's replacing.
+UPDATE_DIR = DATA_HOME / "updates"
+
+# True in the shipped build (PyInstaller sets it). Only that build can
+# self-update: a from-source run has no installed copy to replace.
+IS_FROZEN = bool(getattr(sys, "frozen", False))
 
 QUIT_LABEL = "Stop the meter"
 
@@ -2417,6 +2544,11 @@ class Overlay:
         self._q_lock = threading.Lock()
         self._quit_armed = False       # the Quit button's second-click window
         self._update_shown = False     # the update notice is applied once
+        self._update_armed = False     # the notice's second-click window
+        self._updating = False         # self-update running: overlay hidden
+        self._dl = None                # download progress, written off-thread
+        self._updwin = None            # the "Updating ..." progress window
+        self._game_exit_win = None     # the "Farever has stopped" prompt
         self._map_mode = MINIMAP_MODES[0]   # "Rotating" — you always face up
         self._transparency = 0              # percent, on top of OVERLAY_ALPHA
         # Per-category ticks for each panel; everything on until told otherwise.
@@ -4572,11 +4704,19 @@ class Overlay:
         if self._update_shown or not UPDATE["latest"]:
             return
         self._update_shown = True
+        # With an installer asset the notice does the whole job in place; a
+        # tags-only release (or a from-source run, which has no installed
+        # copy to replace) keeps the old open-the-browser behaviour.
+        tail = ("Click here to update now." if self._can_self_update()
+                else "Click here to download it.")
         self.warn_lbl.config(
             text=f"Farever+ {UPDATE['latest']} is available — you're running "
-                 f"{VERSION}.  Click here to download it.",
+                 f"{VERSION}.  {tail}",
             fg=FG_WARN, cursor="hand2")
-        self.warn_lbl.bind("<Button-1>", lambda _e: self._open_update())
+        self.warn_lbl.bind("<Button-1>", lambda _e: self._on_update_click())
+
+    def _can_self_update(self):
+        return IS_FROZEN and bool(UPDATE["asset"])
 
     def _open_update(self):
         import webbrowser
@@ -4585,6 +4725,224 @@ class Overlay:
         except Exception as e:
             print(f"[update] couldn't open {UPDATE['url']}: {e}",
                   file=sys.stderr)
+
+    def _on_update_click(self):
+        if self._updating:
+            return
+        if not self._can_self_update():
+            self._open_update()
+            return
+        # Same two-click rule as the Quit button, for the same reason: this
+        # ends the meter (to restart it), and the line sits in a menu full of
+        # things people click casually.
+        if not self._update_armed:
+            self._update_armed = True
+            self.warn_lbl.config(
+                text=f"Click again to update to Farever+ {UPDATE['latest']} — "
+                     "the meter will install it and restart itself.")
+            self.root.after(5000, self._disarm_update)
+            return
+        self._update_armed = False
+        self._start_self_update()
+
+    def _disarm_update(self):
+        if not self._update_armed:
+            return
+        self._update_armed = False
+        try:
+            # Re-applying the notice is what restores its normal text.
+            self._update_shown = False
+            self._apply_update_notice()
+        except tk.TclError:
+            pass        # the menu went away while the timer was pending
+
+    def _start_self_update(self):
+        """Download the new installer behind a small progress window, then
+        hand off to the helper and exit.
+
+        The meter's own part deliberately ends at "downloaded": a running exe
+        can't be overwritten, so installing has to happen after this process
+        is gone. spawn_update_helper's script waits for exactly that, runs
+        the installer silently, and starts the new build."""
+        print(f"[update] self-update to {UPDATE['latest']} started.",
+              file=sys.stderr)
+        self._updating = True
+        self._refresh_visibility()          # the whole overlay steps aside
+        self._build_update_window()
+        dest = UPDATE_DIR / f"FareverMeter-{UPDATE['latest']}-Setup.exe"
+        self._dl = dl = {"done": 0, "total": int(UPDATE["asset_size"] or 0),
+                         "err": None, "path": dest, "complete": False}
+        url = UPDATE["asset"]
+
+        def work():
+            import urllib.request
+            tmp = dest.with_suffix(".part")
+            try:
+                UPDATE_DIR.mkdir(parents=True, exist_ok=True)
+                req = urllib.request.Request(url, headers={
+                    "User-Agent": f"FareverMeter/{VERSION}"})
+                with urllib.request.urlopen(req, timeout=30.0) as r:
+                    total = int(r.headers.get("Content-Length") or 0)
+                    if total:
+                        dl["total"] = total
+                    with open(tmp, "wb") as f:
+                        while True:
+                            chunk = r.read(256 * 1024)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            dl["done"] += len(chunk)
+                # A short download would hand the helper a broken installer;
+                # better to find out here, where the browser fallback exists.
+                expect = int(UPDATE["asset_size"] or 0)
+                if expect and dl["done"] != expect:
+                    raise OSError(f"download truncated ({dl['done']} of "
+                                  f"{expect} bytes)")
+                os.replace(tmp, dest)
+                dl["complete"] = True
+            except Exception as e:
+                dl["err"] = str(e)
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+
+        threading.Thread(target=work, daemon=True,
+                         name="update-download").start()
+        self._update_dl_tick()
+
+    def _build_update_window(self):
+        """A small centred panel of its own — every overlay window is hidden
+        while the update runs, so this one belongs to none of their rules."""
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        outer = tk.Frame(win, bg=BG_BORDER, padx=2, pady=2)
+        outer.pack(fill="both", expand=True)
+        body = tk.Frame(outer, bg=BG_BODY, padx=18, pady=14)
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text=f"Updating Farever+ to {UPDATE['latest']}",
+                 bg=BG_BODY, fg=FG_VALUE,
+                 font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        self._upd_lbl = tk.Label(body, text="Starting download ...",
+                                 bg=BG_BODY, fg=FG_TEXT, justify="left",
+                                 font=("Segoe UI", 9))
+        self._upd_lbl.pack(anchor="w", pady=(6, 8))
+        self._upd_bar = tk.Canvas(body, width=320, height=10,
+                                  bg=BG_BAR_TRACK, highlightthickness=0)
+        self._upd_bar.pack(fill="x")
+        self._upd_fill = self._upd_bar.create_rectangle(
+            0, 0, 0, 12, fill=BG_HEADER, width=0)
+        win.update_idletasks()
+        win.geometry(f"+{(win.winfo_screenwidth() - win.winfo_width()) // 2}"
+                     f"+{(win.winfo_screenheight() - win.winfo_height()) // 3}")
+        self._updwin = win
+
+    def _update_dl_tick(self):
+        dl = self._dl
+        if dl is None or self._updwin is None:
+            return
+        if dl["err"] is not None:
+            self._update_failed(dl["err"])
+            return
+        if dl["complete"]:
+            self._upd_lbl.config(
+                text="Download complete — installing and restarting ...")
+            self.root.update_idletasks()
+            try:
+                spawn_update_helper(dl["path"])
+            except Exception as e:
+                self._update_failed(f"couldn't start the update helper: {e}")
+                return
+            print("[update] installer downloaded — handing off to the helper "
+                  "and exiting.", file=sys.stderr)
+            self._quit()
+            return
+        done, total = dl["done"], dl["total"]
+        if total:
+            w = int(self._upd_bar.winfo_width() * min(1.0, done / total))
+            self._upd_bar.coords(self._upd_fill, 0, 0, w, 12)
+            self._upd_lbl.config(text=f"Downloading ... {done / 1048576:.1f} "
+                                      f"of {total / 1048576:.1f} MB")
+        else:
+            self._upd_lbl.config(text=f"Downloading ... "
+                                      f"{done / 1048576:.1f} MB")
+        self.root.after(100, self._update_dl_tick)
+
+    def _update_failed(self, why):
+        """Put the overlay back and point the notice at the manual path. The
+        browser is NOT opened here — the common failure is being offline,
+        where a browser tab helps nobody."""
+        print(f"[update] self-update failed: {why}", file=sys.stderr)
+        if self._updwin is not None:
+            self._updwin.destroy()
+            self._updwin = None
+        self._dl = None
+        self._updating = False
+        self._refresh_visibility()
+        self.warn_lbl.config(
+            text=f"The automatic update didn't work ({why}) — click here to "
+                 "get it from the releases page instead.")
+        self.warn_lbl.bind("<Button-1>", lambda _e: self._open_update())
+
+    def on_game_exit(self, reason=""):
+        """The game process went away. Safe from any thread — the frida
+        detached signal arrives on frida's own. The overlay has already
+        vanished on its own (a dead game can't hold the foreground, and the
+        focus rule hides everything), so the prompt is the one thing left on
+        screen to say what happened."""
+        self._enqueue(lambda: self._show_game_exit_prompt(reason))()
+
+    def _show_game_exit_prompt(self, reason=""):
+        if self._game_exit_win is not None:
+            return
+        if self._updating:
+            # Mid self-update the meter is about to exit and restart anyway;
+            # a second dialog about the game would only compete with it.
+            return
+        win = tk.Toplevel(self.root)
+        win.title("Farever+ Meter")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        body = tk.Frame(win, bg=BG_BODY, padx=16, pady=14)
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="Farever has stopped.",
+                 bg=BG_BODY, fg=FG_VALUE,
+                 font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        tk.Label(body,
+                 text="The game has closed, so the meter has nothing left to "
+                      "read.\nWould you like to exit the meter?",
+                 bg=BG_BODY, fg=FG_TEXT, justify="left",
+                 font=("Segoe UI", 9)).pack(anchor="w", pady=(6, 12))
+        row = tk.Frame(body, bg=BG_BODY)
+        row.pack(fill="x")
+
+        def close(quit_now):
+            self._game_exit_win = None
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+            if quit_now:
+                self._quit()
+
+        # No second-click arming here, unlike the Quit button: with the game
+        # gone there is no encounter left for a misclick to destroy.
+        tk.Button(row, text="Exit the meter", command=lambda: close(True),
+                  bg=FG_WARN, fg=FG_HEADER, activebackground=FG_WARN,
+                  activeforeground=FG_HEADER, relief="flat", bd=0,
+                  padx=12, pady=6, cursor="hand2",
+                  font=("Segoe UI", 9, "bold")).pack(side="left")
+        tk.Button(row, text="Keep it running", command=lambda: close(False),
+                  bg=BG_BODY_SOFT, fg=FG_TEXT, activebackground=BG_BAR_TRACK,
+                  activeforeground=FG_VALUE, relief="flat", bd=0,
+                  padx=12, pady=6, cursor="hand2",
+                  font=("Segoe UI", 9)).pack(side="left", padx=(8, 0))
+        win.protocol("WM_DELETE_WINDOW", lambda: close(False))
+        win.update_idletasks()
+        win.geometry(f"+{(win.winfo_screenwidth() - win.winfo_width()) // 2}"
+                     f"+{(win.winfo_screenheight() - win.winfo_height()) // 3}")
+        self._game_exit_win = win
 
     def request_quit(self):
         """Stop the meter, safely callable from any thread — the tray icon runs
@@ -4818,7 +5176,10 @@ class Overlay:
         # your browser — and worse, one you can't click past while the cursor
         # is free. The tray icon stays, which is how you'd stop the meter from
         # out here anyway.
-        blanket = menu_hidden or self._prompt_open or not self._focused
+        # ...and while the self-update runs, everything yields to its progress
+        # window — the overlay is about to be replaced, not consulted.
+        blanket = (menu_hidden or self._prompt_open or not self._focused
+                   or self._updating)
         changed = False
         for key in self._element_win:
             hidden = blanket or (ooc_hidden and key not in OOC_EXEMPT)
@@ -4860,7 +5221,8 @@ class Overlay:
         # the meter's own settings panel, or the one window left on screen is
         # the one you were trying to get out of the way.
         menu_visible = (self._menu_unlock and not self._prompt_open
-                        and self._focused and not menu_hidden)
+                        and self._focused and not menu_hidden
+                        and not self._updating)
         # Whatever route the menu leaves by — Esc, alt-tab, the game opening
         # something over it — its dropdowns leave with it.
         if not menu_visible:
@@ -6288,12 +6650,26 @@ def _run(tray, session, ui_state, world):
         sys.exit("[!] permission denied attaching — if Farever runs as "
                  "administrator, run the meter from an elevated terminal too.")
 
+    def on_detached(*args):
+        """The frida session died — in practice, the game closed or crashed.
+        Fires on frida's own thread. On a normal quit this fires too (we're
+        the ones detaching), but by then the finally below has already cleared
+        _OVERLAY, which is what keeps the prompt out of that path."""
+        reason = str(args[0]) if args else ""
+        print(f"[meter] game session detached ({reason or 'unknown'}).",
+              file=sys.stderr)
+        ov = _OVERLAY["ref"]
+        if ov is not None:
+            ov.on_game_exit(reason)
+    fsession.on("detached", on_detached)
+
     ready = {"ok": None}
     ready_evt = threading.Event()
     liveness = {"t": time.monotonic(), "printed": 0.0}
     hero_id = {"name": None}           # last local hero, to keep the log quiet
     nullified: dict = {}               # mitigated-hit shapes seen, see below
     nullified_at = [0.0]               # last time they were reported
+    pull_reset_spent = [False]         # one auto-reset per instance, see below
 
     def on_message(message, data):
         liveness["t"] = time.monotonic()   # any agent traffic counts as alive
@@ -6364,6 +6740,18 @@ def _run(tray, session, ui_state, world):
                 print(f"[meter] boss pulled: {b.get('kind')}", file=sys.stderr)
                 if ov is None or not ov.auto_reset_boss():
                     continue
+                # One auto-reset per instance. Some bosses spawn copies of
+                # themselves mid-fight, and every copy walks through bossInfos
+                # exactly like the original — without this latch each spawn
+                # wiped the meter again in the middle of the very fight the
+                # reset was meant to isolate. Re-armed by the zone handler
+                # below, i.e. by the next loading screen.
+                if pull_reset_spent[0]:
+                    print("[meter] boss bar raised again in the same instance "
+                          "— auto reset already spent, keeping the parse.",
+                          file=sys.stderr)
+                    continue
+                pull_reset_spent[0] = True
                 # Not a plain reset: the bar is refreshed on a timer, so this
                 # arrives after the opening burst has already landed. Carry the
                 # last few seconds forward or the reset eats it.
@@ -6387,6 +6775,7 @@ def _run(tray, session, ui_state, world):
         elif k == "zone":
             ui_state.clear()      # the UI is rebuilt across a loading screen
             session.reset()
+            pull_reset_spent[0] = False   # fresh instance, fresh auto-reset
             print(f"[meter] zone change ({p.get('sig')!r}) — meter reset",
                   file=sys.stderr)
         elif k == "hero":

@@ -103,6 +103,11 @@ Two ways, and both shut down cleanly:
   Farever+ control menu (it wants a second click to confirm, so a misclick
   mid-fight doesn't end your session).
 
+**Closing Farever itself** hides the overlay and pops a small window asking
+whether to exit the meter too — one click there and you're done. "Keep it
+running" leaves it in the tray instead (note it can't reconnect to a relaunched
+game; start a fresh meter for that).
+
 > ### 🔎 Windows 11 hides new tray icons
 >
 > First run, click the **`^`** arrow by the clock and **drag the Farever+ icon
@@ -138,8 +143,15 @@ it is kept as `meter.log.1`.
 ### Updating
 
 On startup the meter asks GitHub whether there's a newer version. If there is,
-the top of the control menu (`Esc` in game) turns into a notice you can click to
-open the download page. Nothing installs itself; it just tells you.
+the top of the control menu (`Esc` in game) turns into a notice. Click it (and
+once more to confirm) and the meter updates itself: the overlay steps aside
+while a small window downloads the new installer, then the meter closes,
+installs the update and starts again as the new version. Your settings and
+window positions survive — the installer never touches them.
+
+Nothing downloads or installs until you click. If the automatic route isn't
+available (offline, or a run from source), the notice opens the releases page
+in your browser instead, like it always did.
 
 It's one request to `api.github.com` at launch and nothing is sent about you.
 Set the environment variable `FAREVER_NO_UPDATE_CHECK=1` to turn it off.
