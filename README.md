@@ -85,9 +85,9 @@ Rich Presence all keep working** — which they don't in the recipes that leave
 
 Two things to know:
 
-* **The meter doesn't close when the game does.** Nothing in it watches for
-  Farever exiting, so the overlay stays on screen with the last numbers. Stop it
-  from the tray icon when you're finished.
+* **When the game closes, the meter notices.** The overlay disappears and a
+  small window asks whether to exit the meter too — one click and both are
+  gone, so the pair behaves like a single program.
 * **Launching Farever outside Steam** — from a desktop shortcut, say — skips the
   launch options entirely, so start the meter yourself that time.
 
