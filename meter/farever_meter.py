@@ -50,7 +50,7 @@ import time
 import tkinter as tk
 from ctypes import wintypes
 from tkinter import font as tkfont
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -123,6 +123,38 @@ CLAIM_MUTEX = "Local\\FareverMeterClaim"
 CLAIM_WAIT_MS = 30000       # comfortably longer than a full QUIT_WAIT_SECS wait
 
 COMBAT_TIMEOUT_SECS = 25.0
+# Hits the game reports a full `_amount` for but the target never takes.
+#
+# st.skill.DamageResult.blocker carries a _Data.$GameBeatKind_Impl_ name:
+# AttackBlock, DamageDodge, Backstabbed, Critical, InvulnerableHit,
+# BlockWellTimed, Missed. Measured against Ratsar's immune phase — 33 hits
+# reported with blocker='InvulnerableHit', amount > 0 and _block == 0, every
+# one of them counted by the meter and none of them touching his health.
+#
+# Only InvulnerableHit is listed, because only InvulnerableHit was measured.
+# Missed and DamageDodge read like they belong here too, but a blocker that
+# turns out to still deal damage would mean silently DROPPING real hits, which
+# is a worse and far less visible bug than counting fake ones. Everything not
+# listed is still reported by the mitigated-hit log, so adding one later is a
+# one-line change backed by the same evidence this one was.
+NULLIFIED_BLOCKERS = frozenset({"InvulnerableHit"})
+# How much damage a boss-pull reset keeps rather than wiping.
+#
+# The reset is driven by the game's boss healthbar, and that bar is refreshed on
+# a 2/s timer — so up to half a second passes between the pull landing and the
+# meter hearing about it, plus however long the engagement takes to register at
+# all. A player opening on a boss dumps their whole burst into that gap, and a
+# plain reset throws exactly the numbers they wanted away.
+#
+# So the reset rewinds instead: damage newer than this is replayed into the
+# fresh encounter with its original timestamps. Long enough to cover an opening
+# burst and the detection lag, short enough not to drag in the trash pack you
+# finished on the way over.
+BOSS_PULL_BACKLAG_SECS = 4.0
+# Rolling event buffer backing that rewind. Bounded by count as well as age so a
+# big party in a busy fight can't grow it without limit — at ~4s of backlag this
+# is far more headroom than the window can use.
+RECENT_EVENT_MAX = 2048
 REFRESH_MS = 250
 MAX_PLAYER_ROWS = 8
 MAX_SKILL_ROWS = 8
@@ -1128,6 +1160,11 @@ class PartySession:
         self.epoch = 0          # bumped on explicit/zone reset (UI watches it)
         self.capture_until = None   # parse mode's hard cutoff (None = no limit)
         self.capture_start = None   # ...and when that window opened
+        # (timestamp, "hit"|"heal", event) for the last few seconds, so a
+        # boss-pull reset can rewind instead of wiping. Only what was actually
+        # recorded goes in here — anything the capture window rejected was never
+        # part of the encounter and must not reappear.
+        self._recent: deque = deque(maxlen=RECENT_EVENT_MAX)
 
     def set_capture_window(self, seconds):
         """Parse mode: take data for exactly `seconds` from now, then stop.
@@ -1194,6 +1231,7 @@ class PartySession:
             if self.enc_start == 0.0:
                 self.enc_start = now
             self.last_hit = now
+            self._recent.append((now, "hit", ev))
             p = self._player_for(ev)
             p.record(self._skill_of(ev), ev.get("element", "?"),
                      float(ev.get("amount", 0.0)), int(ev.get("crit", 0)),
@@ -1204,8 +1242,10 @@ class PartySession:
         # out-of-combat potion/regen must not roll the meter into a fresh
         # encounter (damage does that), so last_hit stays untouched.
         with self.lock:
-            if not self._capturing(time.time()):
+            now = time.time()
+            if not self._capturing(now):
                 return
+            self._recent.append((now, "heal", ev))
             p = self._player_for(ev)
             p.record_heal(self._skill_of(ev),
                           float(ev.get("amount", 0.0)), int(ev.get("crit", 0)))
@@ -1236,7 +1276,53 @@ class PartySession:
             self.in_combat = False
             # A reset always returns to live capture — and so to in-combat DPS.
             self.capture_until = self.capture_start = None
+            self._recent.clear()
             self.epoch += 1
+
+    def reset_keeping_recent(self, backlag=BOSS_PULL_BACKLAG_SECS):
+        """Reset the encounter but carry the last `backlag` seconds forward.
+
+        For the boss-pull reset. The healthbar the pull is detected from lags
+        the pull itself, so a plain reset lands *after* the opening burst and
+        deletes it — the single most interesting part of the parse. Replaying
+        the buffered events with their ORIGINAL timestamps keeps the numbers,
+        the per-player first/last times and the encounter start honest, rather
+        than restamping everything to the moment the bar appeared and reporting
+        a burst that took four seconds as instantaneous.
+
+        Returns how many events were carried over, for the log."""
+        with self.lock:
+            now = time.time()
+            cutoff = now - backlag
+            keep = [e for e in self._recent if e[0] >= cutoff]
+            self._reset(now)
+            self.last_hit = 0.0
+            self.in_combat = False
+            self.capture_until = self.capture_start = None
+            self._recent.clear()
+            self.epoch += 1
+            for ts, kind, ev in keep:
+                self._recent.append((ts, kind, ev))
+                p = self._player_for(ev)
+                if kind == "hit":
+                    if self.enc_start == 0.0:
+                        self.enc_start = ts
+                    self.last_hit = ts
+                    p.record(self._skill_of(ev), ev.get("element", "?"),
+                             float(ev.get("amount", 0.0)),
+                             int(ev.get("crit", 0)), int(ev.get("kill", 0)), ts)
+                else:
+                    p.record_heal(self._skill_of(ev),
+                                  float(ev.get("amount", 0.0)),
+                                  int(ev.get("crit", 0)))
+            # Damage was landing, so the player was in combat for the whole
+            # replayed stretch. Without this the duration clock would only start
+            # at the next UI tick and those seconds would be missing from the
+            # divisor — inflating the DPS of the very burst we just rescued.
+            if self.enc_start:
+                self.active_since = self.enc_start
+                self.in_combat = True
+            return len(keep)
 
     def _duration(self, now):
         d = self.active_accum
@@ -5552,12 +5638,20 @@ DATA_STAMP = ANALYSIS / ".data_stamp.json"
 REQUIRED_RESOLVER_KEYS = ("anchors", "boss_fns", "boss_targets", "cam_targets",
                           "count_targets", "funcs", "ui_targets")
 # The minimap's half of the offsets. The combat half (DamageResult, HitData,
-# ...) is deliberately not listed: it has been there since the first release,
-# so it can't be what an upgrade is missing, and a list that mentions
+# ...) is deliberately not listed wholesale: it has been there since the first
+# release, so it can't be what an upgrade is missing, and a list that mentions
 # everything is a list nobody maintains.
+#
+# "Key.subkey" entries check INSIDE a group. DamageResult has existed forever,
+# so its presence proves nothing — but 2.3.3 started reading `blocker` out of
+# it to drop damage against an invulnerable target, and a 2.3.2 file has the
+# group without that field. The hook degrades quietly when it's absent (no
+# gate, immune damage counted again), which is precisely the silent-upgrade
+# failure the rest of this comment is about.
 REQUIRED_OFFSET_KEYS = ("Activity", "ArrayObj", "BossInfo", "BossesInfo",
-                        "Camera", "Element", "Entity", "Foe", "GameLayer",
-                        "Hero", "Interactible", "State", "String", "Unit")
+                        "Camera", "DamageResult.blocker", "DamageResult.effect",
+                        "Element", "Entity", "Foe", "GameLayer", "Hero",
+                        "Interactible", "State", "String", "Unit", "Unit.attr")
 
 
 def _data_is_current():
@@ -5565,14 +5659,28 @@ def _data_is_current():
 
     Missing keys are named rather than just counted: this runs before the
     overlay exists, so the log is the only place anyone can see why a
-    multi-second regenerate just happened."""
+    multi-second regenerate just happened.
+
+    A key may be "Group.field", which checks for the field inside the group —
+    a group that has existed for releases can still be missing a field this
+    build depends on."""
+    def present(d, key):
+        group, _, field = key.partition(".")
+        got = d.get(group)
+        if not got:
+            return False
+        # `is not None` rather than truthiness: an offset of 0 is a real
+        # offset, and `not 0` would condemn a perfectly good file.
+        return True if not field else (isinstance(got, dict)
+                                       and got.get(field) is not None)
+
     for name, required in (("resolver_data.json", REQUIRED_RESOLVER_KEYS),
                            ("meter_offsets.json", REQUIRED_OFFSET_KEYS)):
         try:
             d = json.loads((ANALYSIS / name).read_text())
         except Exception:
             return False
-        missing = [k for k in required if not d.get(k)]
+        missing = [k for k in required if not present(d, k)]
         if missing:
             print(f"[meter] {name} predates this build — missing "
                   f"{', '.join(missing)}; regenerating.", file=sys.stderr)
@@ -6184,6 +6292,8 @@ def _run(tray, session, ui_state, world):
     ready_evt = threading.Event()
     liveness = {"t": time.monotonic(), "printed": 0.0}
     hero_id = {"name": None}           # last local hero, to keep the log quiet
+    nullified: dict = {}               # mitigated-hit shapes seen, see below
+    nullified_at = [0.0]               # last time they were reported
 
     def on_message(message, data):
         liveness["t"] = time.monotonic()   # any agent traffic counts as alive
@@ -6193,7 +6303,36 @@ def _run(tray, session, ui_state, world):
         p = message.get("payload") or {}
         k = p.get("kind")
         if k == "hit":
-            session.record(p)
+            # Nullified-hit diagnostic. The hook only attaches these when one of
+            # them is set, so an ordinary hit never reaches this branch. Damage
+            # against a boss in an immunity phase is currently counted in full;
+            # this is here to establish WHICH field marks it before the meter
+            # starts discarding hits, because gating on the wrong one would
+            # silently drop real damage instead of fake damage.
+            # Tallied and reported once every 30s, not per hit: a boss with a
+            # long immune phase would otherwise write thousands of lines.
+            dropped = False
+            if "blocker" in p:
+                who = p.get("blocker") or ""
+                dropped = who in NULLIFIED_BLOCKERS
+                sig = (who, p.get("effect"), (p.get("block") or 0) > 0,
+                       (p.get("amount") or 0) > 0, dropped)
+                nullified[sig] = nullified.get(sig, 0) + 1
+                now_m = time.monotonic()
+                if now_m - nullified_at[0] > 30.0:
+                    nullified_at[0] = now_m
+                    for s, n in sorted(nullified.items(), key=lambda kv: -kv[1]):
+                        print(f"[meter] mitigated-hit x{n}: blocker={s[0]!r} "
+                              f"effect={s[1]} block>0={s[2]} amount>0={s[3]} "
+                              f"{'DROPPED' if s[4] else 'counted'}",
+                              file=sys.stderr)
+                    nullified.clear()
+            # The target never took this, so it is not damage. Dropped before
+            # record() rather than subtracted after, so it can't start an
+            # encounter or extend one either — whaling on an immune boss is not
+            # combat as far as the parse is concerned.
+            if not dropped:
+                session.record(p)
         elif k == "heal":
             session.record_heal(p)
         elif k == "combat":
@@ -6225,7 +6364,13 @@ def _run(tray, session, ui_state, world):
                 print(f"[meter] boss pulled: {b.get('kind')}", file=sys.stderr)
                 if ov is None or not ov.auto_reset_boss():
                     continue
-                session.reset()
+                # Not a plain reset: the bar is refreshed on a timer, so this
+                # arrives after the opening burst has already landed. Carry the
+                # last few seconds forward or the reset eats it.
+                kept = session.reset_keeping_recent()
+                print(f"[meter] meter reset for the pull "
+                      f"(kept {kept} event{'' if kept == 1 else 's'} from the "
+                      f"last {BOSS_PULL_BACKLAG_SECS:.0f}s)", file=sys.stderr)
                 # Queued rather than called: this is the hook's thread, and
                 # both the reset banner and the cue belong to the Tk thread.
                 ov.on_boss_pull()

@@ -64,9 +64,16 @@ def main():
 
     meta = {
         "String": {"bytes": string["bytes"][0], "length": string["length"][0]},
+        # `blocker` and `effect` are read for the nullified-hit diagnostic: the
+        # meter counts a hit's _amount whether or not the target actually took
+        # it, so damage against a boss in an immunity phase inflates the parse.
+        # Which of _block / blocker / effect marks that is not settled yet —
+        # these ship so the hook can report them from normal play instead of
+        # needing a probe session timed to an immune phase.
         "DamageResult": {k: dr[k][0] for k in
             ["_amount", "affinity", "_critical", "_kill", "_hitCount",
-             "_block", "target", "serverSource", "ctx", "baseSkill"]},
+             "_block", "blocker", "effect", "target", "serverSource", "ctx",
+             "baseSkill"]},
         "BaseSkill": {"kind": base["kind"][0], "inf": base["inf"][0],
                       "owner": base["owner"][0],
                       "ownerPlayer": base["ownerPlayer"][0]},

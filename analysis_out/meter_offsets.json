@@ -10,6 +10,8 @@
     "_kill": 112,
     "_hitCount": 96,
     "_block": 104,
+    "blocker": 72,
+    "effect": 64,
     "target": 48,
     "serverSource": 32,
     "ctx": 128,

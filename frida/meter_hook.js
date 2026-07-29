@@ -982,7 +982,7 @@ function main() {
             skill = hlStr(bs.add(BS.kind).readPointer());
             if (skill) sname = skillDisplayName(bs, skill);
         }
-        return {
+        const out = {
             amount: amount,
             skill: skill || "?",
             name: sname,
@@ -990,6 +990,24 @@ function main() {
             crit: dr.add(DR._critical).readU8() ? 1 : 0,
             kill: dr.add(DR._kill).readU8() ? 1 : 0,
         };
+        // Nullified-hit diagnostic. The meter counts `amount` whether or not
+        // the target took it, so a boss in an immunity phase inflates the
+        // parse. These three fields are the candidates for marking that, and
+        // they ride along ONLY when one of them is actually set — on an
+        // ordinary hit this adds nothing to the message.
+        try {
+            if (DR.blocker != null && DR.effect != null) {
+                const blk = dr.add(DR._block).readDouble();
+                const who = hlStr(dr.add(DR.blocker).readPointer());
+                const eff = dr.add(DR.effect).readS32();
+                if (blk > 0 || who || eff !== 0) {
+                    out.block = blk;
+                    out.blocker = who || "";
+                    out.effect = eff;
+                }
+            }
+        } catch (e) {}
+        return out;
     }
 
     function heroIdent(hero) {
