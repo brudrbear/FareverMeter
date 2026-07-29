@@ -158,6 +158,20 @@ TOP_STRIP_PARSE = 140
 TOP_STRIP_RIFT = 190
 
 OVERLAY_ALPHA = 0.94
+# Extra see-through on top of that, from the Transparency slider. 0 leaves the
+# overlay exactly as it has always looked; the cap stops short of a UI you can
+# no longer read, which is a setting people find by dragging and then can't
+# find their way back from.
+#
+# This is WINDOW opacity, which is the only kind Windows gives a layered window
+# — so it takes the whole window with it: panel, header bar and text alike.
+# There is no way to fade a background out from under its own text here.
+TRANSPARENCY_MAX = 80
+# The windows it applies to: everything that belongs to the game view. The
+# control menu and its hint are exempt because they're what you're reading
+# while you drag the slider, and the rift prompt because it's a question that
+# has to be answered.
+TRANSPARENCY_EXEMPT = ("menu", "hint", "prompt")
 FADE_SECS = 0.45
 # The control menu and its hint answer to a keypress, so they want to feel
 # immediate; the meter and breakdown fade on their own schedule, where a slower
@@ -310,6 +324,19 @@ MINIMAP_FILTERS = (
 # category -> which tick governs it, built once rather than searched per marker.
 MINIMAP_FILTER_OF = {cat: key for key, _label, cats in MINIMAP_FILTERS
                      for cat in cats}
+
+# The compass gets its own pair, deliberately not shared with the map's. The
+# two panels answer different questions — "what is around me" against "which
+# way is that" — and wanting chests on one but not the other is an ordinary
+# thing to want. Soulstones have no tick for the same reason obelisks have none
+# on the map: there is at most one in range and it's the thing you're looking
+# for.
+COMPASS_FILTERS = (
+    ("collect", "Collectibles", ("orb", "chest")),
+    ("party",   "Party Members", ("hero",)),
+)
+COMPASS_FILTER_OF = {cat: key for key, _label, cats in COMPASS_FILTERS
+                     for cat in cats}
 # Every marker on the MAP is drawn this much larger than the table says. One
 # multiplier rather than eight edited radii, so the relative sizes above — which
 # are tuned against each other, not against the panel — survive a resize. The
@@ -398,12 +425,47 @@ COMPASS_H = 38
 COMPASS_CARD_Y = 0.15       # cardinal letter, as a fraction of the height
 COMPASS_TICK_TOP = 0.28     # its tick, below the letter
 COMPASS_TICK_BOT = 0.36
-COMPASS_MARK_Y = 0.56       # marker centres
+# Marker centres. Lifted when the pill shrank: the tallest glyphs reach about
+# 7px from their centre (the soulstone's shard, a player's chevron), and at
+# 0.56 those were poking through the pill's lower edge — which reads as a
+# drawing mistake, where the numbers hanging below it reads as a choice.
+COMPASS_MARK_Y = 0.50
 COMPASS_DIST_Y = 0.87       # the distance under each one
+# How much of that height the pill actually covers. It stops just above the
+# distances on purpose, so the numbers hang off its lower edge onto the game
+# rather than sitting inside a band that has to be tall enough to hold them.
+# The strip reads as a narrow bar with figures under it, which is a smaller
+# thing on screen than the same information boxed in.
+COMPASS_PILL_H = 0.72
 # Minimum px between two distance labels at 100% scale. "1.2k ↑" is about this
 # wide, so anything closer would be printing one number over another; the
 # nearer marker keeps its label and the farther one goes without.
 COMPASS_DIST_GAP = 30
+# Each distance sits on its own little black badge, because it's the only text
+# on the overlay that hangs off a panel onto the scenery. An outline was tried
+# first and looked like exactly what it was: eight offset copies of the text,
+# filling the gaps between thin italic strokes until the number read as a
+# blot. A shape behind the text is both cleaner and cheaper.
+#
+# The badge carries its own contrast, so its ink is a constant rather than
+# something derived from the panel — on the parchment theme the panel's ink is
+# nearly black, and nearly black on black is not a badge.
+COMPASS_DIST_BOX = "#000000"
+COMPASS_DIST_BOX_INK = "#EDEFF5"
+# Tk canvas items have no alpha, so the badge is knocked back with a stipple
+# instead: a bitmap pattern that leaves a quarter of its pixels unpainted, and
+# unpainted here means the transparency key, which means the game. Dithered
+# rather than blended — at "gray75" it reads as a slightly softened black, and
+# anything sparser starts to look like a screen door.
+COMPASS_DIST_STIPPLE = "gray75"
+COMPASS_DIST_PAD_X = 3.0        # px at 100%, around the text
+COMPASS_DIST_PAD_Y = 0.5
+# Square corners, and not for want of trying. The badge is 13px tall — a 12px
+# linespace plus the padding — and Tk's only rounded shape is a smoothed
+# polygon, whose spline overshoots at that size: measured at radius 3, 5 and 6
+# on a 14px box, it clipped exactly one pixel per corner and filled the rest
+# straight back in. A rectangle is what it was already drawing, minus the
+# pretence and four extra points.
 COMPASS_FOV = 180.0         # degrees of bearing shown, centred on your view
 # No range limit, except where a category earns one. The agent sends these from
 # the whole layer rather than a radius around you (see SWEEP_RADIUS_FOE in
@@ -415,11 +477,14 @@ COMPASS_FOV = 180.0         # degrees of bearing shown, centred on your view
 # for things you're travelling to, and a compass crowded with mobs is a smear.
 # Obelisks are off it too — there are ten in a zone, they're permanent scenery,
 # and at whole-map range they were most of what the strip was carrying.
-COMPASS_CATS = ("chest", "orb", "hero", "soulstone")
-# Soulstones are the one category that keeps a radius. They're worth knowing
-# about when you're near one and noise when you aren't, which is the opposite
-# of how the chests and party members on this strip behave.
-COMPASS_LIMITS = {"soulstone": 200.0}
+COMPASS_CATS = ("chest", "orb", "hero", "soulstone", "obelisk")
+# Two categories keep a radius, and they're the two that are worth knowing
+# about when you're near one and noise when you aren't — which is the opposite
+# of how the chests and party members on this strip behave. Obelisks came off
+# the compass entirely at one point for that reason: ten in a zone, permanently
+# there, and at whole-map range they were most of what the strip was carrying.
+# With a radius they're useful again without being the wallpaper.
+COMPASS_LIMITS = {"soulstone": 200.0, "obelisk": 200.0}
 # The ground plane is left-handed against the screen — the same fact
 # MINIMAP_MIRROR_X exists for — so the axis that trigonometry calls north is
 # the game's SOUTH. Naming +y "north" gave a compass that was a mirror of a
@@ -665,16 +730,6 @@ THEME_DEFAULT = {
     # true, and still why Dark exists; but "make it look like the rest of the
     # overlay" is a legitimate thing to want and it now has an entry.
     "map_body": MAP_BODY_FAREVER,
-    # The compass has no background, so its ink can't be derived from a panel
-    # that isn't drawn — it has to contrast with the GAME. Named per theme for
-    # that reason.
-    #
-    # Parchment CREAM, not the meter's brown. A light theme suggests dark ink
-    # and dark ink is exactly wrong here: tried, screenshotted, and the numbers
-    # disappeared into a grass texture. Whatever is behind this strip is the
-    # game, which is mostly dark, so every theme's ink is light — Farever's is
-    # simply the warm one. The theme still reads as itself, and still reads.
-    "compass_ink": BG_BODY,
 }
 # The dark overlay: the same layout in the map panel's navy, meter and
 # breakdown included. Built on top of Farever rather than from scratch so a key
@@ -698,7 +753,6 @@ THEME_DARK = dict(
     accent="#7FD4D4",       # headings; the teal lifted to read on navy
     header_off="#2A3346",   # a header bar whose element is hidden
     map_body=MAP_BODY_DARK,
-    compass_ink="#EAF1FF",
 )
 THEME_RIFT = {
     "border": RIFT_EDGE, "body": RIFT_BODY, "soft": "#3D0F28",
@@ -712,7 +766,6 @@ THEME_RIFT = {
     "accent": RIFT_TITLE, "dmg": DMG_BAR, "heal": HEAL_BAR,
     "header_off": "#3B3036",
     "map_body": RIFT_BODY,
-    "compass_ink": "#FFD9EC",
 }
 
 ELEMENT_COLORS = {
@@ -1501,18 +1554,74 @@ def _window_rect_of_pid(pid):
 
 VK_OEM_5 = 0xDC                      # the \ key
 VK_SHIFT, VK_CONTROL, VK_MENU = 0x10, 0x11, 0x12
-WH_KEYBOARD_LL, HC_ACTION = 13, 0
+WH_KEYBOARD_LL, WH_MOUSE_LL, HC_ACTION = 13, 14, 0
 WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP = 0x100, 0x101, 0x104, 0x105
+WM_MBUTTONDOWN, WM_XBUTTONDOWN = 0x0207, 0x020B
 WM_HOTKEY = 0x0312
-MOD_SHIFT, MOD_NOREPEAT = 0x0004, 0x4000
+WM_REBIND = 0x0400 + 1               # WM_APP+1, posted to the hotkey thread
+MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_NOREPEAT = 0x0001, 0x0002, 0x0004, 0x4000
+# Thread id of the RegisterHotKey fallback's pump, or 0 while the low-level
+# hook is doing the work (which needs no re-registration at all).
+REBIND_TO = [0]
 
 # Shift+\ (reset the encounter) is the only key the meter still owns — every
 # other control moved onto the in-game control menu. Plain \ and / are left
 # alone now so the game keeps them.
 HK_RESET = 1
-# Split out so the floating hint and the menu button can't drift apart.
-RESET_HOTKEY_KEYS = "Shift + \\"
-RESET_HOTKEY_TEXT = f"Reset FareverPlus - {RESET_HOTKEY_KEYS}"
+
+# The reset keybind, rebindable from the control menu. A dict rather than a
+# constant because the hook thread reads it on every keypress: rebinding is
+# then a matter of writing new values here, with no hook to tear down and
+# reinstall. Mutated in place for the same reason — the thread closed over this
+# object, not over the name.
+RESET_BIND = {"vk": VK_OEM_5, "shift": True, "ctrl": False, "alt": False}
+RESET_BIND_DEFAULT = dict(RESET_BIND)
+# Virtual-key codes whose names aren't derivable. Everything else falls back to
+# its character (A-Z, 0-9 are their own VK) or a bare hex code, so an unusual
+# keyboard shows something rather than nothing.
+VK_NAMES = {
+    0x08: "Backspace", 0x09: "Tab", 0x0D: "Enter", 0x13: "Pause",
+    0x14: "Caps Lock", 0x1B: "Esc", 0x20: "Space", 0x21: "Page Up",
+    0x22: "Page Down", 0x23: "End", 0x24: "Home", 0x25: "Left", 0x26: "Up",
+    0x27: "Right", 0x28: "Down", 0x2D: "Insert", 0x2E: "Delete",
+    0x6A: "Num *", 0x6B: "Num +", 0x6D: "Num -", 0x6E: "Num .", 0x6F: "Num /",
+    0xBA: ";", 0xBB: "=", 0xBC: ",", 0xBD: "-", 0xBE: ".", 0xBF: "/",
+    0xC0: "`", 0xDB: "[", 0xDC: "\\", 0xDD: "]", 0xDE: "'",
+}
+VK_NAMES.update({0x60 + i: f"Num {i}" for i in range(10)})
+VK_NAMES.update({0x70 + i: f"F{i + 1}" for i in range(24)})
+# Mouse buttons are bindable too, but only these three. Left and right belong
+# to the game and always will; the hook SWALLOWS whatever it fires on, and
+# taking left-click away from somebody mid-fight is not a setting, it's a
+# hostage situation. Middle and the two side buttons are fair game.
+VK_MOUSE = {0x04: "Middle Click", 0x05: "Mouse 4", 0x06: "Mouse 5"}
+VK_NAMES.update(VK_MOUSE)
+# Modifiers can't be the key itself, and Escape is how you back out of the
+# capture — binding it would leave no way to cancel.
+VK_UNBINDABLE = frozenset({0x10, 0x11, 0x12, 0x1B, 0x5B, 0x5C,
+                           0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5})
+
+
+def _vk_name(vk):
+    if vk in VK_NAMES:
+        return VK_NAMES[vk]
+    if 0x30 <= vk <= 0x5A:          # 0-9 and A-Z share their ASCII codes
+        return chr(vk)
+    return f"VK {vk:#04x}"
+
+
+def bind_label(bind=None):
+    """"Shift + \\" — what the menu button and the floating hint both show, so
+    they can't drift apart."""
+    b = bind or RESET_BIND
+    parts = [n for n, k in (("Ctrl", "ctrl"), ("Alt", "alt"), ("Shift", "shift"))
+             if b.get(k)]
+    parts.append(_vk_name(b.get("vk", VK_OEM_5)))
+    return " + ".join(parts)
+
+
+def reset_hint_text():
+    return f"Reset FareverPlus - {bind_label()}"
 
 # ---------------------------------------------------------------------------
 # Version / update check
@@ -1590,11 +1699,60 @@ def start_hotkeys(callbacks: dict, target_pid):
             if wParam not in (WM_KEYDOWN, WM_SYSKEYDOWN) or vk in keys_down:
                 return u.CallNextHookEx(None, nCode, wParam, lParam)
             keys_down.add(vk)
-            # Shift+\ only. Everything else — including a bare \ — falls through
-            # untouched so the game keeps its own bindings.
-            if vk != VK_OEM_5 or fg_pid() != target_pid:
+            # The bound key only, and only while Farever has focus. Everything
+            # else falls through untouched so the game keeps its own bindings —
+            # which matters more than usual here, because the branch below
+            # SWALLOWS the keypress.
+            #
+            # RESET_BIND is read fresh every time rather than captured: that's
+            # what makes rebinding take effect immediately instead of at the
+            # next launch.
+            if vk != RESET_BIND.get("vk") or fg_pid() != target_pid:
                 return u.CallNextHookEx(None, nCode, wParam, lParam)
-            if (not pressed(VK_SHIFT)) or pressed(VK_CONTROL) or pressed(VK_MENU):
+            # Every modifier has to match exactly — a binding of Shift+\ must
+            # not fire on Ctrl+Shift+\, which is somebody else's shortcut.
+            if (pressed(VK_SHIFT) != bool(RESET_BIND.get("shift"))
+                    or pressed(VK_CONTROL) != bool(RESET_BIND.get("ctrl"))
+                    or pressed(VK_MENU) != bool(RESET_BIND.get("alt"))):
+                return u.CallNextHookEx(None, nCode, wParam, lParam)
+            cb = callbacks.get(HK_RESET)
+            if cb:
+                try:
+                    cb()
+                except Exception as e:
+                    print("[hotkey]", e, file=sys.stderr)
+            return 1
+
+        class MSLL(ctypes.Structure):
+            _fields_ = [("pt_x", wintypes.LONG), ("pt_y", wintypes.LONG),
+                        ("mouseData", wintypes.DWORD),
+                        ("flags", wintypes.DWORD), ("time", wintypes.DWORD),
+                        ("dwExtraInfo", ctypes.c_void_p)]
+
+        def mouse_proc(nCode, wParam, lParam):
+            # A separate hook because WH_KEYBOARD_LL cannot see mouse buttons
+            # at all — nor can RegisterHotKey, which is why a mouse binding
+            # only works on this path.
+            # First line, and it matters: a low-level mouse hook is called for
+            # every WM_MOUSEMOVE too, which on a 1000Hz mouse is a thousand
+            # trips into Python a second, each one in front of the input it's
+            # inspecting. Everything that isn't a button press leaves here.
+            if wParam not in (WM_MBUTTONDOWN, WM_XBUTTONDOWN):
+                return u.CallNextHookEx(None, nCode, wParam, lParam)
+            if nCode != HC_ACTION:
+                return u.CallNextHookEx(None, nCode, wParam, lParam)
+            vk = 0
+            if wParam == WM_MBUTTONDOWN:
+                vk = 0x04
+            elif wParam == WM_XBUTTONDOWN:
+                # Which side button is in the HIGH word of mouseData: 1 or 2.
+                ms = ctypes.cast(lParam, ctypes.POINTER(MSLL))[0]
+                vk = 0x04 + ((ms.mouseData >> 16) & 0xFFFF)     # -> 0x05, 0x06
+            if vk != RESET_BIND.get("vk") or fg_pid() != target_pid:
+                return u.CallNextHookEx(None, nCode, wParam, lParam)
+            if (pressed(VK_SHIFT) != bool(RESET_BIND.get("shift"))
+                    or pressed(VK_CONTROL) != bool(RESET_BIND.get("ctrl"))
+                    or pressed(VK_MENU) != bool(RESET_BIND.get("alt"))):
                 return u.CallNextHookEx(None, nCode, wParam, lParam)
             cb = callbacks.get(HK_RESET)
             if cb:
@@ -1605,10 +1763,18 @@ def start_hotkeys(callbacks: dict, target_pid):
             return 1
 
         cproc = HOOKPROC(proc)
+        cmproc = HOOKPROC(mouse_proc)
         hMod = ctypes.windll.kernel32.GetModuleHandleW(None)
         hook = u.SetWindowsHookExW(WH_KEYBOARD_LL, cproc, hMod, 0)
         from ctypes import wintypes
         if hook:
+            # Installed unconditionally rather than only when a mouse button is
+            # bound: the binding can change at any moment from the menu, and a
+            # hook that has to be installed from this thread can't be added
+            # later without waking it up.
+            if not u.SetWindowsHookExW(WH_MOUSE_LL, cmproc, hMod, 0):
+                print("[meter] mouse hook failed; mouse buttons can't be bound.",
+                      file=sys.stderr)
             print("[meter] focus-conditional hotkeys active.", file=sys.stderr)
             msg = wintypes.MSG()
             while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
@@ -1618,13 +1784,33 @@ def start_hotkeys(callbacks: dict, target_pid):
         # ---- Fallback: global RegisterHotKey (fires regardless of focus) ----
         print("[meter] LL hook failed; using global RegisterHotKey fallback.",
               file=sys.stderr)
-        if not u.RegisterHotKey(None, HK_RESET, MOD_SHIFT | MOD_NOREPEAT,
-                                VK_OEM_5):
-            print("[meter] Shift+\\ unavailable (another app owns it) — the "
-                  "encounter still resets itself on a zone change or after a "
-                  "lull, but the manual reset won't fire.", file=sys.stderr)
+
+        def register():
+            u.UnregisterHotKey(None, HK_RESET)
+            mods = MOD_NOREPEAT
+            if RESET_BIND.get("shift"):
+                mods |= MOD_SHIFT
+            if RESET_BIND.get("ctrl"):
+                mods |= MOD_CONTROL
+            if RESET_BIND.get("alt"):
+                mods |= MOD_ALT
+            if not u.RegisterHotKey(None, HK_RESET, mods,
+                                    RESET_BIND.get("vk", VK_OEM_5)):
+                print(f"[meter] {bind_label()} unavailable (another app owns "
+                      "it) — the encounter still resets itself on a zone "
+                      "change or after a lull, but the manual reset won't "
+                      "fire.", file=sys.stderr)
+
+        register()
+        # RegisterHotKey belongs to the thread that called it, so a rebind
+        # can't just re-register from the Tk thread. The overlay posts
+        # WM_REBIND here instead and this thread does it — see _rebind_reset.
+        REBIND_TO[0] = ctypes.windll.kernel32.GetCurrentThreadId()
         msg = wintypes.MSG()
         while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            if msg.message == WM_REBIND:
+                register()
+                continue
             if msg.message == WM_HOTKEY:
                 cb = callbacks.get(msg.wParam)
                 if cb:
@@ -1966,8 +2152,11 @@ class Overlay:
         self._quit_armed = False       # the Quit button's second-click window
         self._update_shown = False     # the update notice is applied once
         self._map_mode = MINIMAP_MODES[0]   # "Rotating" — you always face up
-        # Per-category minimap ticks; everything on until told otherwise.
+        self._transparency = 0              # percent, on top of OVERLAY_ALPHA
+        # Per-category ticks for each panel; everything on until told otherwise.
         self._map_filters = {key: True for key, _label, _cats in MINIMAP_FILTERS}
+        self._compass_filters = {key: True
+                                 for key, _label, _cats in COMPASS_FILTERS}
         self._map_rate = "High"        # Ultra exists but is opt-in
         # One scale per window group. Each window wants a size that suits its
         # job — the meter one that suits reading numbers, the map one that
@@ -2077,9 +2266,15 @@ class Overlay:
         self._shown["rift"] = False     # nothing to show until a timer arrives
         # Live opacity of each faded window, driven by _step_fade. The menu pair
         # starts at zero: they're withdrawn until the escape menu opens.
-        self._alpha = {k: OVERLAY_ALPHA for k in self._fade_win}
+        # Seeded from the saved slider, not from the constant: a restart should
+        # come up wearing the transparency you left it on, without a visible
+        # settle from full opacity.
+        self._alpha = {k: self._alpha_for(k) for k in self._fade_win}
         self._alpha["menu"] = self._alpha["hint"] = 0.0
         self._alpha["prompt"] = self._alpha["rift"] = 0.0
+        for key, win in self._fade_win.items():
+            if self._alpha[key]:
+                win.attributes("-alpha", self._alpha[key])
         self._fade_secs = {k: FADE_SECS for k in self._fade_win}
         self._fade_secs["menu"] = self._fade_secs["hint"] = MENU_FADE_SECS
         self._fade_secs["prompt"] = MENU_FADE_SECS
@@ -2271,13 +2466,29 @@ class Overlay:
             self._map_mode = data["map_mode"]
         if data.get("map_rate") in MINIMAP_RATE_MS:
             self._map_rate = data["map_rate"]
+        t = data.get("transparency")
+        if isinstance(t, int) and 0 <= t <= TRANSPARENCY_MAX:
+            self._transparency = t
+        # Validated key by key: a hand-edited or newer file shouldn't be able
+        # to leave the meter with a binding the hook can't match.
+        bind = data.get("reset_bind")
+        if isinstance(bind, dict) and isinstance(bind.get("vk"), int):
+            vk = bind["vk"]
+            if 0 < vk <= 0xFF and vk not in VK_UNBINDABLE:
+                RESET_BIND.update(
+                    {"vk": vk} | {m: bool(bind.get(m))
+                                  for m in ("shift", "ctrl", "alt")})
         # Per-key rather than wholesale, so a file written before a category
         # existed leaves that one at its default instead of dropping the lot.
-        saved_filters = data.get("map_filters")
-        if isinstance(saved_filters, dict):
-            for key, _label, _cats in MINIMAP_FILTERS:
+        for name, table, into in (
+                ("map_filters", MINIMAP_FILTERS, self._map_filters),
+                ("compass_filters", COMPASS_FILTERS, self._compass_filters)):
+            saved_filters = data.get(name)
+            if not isinstance(saved_filters, dict):
+                continue
+            for key, _label, _cats in table:
                 if isinstance(saved_filters.get(key), bool):
-                    self._map_filters[key] = saved_filters[key]
+                    into[key] = saved_filters[key]
         if data.get("mode") in ("party", "all"):
             self.mode = data["mode"]
         if isinstance(data.get("hide_ooc"), bool):
@@ -2329,8 +2540,13 @@ class Overlay:
                 "theme": self._theme_mode,
                 "map_mode": self._map_mode,
                 "map_rate": self._map_rate,
+                "transparency": self._transparency,
+                "reset_bind": dict(RESET_BIND),
                 "map_filters": {k: bool(self._map_filters.get(k, True))
                                 for k, _label, _cats in MINIMAP_FILTERS},
+                "compass_filters": {
+                    k: bool(self._compass_filters.get(k, True))
+                    for k, _label, _cats in COMPASS_FILTERS},
                 "mode": self.mode,
                 "hide_ooc": self._hide_ooc,
                 "scales": {g: round(self._scales[g], 3)
@@ -2454,6 +2670,11 @@ class Overlay:
         """The control menu: what used to be hotkeys, as buttons. Only on screen
         while the game's escape menu is — which is also the only time the game
         has a usable cursor — so it never needs to be click-through."""
+        # Every OptionMenu on the panel, so their popups can be dismissed with
+        # it. A posted dropdown is its own toplevel and knows nothing about the
+        # window it belongs to — hide the menu with one open and the list of
+        # choices stays on screen by itself. See _unpost_menus.
+        self._option_menus = []
         border = tk.Frame(self.menu, bg=BG_BORDER, padx=2, pady=2)
         border.pack(fill="both", expand=True)
 
@@ -2553,6 +2774,22 @@ class Overlay:
             activeforeground=FG_HEADER, bd=0, relief="flat",
             font=self.fonts_m["ui"])
         self.opt_theme.pack(side="right", expand=True, fill="x", padx=(8, 0))
+        self._option_menus.append(self.opt_theme)
+
+        # Under Theme because that's what it is — how the overlay looks, not
+        # what it does. Released rather than live, like the scale sliders: every
+        # step reconfigures five windows.
+        row = field(left, "Transparency")
+        self._transp_var = tk.IntVar(value=self._transparency)
+        scl = tk.Scale(
+            row, from_=0, to=TRANSPARENCY_MAX, resolution=5,
+            orient="horizontal", variable=self._transp_var, showvalue=True,
+            bg=BG_BODY, fg=FG_DIM, troughcolor=BG_BAR_TRACK,
+            activebackground=BTN_ON_BG, highlightthickness=0, bd=0,
+            sliderrelief="flat", font=self.fonts_m["ui_tiny_i"], length=120,
+            cursor="hand2")
+        scl.bind("<ButtonRelease-1>", lambda _e: self._on_transparency_pick())
+        scl.pack(side="right", expand=True, fill="x", padx=(8, 0))
 
         row = field(left, "Minimap")
         self._map_mode_var = tk.StringVar(value=self._map_mode)
@@ -2569,6 +2806,7 @@ class Overlay:
             activeforeground=FG_HEADER, bd=0, relief="flat",
             font=self.fonts_m["ui"])
         self.opt_map.pack(side="right", expand=True, fill="x", padx=(8, 0))
+        self._option_menus.append(self.opt_map)
 
         row = field(left, "Map refresh")
         self._map_rate_var = tk.StringVar(value=self._map_rate)
@@ -2586,6 +2824,7 @@ class Overlay:
             activeforeground=FG_HEADER, bd=0, relief="flat",
             font=self.fonts_m["ui"])
         self.opt_rate.pack(side="right", expand=True, fill="x", padx=(8, 0))
+        self._option_menus.append(self.opt_rate)
 
         # Every font in the overlay is a named Tk font, so dragging this resizes
         # the lot. Released rather than live: repainting the whole tree on each
@@ -2628,6 +2867,7 @@ class Overlay:
                 activeforeground=FG_HEADER, bd=0, relief="flat",
                 font=self.fonts_m["ui"])
             opt.pack(side="right", expand=True, fill="x", padx=(8, 0))
+            self._option_menus.append(opt)
         # Columns inside the meter rather than a window, so it keeps its tick.
         self.btn_heal = button(left, self._enqueue(self._toggle_heal))
         # Last in this section rather than under OPTIONS: it hides the same
@@ -2635,9 +2875,28 @@ class Overlay:
         # choice.
         self.btn_hide_ooc = button(left, self._enqueue(self._toggle_hide_ooc))
 
-        # Above ACTIONS: it's a setting you leave alone for hours, and the
-        # buttons below it are the ones you came here to press.
-        section(right, "MINIMAP", first=True)
+        # Above ACTIONS: these are settings you leave alone for hours, and the
+        # buttons below them are the ones you came here to press.
+        section(right, "CONTROLS", first=True)
+        row = field(right, "Reset data")
+        self.btn_bind = tk.Button(
+            row, text="", command=self._begin_bind_capture, anchor="w",
+            font=self.fonts_m["ui"], bg=BG_BODY_SOFT, fg=FG_TEXT,
+            activebackground=BG_BAR_TRACK, activeforeground=FG_VALUE,
+            relief="flat", bd=0, padx=10, pady=3, highlightthickness=1,
+            highlightbackground=BG_BAR_TRACK, cursor="hand2")
+        self.btn_bind.pack(side="right", expand=True, fill="x", padx=(8, 0))
+        # True while the button is listening for a keypress.
+        self._binding_now = False
+
+        section(right, "COMPASS")
+        self.btn_compass_filter = {}
+        for key, label, _cats in COMPASS_FILTERS:
+            self.btn_compass_filter[key] = button(
+                right,
+                self._enqueue(lambda k=key: self._toggle_compass_filter(k)))
+
+        section(right, "MINIMAP")
         self.btn_map_filter = {}
         for key, label, _cats in MINIMAP_FILTERS:
             self.btn_map_filter[key] = button(
@@ -2656,7 +2915,7 @@ class Overlay:
         # when the escape menu (and so this button) isn't an option.
         self.btn_reset_data = button(right, self._enqueue(self.session.reset))
         self.btn_reset_data.config(
-            text=f"Reset encounter data   ({RESET_HOTKEY_KEYS})")
+            text=f"Reset encounter data   ({bind_label()})")
         self.btn_reset_pos = button(right, self._enqueue(self._reset_pos))
         self.btn_reset_pos.config(text="Reset window positions")
 
@@ -2683,13 +2942,14 @@ class Overlay:
         """Re-measured rather than sized once, so the scale slider moves it."""
         f, c = self.fonts["ui_hint_b"], self.hint_canvas
         pad, off = 6, 2
-        w = f.measure(RESET_HOTKEY_TEXT) + pad * 2 + off
+        text = reset_hint_text()
+        w = f.measure(text) + pad * 2 + off
         h = f.metrics("linespace") + pad * 2 + off
         c.config(width=w, height=h)
         c.delete("all")
-        c.create_text(pad + off, pad + off, text=RESET_HOTKEY_TEXT, font=f,
+        c.create_text(pad + off, pad + off, text=text, font=f,
                       fill=BG_BORDER, anchor="nw")
-        c.create_text(pad, pad, text=RESET_HOTKEY_TEXT, font=f,
+        c.create_text(pad, pad, text=text, font=f,
                       fill=BG_BODY, anchor="nw")
 
     def _build_minimap(self):
@@ -3048,8 +3308,8 @@ class Overlay:
     def _map_glyph(self, c, x, y, r, style, fill, facing=None, edge=None,
                    ring=None):
         """`fill` and `ring` arrive already adjusted for wherever this is being
-        drawn — the minimap tones them for its panel, the compass doesn't have
-        one — so nothing in here consults the theme."""
+        drawn — both the map and the compass tone them for their panel — so
+        nothing in here consults the theme."""
         shape = style["shape"]
         if shape == "chevron" and facing is not None:
             # Same arrow as the player marker, smaller. The outline is what
@@ -3154,20 +3414,22 @@ class Overlay:
                          outline=BG_BORDER, width=1)
 
     def _build_compass(self):
-        """A bearing strip with no panel behind it: markers and numbers alone,
-        floating over the game.
+        """A bearing strip on a pill-shaped panel, in the map's colours.
 
-        No background, no border and no shadow — the canvas is filled with the
-        transparency key every overlay window already uses, so those pixels are
-        not merely invisible but absent, and the game shows through them. That
-        also means the strip can't be grabbed where nothing is drawn, since
-        Windows sends those clicks straight past it; _draw_compass paints a
-        backing rectangle while the mouse is free so there's something to take
-        hold of exactly when you can.
+        The canvas itself is transparent and _draw_compass paints the pill onto
+        it — two half-circle caps and the rectangle between them. It has to be
+        drawn rather than configured: Tk has no rounded rectangle, and DWM's
+        corner rounding gives a fixed small radius and a drop shadow with it.
 
-        The ink can no longer be derived from a panel colour, because there is
-        no panel. It comes from the theme's `compass_ink`, which has to contrast
-        with the GAME rather than with the overlay."""
+        It spent a version with no panel at all — markers and numbers straight
+        on the game — which reads beautifully over dark scenery and poorly over
+        anything bright, and left nothing to grab hold of but the markers.
+
+        With something behind it again, everything on it is coloured off that
+        something: `_map_ink` for the text and lines, `_marker_fill` for the
+        glyphs, exactly as on the minimap. Those two are what keep the strip
+        legible on the parchment theme, where a panel-blind colour scheme puts
+        cream text on a cream background."""
         self.compass_canvas = tk.Canvas(
             self.compasswin, bg=TRANSPARENT_KEY,
             highlightthickness=0, bd=0, width=COMPASS_W, height=COMPASS_H)
@@ -3175,11 +3437,16 @@ class Overlay:
         self._bind_drag(self.compasswin, (self.compass_canvas,),
                         unlocked=self._mouse_available)
 
-    def _compass_x(self, dx, dy, rot, half_w):
+    def _compass_x(self, dx, dy, rot, half_w, centre=None):
         """Screen x for a world offset, or None if it's outside the arc.
 
         Routed through the same rotation the map uses, mirror included, so a
-        marker can't sit left on the compass and right on the minimap."""
+        marker can't sit left on the compass and right on the minimap.
+
+        `half_w` is how far the arc reaches from `centre`, which is not the same
+        as half the canvas: the strip is a pill, and the bearings are mapped
+        across its straight section so that nothing lands on a rounded end where
+        there'd be no panel under it."""
         ca, sa = rot
         mx = MINIMAP_MIRROR_X * (dx * sa - dy * ca)   # right of view, on screen
         fy = dx * ca + dy * sa                        # ahead of view
@@ -3187,7 +3454,7 @@ class Overlay:
         span = math.radians(COMPASS_FOV) / 2.0
         if abs(rel) > span:
             return None
-        return half_w + (rel / span) * half_w
+        return (half_w if centre is None else centre) + (rel / span) * half_w
 
     def _draw_compass(self):
         if not self._shown.get("compass"):
@@ -3200,34 +3467,37 @@ class Overlay:
         if int(c["width"]) != w or int(c["height"]) != h:
             c.config(width=w, height=h)
         theme = self._theme
+        body = theme.get("map_body", BG_BODY)
         c.configure(bg=TRANSPARENT_KEY)
-        half_w = w / 2.0
+        # The panel is a pill: two half-circle caps and the rectangle between
+        # them, painted onto a transparent canvas rather than being the canvas's
+        # own background. Tk has no rounded rectangle and DWM's corner rounding
+        # is both a fixed small radius and a request for the drop shadow, so
+        # this is the only way to get a fully round end.
+        centre = w / 2.0
+        ph = h * COMPASS_PILL_H          # the pill's own height; see the note
+        # Bearings map onto the STRAIGHT section only. Run them to the canvas
+        # edge instead and a marker at the far left sits on the tip of a cap,
+        # where the panel under it is a couple of pixels tall.
+        half_w = max(1.0, (w - ph) / 2.0)
+        c.create_oval(0, 0, ph, ph, fill=body, outline="")
+        c.create_oval(w - ph, 0, w, ph, fill=body, outline="")
+        c.create_rectangle(ph / 2.0, 0, w - ph / 2.0, ph, fill=body, outline="")
 
-        # Nothing is ever drawn behind the strip — not even while the mouse is
-        # free. A backing plate went in first so there'd be something to grab,
-        # since transparent pixels don't take clicks; it was a worse trade than
-        # it sounds, because the plate appearing every time you opened the
-        # escape menu is the one moment you're looking straight at the overlay.
-        # Dragging is by the markers, the cardinal letters and the centre tick,
-        # all of which are real pixels.
         if not self.world.fresh():
             return
         heading = float(self._last_cam if self._last_cam is not None
                         else (me.get("r", 0.0) or 0.0))
         rot = (math.cos(heading), math.sin(heading))
 
-        # Ink from the theme, not from a panel: with nothing drawn behind the
-        # strip these sit on the game, and the only thing they can be picked to
-        # contrast with is the theme's intent.
-        base_ink = theme.get("compass_ink", "#EAF1FF")
         # Cardinals first, so markers sit over them. They live in the top band,
-        # clear of the distances along the bottom. Full-strength ink: they used
-        # to be dimmed toward the panel colour, which stopped meaning anything
-        # the moment there was no panel to dim toward.
-        ink = base_ink
+        # clear of the distances along the bottom, and are quieter than the
+        # numbers — a bearing letter is orientation, not information.
+        ink = self._map_ink(0.55)
         for deg, letter in COMPASS_CARDINALS:
             a = math.radians(deg)
-            x = self._compass_x(math.cos(a), math.sin(a), rot, half_w)
+            x = self._compass_x(math.cos(a), math.sin(a), rot, half_w,
+                                centre)
             if x is None:
                 continue
             c.create_line(x, h * COMPASS_TICK_TOP, x, h * COMPASS_TICK_BOT,
@@ -3238,8 +3508,10 @@ class Overlay:
             # neither job well over a moving background.
             c.create_text(x, h * COMPASS_CARD_Y, text=letter, fill=ink,
                           font=self.fonts_compass["ui_sm_b"])
-        # Dead ahead.
-        c.create_line(half_w, 0, half_w, h * COMPASS_TICK_BOT, fill=base_ink)
+        # Dead ahead. Brighter than the cardinals, because it's the one mark
+        # you read the whole strip against.
+        c.create_line(centre, 0, centre, h * COMPASS_TICK_BOT,
+                      fill=self._map_ink(0.85))
 
         mez = me.get("z", 0)
         local, roster = self.world.who()
@@ -3247,6 +3519,10 @@ class Overlay:
         for e in ents:
             cat = e.get("c")
             if cat not in COMPASS_CATS:
+                continue
+            # Ticked off in the control menu. The compass keeps its own pair of
+            # these; hiding chests here doesn't hide them on the map.
+            if not self._compass_filters.get(COMPASS_FILTER_OF.get(cat), True):
                 continue
             # Party only — a compass full of strangers tells you nothing about
             # where your group went. And never yourself: you are dead ahead by
@@ -3263,7 +3539,7 @@ class Overlay:
             limit = COMPASS_LIMITS.get(cat)
             if limit is not None and dist > limit:
                 continue
-            x = self._compass_x(dx, dy, rot, half_w)
+            x = self._compass_x(dx, dy, rot, half_w, centre)
             if x is None:
                 continue        # behind you
             rows.append((dist, cat, x, e))
@@ -3274,18 +3550,22 @@ class Overlay:
             style = MINIMAP_STYLE_MAP[cat]
             r = style["r"] * scale
             facing = None
-            if cat == "hero" and e.get("r") is not None:
-                facing = self._facing_screen(float(e["r"]), heading, True)
-            # Markers keep the bright palette on every theme. On the minimap
-            # they're adjusted to the panel they land on; here there is no
-            # panel, and what they have to stand out against is whatever the
-            # game is drawing — which is never parchment.
-            edge = BG_BORDER
-            self._map_glyph(c, x, my, r, style, style["fill"], facing, edge,
-                            ring=style.get("ring"))
-        self._draw_compass_dists(c, rows, h, scale, theme, mez)
+            if cat == "hero":
+                # Always up, never their heading. On the MAP a chevron pointing
+                # where someone is running tells you where the group is going;
+                # on a bearing strip there's no ground for it to point across,
+                # so it just spun in place and read as noise. The strip answers
+                # "which way is that", and an arrow is the shape that says it.
+                facing = (0.0, -1.0)
+            # Toned for the panel, like the map's — the strip has one again, and
+            # the yellow orb on parchment is exactly as unreadable here.
+            edge = _lerp_hex(body, BG_BORDER, 0.8)
+            self._map_glyph(c, x, my, r, style, self._marker_fill(style["fill"]),
+                            facing, edge,
+                            ring=self._marker_fill(style.get("ring")))
+        self._draw_compass_dists(c, rows, h, scale, mez)
 
-    def _draw_compass_dists(self, c, rows, h, scale, theme, mez):
+    def _draw_compass_dists(self, c, rows, h, scale, mez):
         """How far away each marker is, on the line under it.
 
         A second pass rather than part of the glyph loop, because the two want
@@ -3298,11 +3578,14 @@ class Overlay:
         Elevation rides on this line as an arrow rather than as the map's
         caret. The caret hangs below the glyph, which is where the number now
         is, and a strip this short has no row of pixels to spare for both."""
-        # Full-strength theme ink: the numbers are the part you read, and they
-        # have the game behind them rather than a panel.
-        ink = theme.get("compass_ink", "#EAF1FF")
+        # Brighter than the cardinals: the numbers are the part you actually
+        # read. They also hang off the pill's lower edge onto the game, so they
+        # get an outline — the only text on the overlay that sits on scenery
+        # rather than on a panel, and the scenery is any colour it likes.
         y = h * COMPASS_DIST_Y
         font = self.fonts_compass["ui_tiny_i"]
+        line_h = font.metrics("linespace")
+        pad_x, pad_y = COMPASS_DIST_PAD_X * scale, COMPASS_DIST_PAD_Y * scale
         placed = []
         for dist, _cat, x, e in reversed(rows):
             if any(abs(x - px) < COMPASS_DIST_GAP * scale for px in placed):
@@ -3312,7 +3595,16 @@ class Overlay:
             arrow = ""
             if abs(dz) > MINIMAP_Z_FADE:
                 arrow = " ↑" if dz > 0 else " ↓"
-            c.create_text(x, y, text=_short_dist(dist) + arrow, fill=ink,
+            label = _short_dist(dist) + arrow
+            # Sized from the text rather than a fixed width: "8" and "2.7k ↑"
+            # are very different strings, and a badge wide enough for the
+            # second is a slab under the first.
+            half_tw = font.measure(label) / 2.0
+            c.create_rectangle(x - half_tw - pad_x, y - line_h / 2.0 - pad_y,
+                               x + half_tw + pad_x, y + line_h / 2.0 + pad_y,
+                               fill=COMPASS_DIST_BOX, outline="",
+                               stipple=COMPASS_DIST_STIPPLE)
+            c.create_text(x, y, text=label, fill=COMPASS_DIST_BOX_INK,
                           font=font)
 
     def _build_rift(self):
@@ -4121,6 +4413,12 @@ class Overlay:
             print(f"[meter] couldn't push the refresh rate: {e}",
                   file=sys.stderr)
 
+    def _toggle_compass_filter(self, key):
+        """One compass category group on or off. Same shape as the map's, and
+        deliberately a separate setting — see COMPASS_FILTERS."""
+        self._compass_filters[key] = not self._compass_filters.get(key, True)
+        self._save_settings()
+
     def _toggle_map_filter(self, key):
         """One category group on or off. Nothing to redraw by hand — the map is
         repainted wholesale on the next tick and reads the ticks as it goes."""
@@ -4204,6 +4502,10 @@ class Overlay:
         # the one you were trying to get out of the way.
         menu_visible = (self._menu_unlock and not self._prompt_open
                         and self._focused and not menu_hidden)
+        # Whatever route the menu leaves by — Esc, alt-tab, the game opening
+        # something over it — its dropdowns leave with it.
+        if not menu_visible:
+            self._unpost_menus()
         changed |= self._want_visible("menu", menu_visible)
         changed |= self._want_visible("hint", menu_visible)
         changed |= self._want_visible("prompt", self._prompt_open)
@@ -4214,15 +4516,21 @@ class Overlay:
         """The mode names two things: which base to wear, and whether a rift
         overrides it.
 
-        The escape menu wins over the rift either way — the control menu is
-        Farever-styled and the meter sits right next to it, so matching that
-        beats matching a rift you can't currently see. It does NOT win over the
-        base: a Dark player opening the menu should not watch their map turn to
-        parchment and back."""
+        Pinned Rift means rift, always. It used to fall back to Farever while
+        the escape menu was open, on the reasoning that the control menu is
+        Farever-styled and the meter sits next to it — but somebody who pins
+        Rift has asked for rift colours, and watching the overlay change theme
+        every time they open the menu is a worse trade than a colour clash with
+        a panel that isn't themed at all.
+
+        The Dynamic modes still yield to the escape menu, and that's different:
+        there the rift colours are something the game put you in rather than
+        something you chose, so seeing the overlay's own palette while you're
+        reading its settings is the more useful of the two."""
         base = (THEME_DARK if self._theme_mode in ("Dark", "Dark Dynamic")
                 else THEME_DEFAULT)
         if self._theme_mode == "Rift":
-            return base if self._menu_unlock else THEME_RIFT
+            return THEME_RIFT
         if self._menu_unlock:
             return base
         if (self._theme_mode.endswith("Dynamic")
@@ -4295,6 +4603,179 @@ class Overlay:
         if self._fade_job is None:
             self._fade_job = self.root.after(FADE_STEP_MS, self._step_fade)
 
+    # ---- rebinding the reset key ----
+    def _begin_bind_capture(self):
+        """Listen for the next keypress and make it the reset bind.
+
+        POLLED, not bound. The obvious version — focus the button and take a
+        Tk <KeyPress> — silently never fires: every overlay window is
+        overrideredirect and carries WS_EX_NOACTIVATE precisely so that
+        clicking it can't steal focus from the game, which also means it never
+        receives a keystroke. The keyboard belongs to Farever the entire time
+        this panel is on screen.
+
+        GetAsyncKeyState doesn't care who has focus, needs no hook, and reads
+        the same virtual-key codes the hook will later match against — so what
+        you press here is exactly what will fire in play."""
+        if self._binding_now:
+            self._end_bind_capture()
+            return
+        self._binding_now = True
+        self._bind_poll_job = None
+        self.btn_bind.config(text="press a key…  (Esc cancels)")
+        # The Tk binding stays as well: it costs nothing, and it's what makes
+        # the capture testable without a keyboard.
+        self.btn_bind.bind("<KeyPress>", self._on_bind_key)
+        self._poll_bind_capture()
+
+    def _poll_bind_capture(self):
+        """Watch the keyboard until something bindable is held down."""
+        if not self._binding_now or sys.platform != "win32":
+            return
+        u = ctypes.windll.user32
+
+        def down(vk):
+            return bool(u.GetAsyncKeyState(vk) & 0x8000)
+
+        if down(0x1B):                      # Esc — back out, bind unchanged
+            self._end_bind_capture()
+            return
+        shift, ctrl, alt = down(VK_SHIFT), down(VK_CONTROL), down(VK_MENU)
+        # Middle and the side buttons are offered; left and right never are,
+        # and 0x03 is Break rather than a button at all.
+        for vk in list(VK_MOUSE) + list(range(0x08, 0xFF)):
+            if vk in VK_UNBINDABLE or not down(vk):
+                continue
+            # A modifier is required for anything that would otherwise be a
+            # plain keystroke — the hook swallows what it fires on, so a bare
+            # letter costs you that key in game. F-keys and the bindable mouse
+            # buttons are exempt: nothing in Farever wants them by default, and
+            # binding Mouse 4 on its own is the normal thing to do.
+            if (not (shift or ctrl or alt) and not (0x70 <= vk <= 0x87)
+                    and vk not in VK_MOUSE):
+                self.btn_bind.config(
+                    text="needs Ctrl, Shift or Alt  (or an F-key)")
+                break                       # keep listening; they'll try again
+            self._set_reset_bind({"vk": vk, "shift": shift, "ctrl": ctrl,
+                                  "alt": alt})
+            self._end_bind_capture()
+            return
+        self._bind_poll_job = self.root.after(40, self._poll_bind_capture)
+
+    def _end_bind_capture(self):
+        self._binding_now = False
+        if getattr(self, "_bind_poll_job", None):
+            try:
+                self.root.after_cancel(self._bind_poll_job)
+            except tk.TclError:
+                pass
+            self._bind_poll_job = None
+        try:
+            self.btn_bind.unbind("<KeyPress>")
+        except tk.TclError:
+            pass
+        self._refresh_menu()
+
+    def _on_bind_key(self, event):
+        """Tk's `keycode` IS the Windows virtual-key code, which is exactly
+        what the hook compares against — so nothing has to be translated."""
+        vk = int(event.keycode)
+        if vk == 0x1B or vk in VK_UNBINDABLE:      # Esc, or a bare modifier
+            if vk == 0x1B:
+                self._end_bind_capture()
+            return "break"                          # modifiers: keep listening
+        # Tk's state bitmask: 0x1 Shift, 0x4 Control, 0x20000 Alt on Windows.
+        shift, ctrl = bool(event.state & 0x1), bool(event.state & 0x4)
+        alt = bool(event.state & 0x20000)
+        # A bare letter would be swallowed while you play — the hook eats the
+        # key it fires on, so binding "W" costs you walking forwards. Function
+        # keys are exempt: nothing in the game is bound to them by default and
+        # they're the obvious thing to want here.
+        if (not (shift or ctrl or alt) and not (0x70 <= vk <= 0x87)
+                and vk not in VK_MOUSE):
+            self.btn_bind.config(text="needs Ctrl, Shift or Alt  (or an F-key)")
+            return "break"
+        self._set_reset_bind({"vk": vk, "shift": shift, "ctrl": ctrl,
+                              "alt": alt})
+        self._end_bind_capture()
+        return "break"
+
+    def _set_reset_bind(self, bind):
+        RESET_BIND.update(bind)
+        self._save_settings()
+        self._draw_hint()          # the floating hint carries the same label
+        self.btn_reset_data.config(
+            text=f"Reset encounter data   ({bind_label()})")
+        # Only the RegisterHotKey fallback needs telling; the low-level hook
+        # reads RESET_BIND on every keypress and has already picked it up.
+        if RESET_BIND.get("vk") in VK_MOUSE and REBIND_TO[0]:
+            print("[meter] mouse buttons need the low-level hook, which isn't "
+                  "installed — this binding won't fire.", file=sys.stderr)
+        if REBIND_TO[0] and sys.platform == "win32":
+            try:
+                ctypes.windll.user32.PostThreadMessageW(
+                    REBIND_TO[0], WM_REBIND, 0, 0)
+            except Exception as e:
+                print(f"[meter] couldn't re-register the hotkey: {e}",
+                      file=sys.stderr)
+        print(f"[meter] reset bind is now {bind_label()}", file=sys.stderr)
+
+    def _unpost_menus(self):
+        """Take down any dropdown that's currently posted.
+
+        Tk posts an OptionMenu's list as a separate toplevel with a grab on the
+        pointer. Withdrawing the panel underneath doesn't touch it, so closing
+        the escape menu — or alt-tabbing — while a dropdown was open left the
+        choices floating over the game with nothing behind them. `unpost` on a
+        menu that isn't posted is harmless, so this needs no bookkeeping about
+        which one was open."""
+        for opt in getattr(self, "_option_menus", ()):
+            try:
+                opt["menu"].unpost()
+            except tk.TclError:
+                pass
+        # The grab goes with it: Tk holds one while a menu is posted, and a
+        # stray grab is how the game stops seeing the mouse at all.
+        try:
+            self.menu.grab_release()
+        except tk.TclError:
+            pass
+
+    def _alpha_for(self, key):
+        """What this window's opacity should settle at when it's on screen.
+
+        The slider is a percentage taken OFF the overlay's normal opacity, so 0
+        is the look the meter has always had rather than a subtly different
+        one. The exempt windows ignore it entirely."""
+        if key in TRANSPARENCY_EXEMPT or not self._transparency:
+            return OVERLAY_ALPHA
+        return OVERLAY_ALPHA * (1.0 - min(TRANSPARENCY_MAX,
+                                          self._transparency) / 100.0)
+
+    def _set_transparency(self, percent):
+        """Apply the slider. Windows already on screen are set outright rather
+        than faded there: a fade is for something arriving or leaving, and this
+        is neither — you're dragging a slider and watching the result."""
+        percent = max(0, min(TRANSPARENCY_MAX, int(percent)))
+        if percent == self._transparency:
+            return
+        self._transparency = percent
+        for key, win in self._fade_win.items():
+            if not self._shown.get(key):
+                continue
+            self._alpha[key] = self._alpha_for(key)
+            try:
+                win.attributes("-alpha", self._alpha[key])
+            except tk.TclError:
+                pass
+        self._save_settings()
+        print(f"[meter] transparency {percent}%", file=sys.stderr)
+
+    def _on_transparency_pick(self):
+        # Queued like every other menu action: it touches window state the
+        # refresh loop also reads, and Tk isn't thread-safe.
+        self._enqueue(lambda: self._set_transparency(self._transp_var.get()))()
+
     def _step_fade(self):
         """Walk every faded window one step towards its target opacity, and
         unmap it once it reaches zero. Reversing mid-fade needs no special
@@ -4302,7 +4783,7 @@ class Overlay:
         self._fade_job = None
         fading = False
         for key, win in self._fade_win.items():
-            target = OVERLAY_ALPHA if self._shown[key] else 0.0
+            target = self._alpha_for(key) if self._shown[key] else 0.0
             a = self._alpha[key]
             if a == target:
                 continue
@@ -4381,6 +4862,12 @@ class Overlay:
         for key, label, _cats in MINIMAP_FILTERS:
             on = self._map_filters.get(key, True)
             self.btn_map_filter[key].config(
+                text=("☑  " if on else "☐  ") + label)
+        if not self._binding_now:
+            self.btn_bind.config(text=bind_label())
+        for key, label, _cats in COMPASS_FILTERS:
+            on = self._compass_filters.get(key, True)
+            self.btn_compass_filter[key].config(
                 text=("☑  " if on else "☐  ") + label)
         # A standing setting, so this one shows its state rather than its action.
         self.btn_hide_ooc.config(

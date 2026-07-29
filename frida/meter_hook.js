@@ -539,12 +539,19 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
             }
             // Foes are culled here rather than overlay-side so the payload
             // stays small regardless of how crowded the zone is. Rounded for
-            // the same reason: sub-unit precision is invisible on a minimap.
+            // the same reason: sub-unit precision is invisible on a minimap —
+            // except on things that MOVE, which get a decimal below, because
+            // whole units make a walking marker step rather than glide.
             // z rides along so the overlay can fade things on a different
             // floor: a mob directly below you is not the same news as one you
             // can walk to, and on the flat map they look identical.
-            const ent = { c: cat, x: Math.round(x), y: Math.round(y),
-                          z: Math.round(z) };
+            // One decimal for players and mobs, whole units for the scenery.
+            // A static marker's rounding is a fixed offset you never see; a
+            // moving one's changes every frame, which is the same jitter the
+            // player's own position had.
+            const q = (cat === "hero" || cat === "foe") ? 10 : 1;
+            const ent = { c: cat, x: Math.round(x * q) / q,
+                          y: Math.round(y * q) / q, z: Math.round(z * q) / q };
             if (cat === "hero") {
                 // Named so the overlay can ring party members. Party membership
                 // is matched by name against the group roster the meter already
@@ -625,8 +632,18 @@ function sweepWorld() {
         sweepArray(layer.add(G.units).readPointer(), out, me, false, seen);
         sweepArray(layer.add(G.interactibles).readPointer(), out, me, false, seen);
         sweepArray(layer.add(G.entities).readPointer(), out, me, true, seen);
-        send({ kind: "world", me: { x: Math.round(me.x), y: Math.round(me.y),
-                                    z: Math.round(me.z),
+        // Two decimals on YOUR position, where every other coordinate gets
+        // whole units. It matters here and nowhere else: a static marker's
+        // rounded position never changes, but yours does, so rounding it put a
+        // half-unit of error into every relative offset and flipped its sign
+        // each time you crossed a unit boundary. On a 405px map covering 350
+        // units that is about a pixel of side-to-side shake, most obvious when
+        // you walk straight at something — the one case where the marker is
+        // supposed to hold still. One object per frame, so the precision is
+        // free.
+        send({ kind: "world", me: { x: Math.round(me.x * 100) / 100,
+                                    y: Math.round(me.y * 100) / 100,
+                                    z: Math.round(me.z * 100) / 100,
                                     r: Math.round(me.r * 1000) / 1000,
                                     // Camera yaw, or null until the camera has
                                     // been seen. The overlay falls back to r.

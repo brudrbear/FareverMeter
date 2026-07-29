@@ -201,12 +201,15 @@ again.
 |---|---|---|
 | Options | Show all players / Show party only | switches between your group and everyone nearby; resets the encounter |
 | Options | Theme | Five choices — see [Themes](#themes). `Dark Dynamic` is the default. |
+| Options | Transparency | how see-through the overlay is, 0-80%. It covers the meter, breakdown, minimap, compass and rift timer — panel, header bar and text together, since window opacity is the only kind Windows offers. The control menu and the rift prompt are exempt: one is what you're reading while you drag the slider, the other is a question that has to be answered |
 | Options | Minimap | `Rotating` (default) turns the map with the camera, so the top of the map is whatever you're looking at. `Fixed` keeps north up and turns the arrow instead. |
 | Options | Map refresh | how often the minimap is updated — `Ultra` (~30/sec), `High` (~16/sec, default), `Medium` (~9/sec), `Low` (~4/sec). Lower costs less CPU in the game; below about 8/sec the dots visibly step. |
 | Scaling | Meter / Breakdown / Settings / Minimap | each window sizes independently, so one can be big and another small |
 | Show / hide | Damage meter / Breakdown / Rift timer / Minimap | `Show`, `Hide`, or `Show in ESC` — the last keeps it off screen while you play and brings it back with the game's menu |
 | Show / hide | Healing columns | columns inside the meter rather than a window, so it stays a tick |
 | Show / hide | Hide out of combat | fades both windows away a few seconds after the fighting stops |
+| Controls | Reset data | the keybind for resetting the encounter, `Shift + \` by default. Click it and press the combination you want. It needs a modifier (or an F-key, or a mouse button) — the meter *swallows* what it fires on, so a bare letter would cost you that key in game. **Middle click, Mouse 4 and Mouse 5 can be bound**; left and right never can. Takes effect immediately |
+| Compass | Collectibles / Party Members | what the bearing strip carries. Separate from the minimap's ticks below — the two panels answer different questions, and wanting chests on one but not the other is ordinary. Soulstones have no tick and always show |
 | Minimap | Collectibles / Players / Enemies / Activities | what the map draws, by category — orbs and chests share one tick, since nobody wants one without the other. Obelisks, respawn points and soulstones have no tick and are always drawn: they're the landmarks you navigate *by*. The compass isn't affected |
 | Actions | 60s Parse Mode | see below |
 | Actions | Parse Screenshots | opens `parses/` in Explorer (created on the spot if you haven't run one yet) |
@@ -342,11 +345,14 @@ minimap stops at 120 units. A chest three thousand units away still has a
 bearing, and that's the case the strip exists for.
 
 It carries only what you'd travel toward — **party members**, **available
-orbs**, **unopened chests** and **soulstones**. Enemies, respawn points,
-activities and obelisks are left off on purpose: a compass crowded with things
-that are permanently there is a smear. **Soulstones are the one exception to
-the no-limit rule** and only appear within 200 units, since they're worth
-knowing about when you're near one and noise when you aren't.
+orbs**, **unopened chests**, **soulstones** and **obelisks**. Enemies, respawn
+points and activities are left off on purpose: a compass crowded with things
+that are permanently there is a smear.
+
+**Soulstones and obelisks are the exceptions to the no-limit rule** and only
+appear within 200 units. Both are worth knowing about when you're near one and
+noise when you aren't — there are ten obelisks in a zone and they never move,
+so at whole-map range they were most of what the strip was carrying.
 
 **Under each marker is how far away it is** in world units — `44`, `653`,
 `2.7k` — with `↑` or `↓` if it's well above or below you. When two markers are
@@ -356,11 +362,14 @@ Icons match the minimap, `N`/`E`/`S`/`W` mark the cardinals along the top, and
 the tick in the middle is dead ahead. You aren't drawn on it: you're dead ahead
 by definition.
 
-**It has no panel** — no background, no border, no shadow, in any theme and at
-any time. The markers and numbers sit straight on the game, and clicks pass
-through them to whatever is underneath. To move it, free the mouse (`Alt` or
-`Esc`) and drag it **by a marker, a cardinal letter or the centre tick**: those
-are the only real pixels on it, and everything else is genuinely not there.
+It sits on a **pill-shaped panel** in the map's colours — fully round at both
+ends, no border and no shadow, so it reads as a band of colour rather than a
+window. The panel stops just above the distances, so **the numbers hang off its
+lower edge** onto the game rather than being boxed in with everything else.
+Bearings are mapped across the pill's straight section, so nothing is ever drawn
+on a rounded end where there'd be no panel under it. Drag it anywhere on itself once the
+mouse is free (`Alt` or `Esc`); clicks pass through to the game the rest of the
+time.
 
 Hide it or set it to `Show in ESC` like the other windows, and it has its own
 entry under Scaling.
@@ -379,6 +388,11 @@ overlay** — meter, breakdown, minimap and compass — into the map panel's nav
 | `Dark` | navy throughout | unchanged |
 | `Rift` | rift colours | rift colours |
 
+`Rift` stays rift with the escape menu open, too — if you pinned it, you asked
+for it. The two `Dynamic` modes still show their own palette there, since in
+their case the rift colours are something the game put you in rather than
+something you chose.
+
 Three colours never change with the theme: **blue damage**, **green healing**,
 and green for "the overlay is unlocked". Those carry meaning, and a theme that
 recoloured them would be renaming the language the meter is written in.
@@ -387,11 +401,6 @@ The rift look has no Farever or Dark variant on purpose: a rift looks like a
 rift, and the two `Dynamic` entries are how you get it — that's what they're
 for. `Rift` pins it for anyone who just likes the colours.
 
-Note that the **compass ink is light on every theme**, warm cream on Farever and
-cool white on Dark. With no panel behind it the strip has to read against the
-game, and the game is mostly dark; a brown-inked compass was tried and the
-numbers vanished into a grass texture.
-
 If you're upgrading, a saved `Dynamic` becomes `Dark Dynamic` — the same thing
 it always drew.
 
@@ -399,10 +408,12 @@ it always drew.
 
 | Key | Action |
 |---|---|
-| `Shift+\` | reset the current encounter (breakdown snaps back to you) |
+| `Shift+\` *(rebindable)* | reset the current encounter (breakdown snaps back to you) — change it under **Controls** in the menu |
 
 It fires while Farever has focus, with a global `RegisterHotKey` fallback if the
-low-level hook is blocked.
+low-level hook is blocked. A **mouse** binding needs that low-level hook —
+`RegisterHotKey` can't see mouse buttons — so on the fallback path the log says
+so rather than leaving you wondering.
 
 ### Rifts
 
