@@ -177,6 +177,11 @@ let foeQueue = [];
 const FOE_QUEUE_MAX = 48;
 const CLASSIFY_PER_TICK = 3;
 
+// GAME THREAD ONLY: the getHero functions are HL calls, and an HL call from
+// frida's timer thread dies with "Can't lock GC in unregistered thread".
+// This probe originally ran it on a setInterval and got away with it by
+// timing luck; inv_probe.js made the identical mistake and crashed the game.
+// It now runs only inside the fetchBosses hook.
 function refreshLocalHero() {
     if (localHero && !localHero.isNull()) return;
     for (const nm in DATA.funcs) {
@@ -243,6 +248,7 @@ function snapshot() {
 function onFetch() {
     fetchCalls++;
     if (firstFetchAt === null) firstFetchAt = Date.now();
+    refreshLocalHero();     // game thread — the only legal place for HL calls
     // Game thread: the only safe place for the HL calls the sweep queued up.
     for (let i = 0; i < CLASSIFY_PER_TICK && foeQueue.length; i++) {
         const job = foeQueue.shift();
@@ -366,9 +372,9 @@ function main() {
     log("hooked ui.hud.BossesInfo.fetchBosses (findex " + B.fn.fetchBosses + ")"
         + (B.fn.init != null ? " + init (" + B.fn.init + ")" : ""));
     log("walk to a boss and pull it. Ctrl+C when done.");
-    refreshLocalHero();
-    log("localHero = " + localHero);
-    setInterval(refreshLocalHero, 3000);
+    // No refreshLocalHero here or on a timer: main() and setInterval both run
+    // on frida's own thread, where HL calls crash the runtime. The hero is
+    // picked up by the next fetchBosses tick (~2/s) instead.
     setInterval(sweepFoes, 2000);
     setInterval(report, 1000);
     recv("summary", function () { summary(); });
