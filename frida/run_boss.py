@@ -26,6 +26,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "hltools"))
 from hlbc_parser import HLCode, HOBJ, HSTRUCT      # noqa: E402
 from gamepath import find_hlboot                   # noqa: E402
+from datafresh import assert_resolver_current      # noqa: E402
 
 DURATION = float(sys.argv[1]) if len(sys.argv) > 1 else 180.0
 
@@ -36,6 +37,7 @@ def build_targets():
     # gamepath supports moves to argv[2]. Left at its default, find_hlboot
     # would read the duration as a filename and abort.
     code = HLCode(find_hlboot(argv_index=2)).parse()
+    assert_resolver_current(code)   # stale analysis_out reads as 'found nothing'
     byname = {t.name: t for t in code.types
               if t.kind in (HOBJ, HSTRUCT) and t.name}
 
