@@ -6895,7 +6895,7 @@ def _run(tray, session, ui_state, world):
     hero_id = {"name": None}           # last local hero, to keep the log quiet
     nullified: dict = {}               # mitigated-hit shapes seen, see below
     nullified_at = [0.0]               # last time they were reported
-    boss_fight_on = [False]            # a boss fight is in progress, see below
+    boss_fight_on = [False]            # a boss fight is under way, see below
 
     def on_message(message, data):
         liveness["t"] = time.monotonic()   # any agent traffic counts as alive
@@ -6960,24 +6960,25 @@ def _run(tray, session, ui_state, world):
             # raises the same bar and must NOT reset the meter or play a cue.
             ui_state.set_boss_bar(p.get("n") or 0)
             ov = _OVERLAY["ref"]
-            # A boss fight is "on" while at least one BOSS bar is up, and the
-            # reset fires on the edge into that state — the mirror image of the
-            # victory cue, which fires on the way out of it. `boss` is the
-            # hook's any-boss flag over the CURRENT bar set, so it is the same
-            # signal the fight-end rule reads.
+            # The reset fires on the edge INTO a boss fight, once, and the
+            # fight only ends the two ways it ends for the player: the boss
+            # died (the same signal the victory cue rides on, below), or a
+            # loading screen took them out of the instance (the zone handler).
             #
-            # This replaces a one-reset-per-instance latch that was re-armed
-            # only by a loading screen. The latch stopped duplicate-spawning
-            # bosses from wiping the meter mid-fight, but it also meant a
-            # second, different boss in the same instance never reset at all —
-            # which is the inconsistency this fixes. The edge does both jobs:
-            # copies raising bars during a fight that is already on are not a
-            # new edge, and the state re-arms by itself the moment the last
-            # boss bar drops, with no loading screen needed.
+            # What decidedly does NOT end it is "no boss bar is up right now".
+            # That was the previous rule and the Nightqueen breaks it: she
+            # replaces herself with copies, and between the old bar dropping
+            # and the new ones rising there is at least one poll seeing zero
+            # boss bars. That read as the fight ending, so the copies' bars
+            # read as a fresh pull and wiped the meter repeatedly through a
+            # single fight.
+            #
+            # The cost of the stricter rule: walking away from a boss and
+            # re-pulling it, without dying and without a loading screen, will
+            # not reset again — the fight never formally ended. A wipe usually
+            # brings a loading screen with it, which does re-arm.
             now_boss = bool(p.get("boss"))
-            if not now_boss:
-                boss_fight_on[0] = False
-            elif not boss_fight_on[0]:
+            if now_boss and not boss_fight_on[0]:
                 boss_fight_on[0] = True
                 kinds = [b.get("kind") for b in (p.get("up") or [])
                          if b.get("boss")]
@@ -7004,6 +7005,21 @@ def _run(tray, session, ui_state, world):
                 if b.get("boss") and b.get("killed"):
                     print(f"[meter] boss killed: {b.get('kind')}",
                           file=sys.stderr)
+                    # A kill ends the fight and re-arms the reset — but ONLY
+                    # if it took the last boss bar with it. The hook keys bars
+                    # by unit pointer and caches the boss/elite classification
+                    # by KIND, so every copy the Nightqueen spawns is its own
+                    # bar carrying boss=true, and a copy dying reports exactly
+                    # the same {boss, killed} as she does. Re-arming on that
+                    # would unlatch mid-fight and let the surviving copies'
+                    # bars read as a fresh pull on the very next poll — the
+                    # reported bug, straight back through a different door.
+                    # `boss` is computed over the bar set as it stands AFTER
+                    # this removal, so "no boss left" is exactly what it says.
+                    if not now_boss:
+                        boss_fight_on[0] = False
+                        print("[meter] last boss bar down — pull reset "
+                              "re-armed", file=sys.stderr)
                     if ov is not None:
                         ov.on_boss_kill()
         elif k == "pickup":
@@ -7027,9 +7043,10 @@ def _run(tray, session, ui_state, world):
         elif k == "zone":
             ui_state.clear()      # the UI is rebuilt across a loading screen
             session.reset()
-            # Belt and braces: the bar state normally re-arms itself when the
-            # last boss bar drops, but a loading screen taken mid-fight can
-            # tear the UI down without a final bossbar message.
+            # The other way a boss fight ends. Nothing else re-arms the pull
+            # reset now that a dropped bar doesn't, so leaving an instance
+            # mid-fight has to — otherwise a fight abandoned rather than won
+            # would suppress the reset for the rest of the session.
             boss_fight_on[0] = False
             print(f"[meter] zone change ({p.get('sig')!r}) — meter reset",
                   file=sys.stderr)
