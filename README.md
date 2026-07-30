@@ -151,6 +151,15 @@ installer, then the meter closes, installs the update and starts again as the
 new version. Your settings and window positions survive — the installer never
 touches them.
 
+When it comes back as the new version, a **what's new** window shows you that
+release's notes — dismiss it with **Got it** or `Esc`, and it won't come back
+until the next update. It only appears after an update you asked for, never on
+an ordinary launch.
+
+The version you're running is in the **top right of the control menu header**,
+which is the first thing worth knowing when the meter behaves differently from
+what the notes describe.
+
 Nothing downloads or installs until you click. If the automatic route isn't
 available (offline, or a run from source), the notice opens the releases page
 in your browser instead, like it always did.

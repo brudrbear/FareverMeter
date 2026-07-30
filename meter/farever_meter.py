@@ -43,6 +43,7 @@ import json
 import math
 import os
 import queue
+import re
 import sys
 import tempfile
 import threading
@@ -1021,6 +1022,44 @@ def _fetch_json(url):
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
+def _fetch_release_notes(tag):
+    """The release body for a tag, or None. Same never-fail-loudly rule as the
+    version check: a missing what's-new window is not worth a dialog."""
+    try:
+        rel = _fetch_json(UPDATE_API_RELEASE_TAG + str(tag))
+    except Exception as e:
+        print(f"[update] couldn't fetch the notes for {tag}: {e}",
+              file=sys.stderr)
+        return None
+    body = (rel or {}).get("body")
+    return body.strip() if body and body.strip() else None
+
+
+# Deliberately crude: the notes are GitHub Markdown and this is a Tk text
+# widget, so the goal is "reads cleanly", not fidelity. Headings keep their
+# text, emphasis and code ticks come off, links keep their label, and the
+# blockquote/rule furniture becomes whitespace.
+_MD_LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+_MD_HEAD = re.compile(r"^\s{0,3}#{1,6}\s*")
+_MD_RULE = re.compile(r"^\s*([-*_])(\s*\1){2,}\s*$")
+
+
+def _markdown_to_text(md):
+    out = []
+    for line in md.splitlines():
+        if _MD_RULE.match(line):
+            out.append("")
+            continue
+        line = _MD_HEAD.sub("", line)
+        line = re.sub(r"^\s{0,3}>\s?", "", line)
+        line = _MD_LINK.sub(r"\1", line)
+        line = line.replace("**", "").replace("`", "")
+        out.append(line.rstrip())
+    text = "\n".join(out)
+    # Collapse the runs of blank lines the stripping leaves behind.
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
 def _release_installer_asset(rel):
     """(download_url, size) of the release's Setup.exe, or (None, 0).
 
@@ -1890,6 +1929,11 @@ UPDATE = {"latest": None, "url": REPO_URL, "asset": None, "asset_size": 0}
 # helper script that runs it after the meter exits. Under DATA_HOME so an
 # update never needs to write into the install directory it's replacing.
 UPDATE_DIR = DATA_HOME / "updates"
+# Left by the outgoing build, read and deleted by the one that replaces it —
+# see _show_whats_new. Lives beside the installer rather than with the settings
+# because it belongs to the update, not to the user's preferences.
+UPDATED_MARKER = UPDATE_DIR / "just_updated.json"
+UPDATE_API_RELEASE_TAG = f"https://api.github.com/repos/{REPO}/releases/tags/"
 
 # True in the shipped build (PyInstaller sets it). Only that build can
 # self-update: a from-source run has no installed copy to replace.
@@ -2580,6 +2624,7 @@ class Overlay:
         self._dl = None                # download progress, written off-thread
         self._updwin = None            # the "Updating ..." progress window
         self._game_exit_win = None     # the "Farever has stopped" prompt
+        self._whats_new_win = None     # the post-update release notes
         self._map_mode = MINIMAP_MODES[0]   # "Rotating" — you always face up
         self._transparency = 0              # percent, on top of OVERLAY_ALPHA
         # Per-category ticks for each panel; everything on until told otherwise.
@@ -3141,7 +3186,19 @@ class Overlay:
                                 font=self.fonts_m["ui_b"], anchor="w",
                                 padx=8, pady=4)
         self.m_title.pack(side="left")
-        self._bind_drag(self.menu, (self.m_header, self.m_title))
+        # Which build you're actually running, where you'd look for it. Dimmer
+        # than the title: it answers a question rather than asking for
+        # attention, and it's the first thing worth knowing when something
+        # behaves differently from what the notes describe. Draggable along
+        # with the rest of the header — a strip you can't grab is a strip that
+        # feels broken.
+        self.m_version = tk.Label(self.m_header, text=f"v{VERSION}",
+                                  bg=BG_HEADER_UNLOCKED, fg=FG_HEADER,
+                                  font=self.fonts_m["ui_tiny_i"], anchor="e",
+                                  padx=8, pady=4)
+        self.m_version.pack(side="right")
+        self._bind_drag(self.menu,
+                        (self.m_header, self.m_title, self.m_version))
 
         body = tk.Frame(border, bg=BG_BODY, padx=8, pady=8)
         body.pack(fill="both", expand=True)
@@ -4869,6 +4926,18 @@ class Overlay:
             except Exception as e:
                 self._update_failed(f"couldn't start the update helper: {e}")
                 return
+            # Breadcrumb for the build that replaces this one: it has no other
+            # way to know it arrived via the update button rather than a normal
+            # launch, and only the former earns a "what's new" window. Written
+            # after the helper is safely spawned — a marker for an update that
+            # never happened would greet the wrong version.
+            try:
+                UPDATED_MARKER.write_text(
+                    json.dumps({"version": UPDATE["latest"],
+                                "from": VERSION}), encoding="utf-8")
+            except OSError as e:
+                print(f"[update] couldn't leave the what's-new marker: {e}",
+                      file=sys.stderr)
             print("[update] installer downloaded — handing off to the helper "
                   "and exiting.", file=sys.stderr)
             self._quit()
@@ -4958,6 +5027,101 @@ class Overlay:
         win.geometry(f"+{(win.winfo_screenwidth() - win.winfo_width()) // 2}"
                      f"+{(win.winfo_screenheight() - win.winfo_height()) // 3}")
         self._game_exit_win = win
+
+    def check_whats_new(self):
+        """If this build arrived through the update button, show its notes once.
+
+        The marker is consumed no matter what happens next: one that outlived
+        its update would greet every launch from here on, and a window nobody
+        asked for is worse than no window."""
+        try:
+            marker = json.loads(UPDATED_MARKER.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return                      # a normal launch, which is most of them
+        except Exception as e:
+            print(f"[update] unreadable what's-new marker ({e}); ignoring.",
+                  file=sys.stderr)
+            marker = {}
+        try:
+            UPDATED_MARKER.unlink()
+        except OSError:
+            pass
+        if marker.get("version") != VERSION:
+            # The update didn't land, or something else replaced the build.
+            # Either way these notes would describe the wrong version.
+            return
+        print(f"[update] updated from {marker.get('from')} to {VERSION} — "
+              "fetching the release notes.", file=sys.stderr)
+
+        def work():
+            body = _fetch_release_notes(VERSION)
+            if body:
+                self._enqueue(lambda: self._show_whats_new(body))()
+            else:
+                print("[update] no release notes to show.", file=sys.stderr)
+
+        threading.Thread(target=work, daemon=True, name="whats-new").start()
+
+    def _show_whats_new(self, body):
+        """A dismissable panel of its own, like the game-exit prompt — it has
+        to be readable with the game in any state, so it follows none of the
+        overlay's visibility rules."""
+        if self._whats_new_win is not None:
+            return
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        outer = tk.Frame(win, bg=BG_BORDER, padx=2, pady=2)
+        outer.pack(fill="both", expand=True)
+
+        header = tk.Frame(outer, bg=BG_HEADER_UNLOCKED)
+        header.pack(fill="x")
+        title = tk.Label(header, text=f"Farever+ is now {VERSION}",
+                         bg=BG_HEADER_UNLOCKED, fg=FG_HEADER,
+                         font=self.fonts_m["ui_b"], anchor="w", padx=10, pady=5)
+        title.pack(side="left")
+        self._bind_drag(win, (header, title))
+
+        body_fr = tk.Frame(outer, bg=BG_BODY, padx=14, pady=12)
+        body_fr.pack(fill="both", expand=True)
+
+        text_fr = tk.Frame(body_fr, bg=BG_BODY)
+        text_fr.pack(fill="both", expand=True)
+        scroll = tk.Scrollbar(text_fr, orient="vertical")
+        scroll.pack(side="right", fill="y")
+        txt = tk.Text(text_fr, wrap="word", width=64, height=22,
+                      bg=BG_BODY, fg=FG_TEXT, relief="flat", bd=0,
+                      padx=4, pady=2, font=("Segoe UI", 9),
+                      yscrollcommand=scroll.set, cursor="arrow")
+        txt.pack(side="left", fill="both", expand=True)
+        scroll.config(command=txt.yview)
+        txt.insert("1.0", _markdown_to_text(body))
+        # Read-only, but still selectable and scrollable — `state="disabled"`
+        # is the usual trick and it kills the mouse wheel too.
+        txt.bind("<Key>", lambda _e: "break")
+
+        row = tk.Frame(body_fr, bg=BG_BODY)
+        row.pack(fill="x", pady=(10, 0))
+
+        def close():
+            self._whats_new_win = None
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+
+        tk.Button(row, text="Got it", command=close,
+                  bg=BG_HEADER_UNLOCKED, fg=FG_HEADER,
+                  activebackground=BG_HEADER_UNLOCKED,
+                  activeforeground=FG_HEADER, relief="flat", bd=0,
+                  padx=14, pady=6, cursor="hand2",
+                  font=("Segoe UI", 9, "bold")).pack(side="right")
+        win.protocol("WM_DELETE_WINDOW", close)
+        win.bind("<Escape>", lambda _e: close())
+        win.update_idletasks()
+        win.geometry(f"+{(win.winfo_screenwidth() - win.winfo_width()) // 2}"
+                     f"+{(win.winfo_screenheight() - win.winfo_height()) // 4}")
+        self._whats_new_win = win
 
     def request_quit(self):
         """Stop the meter, safely callable from any thread — the tray icon runs
@@ -5807,6 +5971,10 @@ class Overlay:
             self._refresh()
             self.root.after(REFRESH_MS, loop)
         loop()
+        # Deferred rather than called here: it wants a live Tk loop to schedule
+        # the window onto, and the fetch behind it is a network round trip that
+        # has no business delaying the overlay coming up.
+        self.root.after(1200, self.check_whats_new)
         self.root.mainloop()
 
 
@@ -6095,15 +6263,32 @@ def regenerate_data(hlboot=None, force=False):
         stamp = {"src": str(hlboot), "mtime": st.st_mtime, "size": st.st_size}
         if not force:
             try:
-                if (json.loads(DATA_STAMP.read_text()) == stamp
-                        and (ANALYSIS / "resolver_data.json").is_file()
-                        and (ANALYSIS / "meter_offsets.json").is_file()
-                        and _data_is_current()):
+                # Say WHY when the skip doesn't happen. Regenerating costs two
+                # subprocess parses of a 14 MB bytecode file, right as the game
+                # is loading, and without this the log shows the cost with no
+                # reason attached — which is exactly the state that made a
+                # stale stamp take an hour to spot. `_data_is_current` prints
+                # its own reason, so only the stamp arm needs one here.
+                on_disk = json.loads(DATA_STAMP.read_text())
+                if on_disk != stamp:
+                    print(f"[meter] hlboot.dat has changed since the last "
+                          f"regenerate (stamp {on_disk.get('size')} bytes, "
+                          f"now {stamp['size']}); regenerating.",
+                          file=sys.stderr)
+                elif (not (ANALYSIS / "resolver_data.json").is_file()
+                        or not (ANALYSIS / "meter_offsets.json").is_file()):
+                    print("[meter] a generated file is missing; regenerating.",
+                          file=sys.stderr)
+                elif _data_is_current():
                     print("[meter] data already matches this build "
                           "(hlboot.dat unchanged).", file=sys.stderr)
                     return True
-            except Exception:
-                pass
+            except FileNotFoundError:
+                print("[meter] no data stamp yet; regenerating.",
+                      file=sys.stderr)
+            except Exception as e:
+                print(f"[meter] couldn't read the data stamp ({e}); "
+                      "regenerating.", file=sys.stderr)
     # The tools write beside their own location, which frozen is the bundle's
     # temp directory — the output would be thrown away with it on exit. Point
     # them at the writable copy instead. Harmless from source, where the two
@@ -6126,10 +6311,23 @@ def regenerate_data(hlboot=None, force=False):
                   file=sys.stderr)
             return False
     if stamp is not None:
+        # Written AND read back. A stamp that silently fails to land costs a
+        # full regenerate on every single launch — the data stays correct, so
+        # nothing looks wrong except several seconds of startup, and the old
+        # `except OSError: pass` made that invisible. Whatever goes wrong here,
+        # the log now says so once per launch instead of never.
         try:
-            DATA_STAMP.write_text(json.dumps(stamp))
-        except OSError:
-            pass
+            DATA_STAMP.write_text(json.dumps(stamp), encoding="utf-8")
+            back = json.loads(DATA_STAMP.read_text())
+            if back != stamp:
+                print("[meter] the data stamp did not take — every launch will "
+                      f"regenerate. Wrote {stamp['size']} bytes, read back "
+                      f"{back.get('size')}. Check {DATA_STAMP}.",
+                      file=sys.stderr)
+        except Exception as e:
+            print(f"[meter] couldn't write the data stamp ({e}) — data is "
+                  "correct, but every launch will regenerate it. "
+                  f"Check {DATA_STAMP}.", file=sys.stderr)
     print("[meter] data regenerated for current build.", file=sys.stderr)
     return True
 
