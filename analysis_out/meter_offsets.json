@@ -31,10 +31,27 @@
     "health": 240
   },
   "Hero": {
-    "name": 1272,
-    "player": 1208,
-    "isInCombat": 680,
-    "layer": 112
+    "name": 1280,
+    "player": 1216,
+    "isInCombat": 688,
+    "layer": 112,
+    "loadout": 1232,
+    "weaponInHand": 1344
+  },
+  "Loadout": {
+    "inventory": 136,
+    "equipment": 120
+  },
+  "Inventory": {
+    "content": 120
+  },
+  "Item": {
+    "kind": 112,
+    "uid": 32
+  },
+  "Weapon": {
+    "rarity": 160,
+    "level": 144
   },
   "GameLayer": {
     "isRift": 248,
@@ -56,16 +73,16 @@
     "removed": 8
   },
   "Interactible": {
-    "enabled": 592,
-    "isOffScreen": 608
+    "enabled": 600,
+    "isOffScreen": 616
   },
   "Activity": {
-    "kind": 464
+    "kind": 472
   },
   "Element": {
-    "kind": 616,
-    "stateId": 656,
-    "currentVisualState": 672
+    "kind": 624,
+    "stateId": 664,
+    "currentVisualState": 680
   },
   "Camera": {
     "direction": 208,
@@ -73,13 +90,13 @@
     "distance": 192
   },
   "Unit": {
-    "kind": 592,
-    "inf": 632,
-    "attr": 976
+    "kind": 600,
+    "inf": 640,
+    "attr": 984
   },
   "Foe": {
-    "summonOwner": 1224,
-    "persistantSummon": 1240
+    "summonOwner": 1232,
+    "persistantSummon": 1248
   },
   "ArrayObj": {
     "length": 8,

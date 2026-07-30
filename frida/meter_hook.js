@@ -214,6 +214,9 @@ function checkZone() {
         if (lastZoneSig !== null && sig !== lastZoneSig) {
             resetWindows();          // the whole UI is rebuilt across a load
             send({ kind: "zone", sig: sig });
+            // The loadout is re-replicated across a load, so re-baseline the
+            // inventory instead of reporting all of it as picked up.
+            invReady = false;
             // Drop the camera: the layer is being rebuilt and the object we
             // were holding may not survive it. postUpdate re-latches on the
             // next frame the real camera runs.
@@ -390,8 +393,10 @@ function hookCamera(base) {
                 // GameCamera calls this, so the check costs a cached lookup.
                 if (typeName(args[0]) === CAM_CLASS) camPtr = args[0];
                 // Game thread: the only safe place for the CDB lookups the
-                // sweep queues up.
+                // sweep queues up — and for the getHero calls below, which are
+                // HL calls like any other findex invocation.
                 drainUnitNames();
+                if (heroRefreshDue) { heroRefreshDue = false; refreshLocalHero(); }
             }
         });
     } catch (e) {
@@ -879,11 +884,170 @@ function readParty(hero) {
     return names;
 }
 
+// ---- legendary pickup cue ----
+// Plain pointer reads only, so this is safe on the sweep's timer thread.
+//
+// st.Inventory.content is an ArrayObj whose entries are NOT items: each is a
+// standalone hl vvirtual (kind 15, value/next both NULL) carrying inline
+// fields {count:Int, item:st.Item}. Reading an entry as an st.Item does not
+// throw, it just yields garbage — a probe round decoded a shader source path
+// as an item `kind` that way. So the `item` field is read out of the virtual's
+// own field table, by NAME (index 0 is `count`).
+//
+//   hl_type         { kind@0, union@8, vobj_proto@16 }
+//   hl_type_virtual { fields@0, nfields@8, dataSize@12, indexes@16 }
+//   hl_obj_field    { name@0, type@8, hashed@16 }   — 24 bytes each
+//
+// and for a standalone virtual the pointer array at v+24 holds each field's
+// storage ADDRESS, so a field value is a double deref.
+const HVIRTUAL = 15;
+const virtFieldIdx = {};        // virtual type ptr -> { field name -> index }
+
+function virtualFieldIndex(t, want) {
+    const key = t.toString();
+    let map = virtFieldIdx[key];
+    if (map === undefined) {
+        map = {};
+        try {
+            const vt = t.add(8).readPointer();
+            const fields = vt.readPointer();
+            const n = vt.add(8).readS32();
+            for (let i = 0; i < n && i < 64; i++) {
+                let nm = null;
+                try { nm = fields.add(i * 24).readPointer().readUtf16String(); }
+                catch (e) {}
+                if (nm) map[nm] = i;
+            }
+        } catch (e) {}
+        virtFieldIdx[key] = map;
+    }
+    const idx = map[want];
+    return idx === undefined ? -1 : idx;
+}
+
+function slotItem(p) {
+    try {
+        if (!p || p.isNull()) return null;
+        const t = p.readPointer();
+        if (t.readU32() !== HVIRTUAL) return null;
+        const ii = virtualFieldIndex(t, "item");
+        if (ii < 0) return null;
+        const st = p.add(24 + ii * 8).readPointer();
+        if (!st || st.isNull()) return null;
+        const it = st.readPointer();
+        return (it && !it.isNull() && it.compare(ptr("0x10000")) > 0) ? it : null;
+    } catch (e) { return null; }
+}
+
+// uid churns on every container move, so it is a slot discriminator only —
+// never an identity. `kind` is what the pickup rule actually compares.
+function itemInfo(it) {
+    const cls = typeName(it);
+    if (!cls || (cls.lastIndexOf("st.Item", 0) !== 0
+                 && cls.lastIndexOf("st.item.", 0) !== 0)) return null;
+    const out = { cls: cls, kind: null, rarity: null, level: null, uid: null };
+    try { out.uid = it.add(OFF.Item.uid).readS64().toString(); } catch (e) {}
+    try { out.kind = hlStr(it.add(OFF.Item.kind).readPointer()); } catch (e) {}
+    // rarity is declared only on st.item.Weapon; at any other class offset 160
+    // is past the end of the object.
+    if (cls === "st.item.Weapon" && OFF.Weapon) {
+        try { out.rarity = hlStr(it.add(OFF.Weapon.rarity).readPointer()); } catch (e) {}
+        try { out.level = it.add(OFF.Weapon.level).readS32(); } catch (e) {}
+    }
+    return out;
+}
+
+let invSeen = null;             // kind -> count, across inventory + equipment
+let invReady = false;           // first sweep only baselines, never fires
+
+// Returns false if the container could not be read. That distinction matters:
+// a failed read looks exactly like an empty bag, and treating one as the other
+// would drop the baseline to nothing and then report every item the hero owns
+// as a fresh pickup on the next good sweep.
+function readContainerKinds(invPtr, into, byUid) {
+    if (!invPtr || invPtr.isNull()) return false;
+    let arr;
+    try { arr = invPtr.add(OFF.Inventory.content).readPointer(); }
+    catch (e) { return false; }
+    if (!arr || arr.isNull()) return false;
+    const A = OFF.ArrayObj;
+    let n, data;
+    try {
+        n = arr.add(A.length).readS32();
+        data = arr.add(A.array).readPointer();
+    } catch (e) { return false; }
+    if (n < 0 || n > 4096 || data.isNull()) return false;
+    if (n === 0) return true;                    // genuinely empty, and read fine
+    for (let i = 0; i < n; i++) {
+        let raw;
+        try { raw = data.add(A.data + i * 8).readPointer(); } catch (e) { continue; }
+        if (!raw || raw.isNull() || raw.compare(ptr("0x10000")) <= 0) continue;
+        const it = slotItem(raw);
+        if (!it) continue;
+        const inf = itemInfo(it);
+        if (!inf || !inf.kind) continue;
+        into[inf.kind] = (into[inf.kind] || 0) + 1;
+        if (!(inf.kind in byUid)) byUid[inf.kind] = inf;
+    }
+    return true;
+}
+
+// Counting by KIND across BOTH containers is what makes this survive the uid
+// churn: unequipping a weapon and re-equipping it moves it from equipment to
+// inventory and back, minting a new uid each time, but the total number of
+// that kind the hero is carrying never changes. Only a genuine gain moves the
+// count up — which is exactly the event worth a cue.
+function sweepInventory() {
+    try {
+        if (!localHero || localHero.isNull()
+            || !OFF.Loadout || !OFF.Inventory || !OFF.Item || !OFF.ArrayObj)
+            return;
+        const loadout = localHero.add(OFF.Hero.loadout).readPointer();
+        if (!loadout || loadout.isNull()) return;
+        const now = {}, info = {};
+        // BOTH containers or neither: a half-read snapshot loses whatever the
+        // failed side held, and every one of those items then reads as a gain
+        // the moment it comes back.
+        const okInv = readContainerKinds(
+            loadout.add(OFF.Loadout.inventory).readPointer(), now, info);
+        const okEq = readContainerKinds(
+            loadout.add(OFF.Loadout.equipment).readPointer(), now, info);
+        if (!okInv || !okEq) return;
+        if (!invReady) {
+            // A zone change or a respawn re-reads the whole loadout; without
+            // this the first sweep after one would report every item the hero
+            // owns as a fresh pickup.
+            invSeen = now; invReady = true; return;
+        }
+        for (const kind in now) {
+            const gained = now[kind] - (invSeen[kind] || 0);
+            if (gained <= 0) continue;
+            const inf = info[kind];
+            if (!inf) continue;
+            send({ kind: "pickup", item: kind, cls: inf.cls,
+                   rarity: inf.rarity, level: inf.level, count: gained });
+        }
+        invSeen = now;
+    } catch (e) {}
+}
+
+// Set by a timer, consumed on the game thread by the camera hook. The lookup
+// itself must NOT run on the timer: getHero is an HL call, and an HL call off
+// the game thread kills the game with "Can't lock GC in unregistered thread".
+// This shipped calling refreshLocalHero() straight from a setInterval, which
+// is the same pattern that killed a probe on its ~10th tick — it survived only
+// because the window is narrow, not because it was safe.
+let heroRefreshDue = false;
+
 function refreshLocalHero() {
     for (const f of getHeroFns) {
         try {
             const h = new NativeFunction(f.addr, "pointer", [])();
             if (h && !h.isNull() && typeName(h) === "ent.Hero") {
+                // A different hero object means a different loadout, so the
+                // pickup baseline is meaningless — rebuild it rather than
+                // announcing the new hero's whole bag as picked up.
+                if (!localHero || !localHero.equals(h)) invReady = false;
                 localHero = h;
                 partyNames = readParty(h);
                 const nm = hlStr(h.add(OFF.Hero.name).readPointer());
@@ -921,8 +1085,11 @@ function main() {
     for (const nm in DATA.funcs) {
         try { getHeroFns.push({ name: nm, addr: base.add(DATA.funcs[nm] * 8).readPointer() }); } catch (e) {}
     }
-    refreshLocalHero();
-    setInterval(refreshLocalHero, 3000);   // survive respawn / zone changes
+    // Both the first lookup and the 3s refresh (survive respawn / zone
+    // changes) are deferred to the camera hook's game thread — see
+    // heroRefreshDue.
+    heroRefreshDue = true;
+    setInterval(function () { heroRefreshDue = true; }, 3000);
 
     // Combat-state heartbeat: report isInCombat for the local hero and every
     // player we've seen deal damage, so Python can drive the capture timer.
@@ -936,7 +1103,19 @@ function main() {
         }
         send({ kind: "combat", state: state });
         checkRift();
+        sweepInventory();     // plain reads; see the legendary-pickup section
     }, 400);
+
+    // Same reasoning as the minimap warning below: sweepInventory() bails on
+    // its first line when an offset is absent, silently and forever. An
+    // upgrade that keeps an older %LOCALAPPDATA%\analysis_out is exactly how
+    // that happens.
+    const INV_NEED = ["Loadout", "Inventory", "Item", "Weapon"];
+    const invAbsent = INV_NEED.filter(function (k) { return !OFF[k]; });
+    if (invAbsent.length)
+        log("!! inventory offsets missing (" + invAbsent.join(", ") +
+            ") — the legendary pickup cue will never fire. The offsets file " +
+            "is older than this build; delete analysis_out and restart.");
 
     // The minimap wants a faster cadence than the combat heartbeat: at 400ms
     // dots visibly step rather than move. The sweep costs ~1ms, so its own

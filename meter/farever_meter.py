@@ -1068,16 +1068,41 @@ def _latest_version():
     return best
 
 
-def check_for_update():
+# The check runs at startup and again on every loading screen (see the zone
+# handler), which is the closest thing the meter has to "the player is between
+# things and would not mind hearing about a new version".
+#
+# Throttled, because loading screens are not rare: GitHub's unauthenticated API
+# allows about 60 requests an hour per IP, and a rift session can put you
+# through more zone changes than that. Once a newer version HAS been found
+# there is nothing left to learn, so the checks stop entirely.
+UPDATE_RECHECK_SECS = 900.0        # 15 minutes between checks at most
+_update_checked_at = [0.0]         # time.monotonic of the last attempt
+
+
+def check_for_update(announce=False):
     """Ask GitHub whether there's a newer version, on a background thread.
 
     Never blocks startup and never fails loudly: being offline, rate-limited or
     caught in a GitHub outage should cost the notice, not the meter. Set
-    FAREVER_NO_UPDATE_CHECK to skip the request entirely."""
+    FAREVER_NO_UPDATE_CHECK to skip the request entirely.
+
+    `announce` also logs the boring "up to date" answer. The startup check does;
+    the loading-screen ones don't, or the log fills with a line every 15 minutes
+    saying nothing happened."""
     if os.environ.get("FAREVER_NO_UPDATE_CHECK"):
-        print("[update] check disabled by FAREVER_NO_UPDATE_CHECK.",
-              file=sys.stderr)
+        if announce:
+            print("[update] check disabled by FAREVER_NO_UPDATE_CHECK.",
+                  file=sys.stderr)
         return
+    if UPDATE["latest"]:
+        return          # already found one; the notice is up, stop asking
+    now = time.monotonic()
+    # Set before the thread starts, so two zone changes in quick succession
+    # can't put two requests in flight.
+    if not announce and now - _update_checked_at[0] < UPDATE_RECHECK_SECS:
+        return
+    _update_checked_at[0] = now
 
     def work():
         mine = _version_tuple(VERSION)
@@ -1094,7 +1119,7 @@ def check_for_update():
                   + ("" if asset_url else " (no installer asset — notice will "
                      "open the browser instead of self-updating)"),
                   file=sys.stderr)
-        else:
+        elif announce:
             print(f"[update] up to date (running {VERSION}).", file=sys.stderr)
 
     threading.Thread(target=work, daemon=True, name="update-check").start()
@@ -2069,13 +2094,20 @@ def start_hotkeys(callbacks: dict, target_pid):
 # thing a from-source run needs.
 ICON_FILE = ROOT / "assets" / "farevermeter.ico"
 
-# ---- boss-fight sounds ----
+# ---- cue sounds ----
+# All three ride the single "Enable sounds" setting; there is no per-cue switch.
 SOUND_FILES = {
     "pull": ROOT / "assets" / "boss_pulled.wav",
     "victory": ROOT / "assets" / "boss_victory.mp3",
+    "legendary": ROOT / "assets" / "legendary_pickup.mp3",
 }
 SOUND_VOLUME_DEFAULT = 60         # percent
 SOUND_VOLUME_MAX = 100
+
+# st.item.Weapon.rarity, read live off equipped gear. Capitalised, and one of
+# a small set — Legendary / Epic / Rare were all observed. Compared exactly:
+# a case-insensitive match would hide the day the game renames it.
+LEGENDARY_RARITY = "Legendary"
 
 
 class SoundPlayer:
@@ -2556,7 +2588,8 @@ class Overlay:
         self._compass_filters = {key: True
                                  for key, _label, _cats in COMPASS_FILTERS}
         self._map_rate = "High"        # Ultra exists but is opt-in
-        # Boss cues. Off by default: an overlay that starts making noise on its
+        # Every cue — boss pull, boss kill, legendary drop — rides this one
+        # setting. Off by default: an overlay that starts making noise on its
         # own the first time you meet a boss is a bad first impression, and the
         # checkbox plays a sample the moment you turn it on.
         self._sounds_on = False
@@ -5113,6 +5146,11 @@ class Overlay:
         """A boss died: its bar went down with its last health reading at 0."""
         self._enqueue(lambda: self.sounds.play("victory"))()
 
+    def on_legendary_pickup(self):
+        """A legendary weapon appeared in the loadout that wasn't there before.
+        Called from the hook thread — the cue belongs to the Tk one."""
+        self._enqueue(lambda: self.sounds.play("legendary"))()
+
     def _toggle_sounds(self):
         self._sounds_on = not self._sounds_on
         self.sounds.set_enabled(self._sounds_on)
@@ -6013,7 +6051,13 @@ REQUIRED_RESOLVER_KEYS = ("anchors", "boss_fns", "boss_targets", "cam_targets",
 REQUIRED_OFFSET_KEYS = ("Activity", "ArrayObj", "BossInfo", "BossesInfo",
                         "Camera", "DamageResult.blocker", "DamageResult.effect",
                         "Element", "Entity", "Foe", "GameLayer", "Hero",
-                        "Interactible", "State", "String", "Unit", "Unit.attr")
+                        "Interactible", "State", "String", "Unit", "Unit.attr",
+                        # The legendary pickup cue. Hero has existed forever,
+                        # so its presence proves nothing — the subkeys are what
+                        # a pre-3.1 file is missing, and sweepInventory() bails
+                        # silently without them.
+                        "Hero.loadout", "Hero.weaponInHand", "Inventory",
+                        "Item", "Item.uid", "Loadout", "Weapon", "Weapon.rarity")
 
 
 def _data_is_current():
@@ -6595,7 +6639,9 @@ def locate_hlboot(pid):
 
 def main():
     seed_analysis()
-    check_for_update()          # background; the notice lands when it lands
+    # background; the notice lands when it lands. Re-checked on loading screens
+    # too — see the zone handler.
+    check_for_update(announce=True)
     claim_single_instance()
     # Only after claiming: before it, the flag on disk may still be the one
     # aimed at the instance we just displaced.
@@ -6669,7 +6715,7 @@ def _run(tray, session, ui_state, world):
     hero_id = {"name": None}           # last local hero, to keep the log quiet
     nullified: dict = {}               # mitigated-hit shapes seen, see below
     nullified_at = [0.0]               # last time they were reported
-    pull_reset_spent = [False]         # one auto-reset per instance, see below
+    boss_fight_on = [False]            # a boss fight is in progress, see below
 
     def on_message(message, data):
         liveness["t"] = time.monotonic()   # any agent traffic counts as alive
@@ -6734,34 +6780,42 @@ def _run(tray, session, ui_state, world):
             # raises the same bar and must NOT reset the meter or play a cue.
             ui_state.set_boss_bar(p.get("n") or 0)
             ov = _OVERLAY["ref"]
-            for b in (p.get("up") or []):
-                if not b.get("boss"):
-                    continue
-                print(f"[meter] boss pulled: {b.get('kind')}", file=sys.stderr)
-                if ov is None or not ov.auto_reset_boss():
-                    continue
-                # One auto-reset per instance. Some bosses spawn copies of
-                # themselves mid-fight, and every copy walks through bossInfos
-                # exactly like the original — without this latch each spawn
-                # wiped the meter again in the middle of the very fight the
-                # reset was meant to isolate. Re-armed by the zone handler
-                # below, i.e. by the next loading screen.
-                if pull_reset_spent[0]:
-                    print("[meter] boss bar raised again in the same instance "
-                          "— auto reset already spent, keeping the parse.",
+            # A boss fight is "on" while at least one BOSS bar is up, and the
+            # reset fires on the edge into that state — the mirror image of the
+            # victory cue, which fires on the way out of it. `boss` is the
+            # hook's any-boss flag over the CURRENT bar set, so it is the same
+            # signal the fight-end rule reads.
+            #
+            # This replaces a one-reset-per-instance latch that was re-armed
+            # only by a loading screen. The latch stopped duplicate-spawning
+            # bosses from wiping the meter mid-fight, but it also meant a
+            # second, different boss in the same instance never reset at all —
+            # which is the inconsistency this fixes. The edge does both jobs:
+            # copies raising bars during a fight that is already on are not a
+            # new edge, and the state re-arms by itself the moment the last
+            # boss bar drops, with no loading screen needed.
+            now_boss = bool(p.get("boss"))
+            if not now_boss:
+                boss_fight_on[0] = False
+            elif not boss_fight_on[0]:
+                boss_fight_on[0] = True
+                kinds = [b.get("kind") for b in (p.get("up") or [])
+                         if b.get("boss")]
+                print(f"[meter] boss fight started: "
+                      f"{', '.join(k for k in kinds if k) or '?'}",
+                      file=sys.stderr)
+                if ov is not None and ov.auto_reset_boss():
+                    # Not a plain reset: the bar is refreshed on a timer, so
+                    # this arrives after the opening burst has already landed.
+                    # Carry the last few seconds forward or the reset eats it.
+                    kept = session.reset_keeping_recent()
+                    print(f"[meter] meter reset for the pull "
+                          f"(kept {kept} event{'' if kept == 1 else 's'} from "
+                          f"the last {BOSS_PULL_BACKLAG_SECS:.0f}s)",
                           file=sys.stderr)
-                    continue
-                pull_reset_spent[0] = True
-                # Not a plain reset: the bar is refreshed on a timer, so this
-                # arrives after the opening burst has already landed. Carry the
-                # last few seconds forward or the reset eats it.
-                kept = session.reset_keeping_recent()
-                print(f"[meter] meter reset for the pull "
-                      f"(kept {kept} event{'' if kept == 1 else 's'} from the "
-                      f"last {BOSS_PULL_BACKLAG_SECS:.0f}s)", file=sys.stderr)
-                # Queued rather than called: this is the hook's thread, and
-                # both the reset banner and the cue belong to the Tk thread.
-                ov.on_boss_pull()
+                    # Queued rather than called: this is the hook's thread, and
+                    # both the reset banner and the cue belong to the Tk thread.
+                    ov.on_boss_pull()
             for b in (p.get("down") or []):
                 # `killed` is decided in the hook from the last health seen
                 # while the bar was up — a bar that drops because the player
@@ -6772,12 +6826,38 @@ def _run(tray, session, ui_state, world):
                           file=sys.stderr)
                     if ov is not None:
                         ov.on_boss_kill()
+        elif k == "pickup":
+            # The hook counts items by `kind` across inventory AND equipment,
+            # so this only fires when the hero genuinely gained one — moving a
+            # weapon between the two (which mints a new hxbit uid every time)
+            # leaves the count alone. Anything can be reported; only legendary
+            # WEAPONS make a noise, because rarity is a field that exists only
+            # on st.item.Weapon.
+            rarity = p.get("rarity")
+            print(f"[meter] picked up: {p.get('item')} "
+                  f"({p.get('cls')}{', ' + rarity if rarity else ''})"
+                  + (f" x{p.get('count')}" if (p.get("count") or 1) > 1 else ""),
+                  file=sys.stderr)
+            if rarity == LEGENDARY_RARITY:
+                # No switch of its own: it rides the master Sounds setting,
+                # which SoundPlayer.play() already gates on.
+                ov = _OVERLAY["ref"]
+                if ov is not None:
+                    ov.on_legendary_pickup()
         elif k == "zone":
             ui_state.clear()      # the UI is rebuilt across a loading screen
             session.reset()
-            pull_reset_spent[0] = False   # fresh instance, fresh auto-reset
+            # Belt and braces: the bar state normally re-arms itself when the
+            # last boss bar drops, but a loading screen taken mid-fight can
+            # tear the UI down without a final bossbar message.
+            boss_fight_on[0] = False
             print(f"[meter] zone change ({p.get('sig')!r}) — meter reset",
                   file=sys.stderr)
+            # A loading screen is the one moment the player is demonstrably
+            # not mid-fight, which makes it the right time to notice a new
+            # release. Throttled and self-silencing inside — this costs
+            # nothing on the zone changes it declines to act on.
+            check_for_update()
         elif k == "hero":
             # The hook re-reports the local hero every 3s so it survives a
             # respawn or zone change, so only the first identification and a

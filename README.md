@@ -143,8 +143,9 @@ it is kept as `meter.log.1`.
 
 ### Updating
 
-On startup the meter asks GitHub whether there's a newer version. If there is,
-the top of the control menu (`Esc` in game) turns into a notice. Click it (and
+On startup — and again whenever you go through a loading screen — the meter
+asks GitHub whether there's a newer version. If there is, the top of the
+control menu (`Esc` in game) turns into a notice. Click it (and
 once more to confirm) and the meter updates itself: the overlay steps aside
 while a small window downloads the new installer, then the meter closes,
 installs the update and starts again as the new version. Your settings and
@@ -154,8 +155,11 @@ Nothing downloads or installs until you click. If the automatic route isn't
 available (offline, or a run from source), the notice opens the releases page
 in your browser instead, like it always did.
 
-It's one request to `api.github.com` at launch and nothing is sent about you.
-Set the environment variable `FAREVER_NO_UPDATE_CHECK=1` to turn it off.
+It's a request to `api.github.com` and nothing is sent about you. Loading
+screens only re-ask at most once every 15 minutes, and once a new version has
+been found it stops asking altogether — so a long rift session doesn't turn
+into a stream of requests. Set the environment variable
+`FAREVER_NO_UPDATE_CHECK=1` to turn it off.
 
 ---
 
@@ -223,11 +227,14 @@ again.
 | Options | Transparency | how see-through the overlay is, 0-80%. It covers the meter, breakdown, minimap, compass and rift timer — panel, header bar and text together, since window opacity is the only kind Windows offers. The control menu and the rift prompt are exempt: one is what you're reading while you drag the slider, the other is a question that has to be answered |
 | Options | Minimap | `Rotating` (default) turns the map with the camera, so the top of the map is whatever you're looking at. `Fixed` keeps north up and turns the arrow instead. |
 | Options | Map refresh | how often the minimap is updated — `Ultra` (~30/sec), `High` (~16/sec, default), `Medium` (~9/sec), `Low` (~4/sec). Lower costs less CPU in the game; below about 8/sec the dots visibly step. |
+| Options | Enable sounds | the audio cues, off by default. One switch covers all three: a boss fight starting, a boss dying, and a **legendary weapon** landing in your bags. Turning it on plays a sample, so you know the audio path works without having to go and find a boss |
+| Options | Volume | how loud those cues are, 0-100%. Live while you drag |
 | Scaling | Meter / Breakdown / Settings / Minimap | each window sizes independently, so one can be big and another small |
 | Show / hide | Damage meter / Breakdown / Rift timer / Minimap | `Show`, `Hide`, or `Show in ESC` — the last keeps it off screen while you play and brings it back with the game's menu |
 | Show / hide | Healing columns | columns inside the meter rather than a window, so it stays a tick |
 | Show / hide | Hide out of combat | fades both windows away a few seconds after the fighting stops |
 | Controls | Reset data | the keybind for resetting the encounter, `Shift + \` by default. Click it and press the combination you want. It needs a modifier (or an F-key, or a mouse button) — the meter *swallows* what it fires on, so a bare letter would cost you that key in game. **Middle click, Mouse 4 and Mouse 5 can be bound**; left and right never can. Takes effect immediately |
+| Controls | Auto reset on boss pull | wipes the encounter at the **start of every boss fight**, so the parse you end up with is that fight and nothing else. It keeps the last few seconds rather than wiping flat — the game's healthbar is what the pull is detected from and it refreshes on a timer, so the opening burst has already landed by the time the meter hears about it. Bosses only: elites raise the same bar, and resetting for every elite on the way to a boss would be useless |
 | Compass | Collectibles / Party Members | what the bearing strip carries. Separate from the minimap's ticks below — the two panels answer different questions, and wanting chests on one but not the other is ordinary. Soulstones have no tick and always show |
 | Minimap | Collectibles / Players / Enemies / Activities | what the map draws, by category — orbs and chests share one tick, since nobody wants one without the other. Obelisks, respawn points and soulstones have no tick and are always drawn: they're the landmarks you navigate *by*. The compass isn't affected |
 | Actions | 60s Parse Mode | see below |

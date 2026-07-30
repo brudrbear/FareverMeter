@@ -55,6 +55,20 @@ def main():
     cam = offs("client.BaseCamera")
     bosses = offs("ui.hud.BossesInfo")
     bossinfo = offs("ui.hud.BossInfo")
+    loadout = offs("st.Loadout")
+    inv = offs("st.Inventory")
+    equip = offs("st.Equipment")
+    item = offs("st.Item")
+    weapon = offs("st.item.Weapon")
+
+    # st.Equipment extends st.Inventory, so one `content` offset serves both
+    # containers. Verified rather than assumed — if the two ever diverge, the
+    # equipment sweep would read a wrong offset and report nonsense items.
+    if equip["content"][0] != inv["content"][0]:
+        raise SystemExit(
+            f"[!] st.Equipment.content@{equip['content'][0]} != "
+            f"st.Inventory.content@{inv['content'][0]} — the containers no "
+            "longer share a layout; fix the inventory sweep before shipping.")
 
     # skill display-name chain: BaseSkill.inf (virtual #963) -> texts (#973) -> name
     row = code.types[963]
@@ -84,7 +98,30 @@ def main():
         # calling anything (a plain pointer walk is safe off the game thread).
         "Hero": {"name": hero["name"][0], "player": hero["player"][0],
                  "isInCombat": hero["isInCombat"][0],
-                 "layer": hero["layer"][0]},
+                 "layer": hero["layer"][0],
+                 # Legendary-pickup cue: the hero's containers, plus the
+                 # equipped weapon (which is the same st.item.Weapon pointer
+                 # the equipment slot holds — measured).
+                 "loadout": hero["loadout"][0],
+                 "weaponInHand": hero["weaponInHand"][0]},
+        "Loadout": {"inventory": loadout["inventory"][0],
+                    "equipment": loadout["equipment"][0]},
+        # content is an ArrayObj of SLOT VIRTUALS, not of items: each entry is
+        # a standalone hl vvirtual carrying inline {count:Int, item:st.Item}.
+        # The hook reads the `item` field by name out of the virtual's own
+        # field table — see readSlot() in meter_hook.js. Decoding entries as
+        # st.Item directly does not throw, it just yields garbage.
+        "Inventory": {"content": inv["content"][0]},
+        # __uid is NOT stable identity — it is reassigned on every container
+        # move, so a uid-diff alone reports a re-equip as a fresh pickup. It is
+        # emitted because it is still the only per-slot discriminator; the
+        # pickup rule guards on `kind` as well.
+        "Item": {"kind": item["kind"][0], "uid": item["__uid"][0]},
+        # `rarity` is declared ONLY on st.item.Weapon (hierarchy:
+        # st.Item -> st.item.Gear -> st.item.Armor / st.item.Weapon). Reading
+        # it at any other class is past the end of the object. Live values are
+        # capitalised: Legendary, Epic, Rare.
+        "Weapon": {"rarity": weapon["rarity"][0], "level": weapon["level"][0]},
         "GameLayer": {"isRift": layer["isRift"][0],
                       "mainActivity": layer["mainActivity"][0],
                       "worldEvents": layer["worldEvents"][0],

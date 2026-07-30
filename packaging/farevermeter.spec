@@ -23,6 +23,10 @@ datas = [
     # rather than an audio dependency.
     (str(ROOT / "assets" / "boss_pulled.wav"), "res/assets"),
     (str(ROOT / "assets" / "boss_victory.mp3"), "res/assets"),
+    # Listed one by one rather than by glob, so a new cue that is added to
+    # SOUND_FILES and forgotten here works from source and is silently mute in
+    # the shipped build.
+    (str(ROOT / "assets" / "legendary_pickup.mp3"), "res/assets"),
 ]
 
 # The self-heal path re-runs these against the running game's hlboot.dat after a
