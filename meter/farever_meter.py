@@ -2576,7 +2576,6 @@ class Overlay:
         self._q_lock = threading.Lock()
         self._quit_armed = False       # the Quit button's second-click window
         self._update_shown = False     # the update notice is applied once
-        self._update_armed = False     # the notice's second-click window
         self._updating = False         # self-update running: overlay hidden
         self._dl = None                # download progress, written off-thread
         self._updwin = None            # the "Updating ..." progress window
@@ -4765,29 +4764,12 @@ class Overlay:
         if not self._can_self_update():
             self._open_update()
             return
-        # Same two-click rule as the Quit button, for the same reason: this
-        # ends the meter (to restart it), and the line sits in a menu full of
-        # things people click casually.
-        if not self._update_armed:
-            self._update_armed = True
-            self.warn_lbl.config(
-                text=f"Click again to update to Farever+ {UPDATE['latest']} — "
-                     "the meter will install it and restart itself.")
-            self.root.after(5000, self._disarm_update)
-            return
-        self._update_armed = False
+        # One click, deliberately — unlike Quit, which still wants two.
+        # Both end the meter, but they are not the same risk: Quit taken by
+        # accident costs you the parse you were in the middle of, while this
+        # comes back as the same meter a few seconds later. `_updating` is
+        # what stops a double-click starting two downloads.
         self._start_self_update()
-
-    def _disarm_update(self):
-        if not self._update_armed:
-            return
-        self._update_armed = False
-        try:
-            # Re-applying the notice is what restores its normal text.
-            self._update_shown = False
-            self._apply_update_notice()
-        except tk.TclError:
-            pass        # the menu went away while the timer was pending
 
     def _start_self_update(self):
         """Download the new installer behind a small progress window, then

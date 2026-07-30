@@ -145,11 +145,11 @@ it is kept as `meter.log.1`.
 
 On startup — and again whenever you go through a loading screen — the meter
 asks GitHub whether there's a newer version. If there is, the top of the
-control menu (`Esc` in game) turns into a notice. Click it (and
-once more to confirm) and the meter updates itself: the overlay steps aside
-while a small window downloads the new installer, then the meter closes,
-installs the update and starts again as the new version. Your settings and
-window positions survive — the installer never touches them.
+control menu (`Esc` in game) turns into a notice. Click it once and the meter
+updates itself: the overlay steps aside while a small window downloads the new
+installer, then the meter closes, installs the update and starts again as the
+new version. Your settings and window positions survive — the installer never
+touches them.
 
 Nothing downloads or installs until you click. If the automatic route isn't
 available (offline, or a run from source), the notice opens the releases page
