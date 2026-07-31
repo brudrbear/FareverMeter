@@ -1,4 +1,4 @@
-# Farever+ Party Meter (memory-reading edition)
+# Farever+
 
 > ### 📥 **[Download the installer](../../releases)** — run it, start the game, done.
 >
