@@ -746,7 +746,11 @@ FONT_SPECS = {
     "mono_sm":    ("Consolas", 8),
     "mono_xl_b":  ("Consolas", 18, "bold"),
 }
-UI_SCALE_MIN, UI_SCALE_MAX = 75, 175      # percent
+# The floor is where the fonts stop moving: sizes are clamped at 6pt inside
+# _set_group_scale, and every body font in FONT_SPECS has hit that clamp by
+# ~55%. A slider that goes lower would keep moving while the window stayed
+# put — the same lie the MIN_W comment below warns about.
+UI_SCALE_MIN, UI_SCALE_MAX = 50, 175      # percent
 # The independently-scaled window groups, in the order the menu lists them.
 # Wide enough for the longest label in the menu ("Damage meter"), so the label
 # column is uniform and every control lines up under it.
@@ -2907,6 +2911,7 @@ class Overlay:
         # Healing is columns inside the meter, not a window of its own, so it
         # stays a plain on/off rather than gaining a mode it can't honour.
         self._show_heal = True
+        self._sort_heal = False        # rows ordered by healing, not damage
         self._shown = {k: True for k, _ in TOGGLEABLE_ELEMENTS}
         self._heal_cols_shown = True   # last healing layout pushed to the widgets
         self._combat_seen_at = 0.0     # last moment a tracked player was fighting
@@ -2971,9 +2976,11 @@ class Overlay:
         self._rift_box = None      # which palette the box is wearing
         self._rift_seen = False
         # End-of-rift report: the frozen data the card is showing, and the
-        # "Copied" flash timer.
+        # "Copied" flash timer. Seeded from the newest saved report so 'Last
+        # Rift Report' works across sessions — last night's rift is still
+        # there this morning.
         self._report_open = False
-        self._report_data = None
+        self._report_data = self._load_last_rift_report()
         self._report_flash_job = None
 
         # Before any widget exists: the dropdowns and Show/hide ticks are built
@@ -3334,6 +3341,11 @@ class Overlay:
         self._pending_scales = pending
         if isinstance(data.get("show_heal"), bool):
             self._show_heal = data["show_heal"]
+        # Heal sort can't outlive the column it sorts by, so a saved True is
+        # only honoured while the healing columns are on (the toggles keep
+        # that invariant; this covers a hand-edited file).
+        if isinstance(data.get("sort_heal"), bool):
+            self._sort_heal = data["sort_heal"] and self._show_heal
         show = data.get("show")
         if isinstance(show, dict):
             for key, _label in TOGGLEABLE_ELEMENTS:
@@ -3377,6 +3389,7 @@ class Overlay:
                 "show": {k: self._show.get(k, ELEMENT_SHOW)
                          for k, _label in TOGGLEABLE_ELEMENTS},
                 "show_heal": bool(self._show_heal),
+                "sort_heal": bool(self._sort_heal),
             }, indent=2))
         except OSError as e:
             print(f"[meter] couldn't save settings: {e}", file=sys.stderr)
@@ -3413,6 +3426,24 @@ class Overlay:
         self.timer_lbl = tk.Label(self.header, text="", bg=BG_HEADER, fg=FG_HEADER,
                                   font=self.fonts["mono"], padx=8)
         self.timer_lbl.pack(side="right")
+        # Flips the row order between the two columns. The label is the
+        # STATE, not the destination — "▼ Damage" while damage-sorted, like
+        # a sorted column header — after the destination reading shipped
+        # first and read as a lie about what the rows already showed.
+        # Outside the drag binding below on purpose (the header drags, the
+        # button clicks), and only on screen while the healing columns are:
+        # sorting by a column that isn't drawn would order the rows by
+        # invisible numbers.
+        self.sort_btn = tk.Button(self.header, text=self._sort_btn_text(),
+                                  command=self._enqueue(self._toggle_sort),
+                                  bg=BG_HEADER, fg=FG_HEADER,
+                                  activebackground=BG_HEADER,
+                                  activeforeground=FG_HEADER,
+                                  font=self.fonts["ui_sm_b"],
+                                  relief="flat", bd=0, padx=6, pady=0,
+                                  cursor="hand2", highlightthickness=0)
+        if self._show_heal:
+            self.sort_btn.pack(side="right")
         self._bind_drag(self.root, (self.header, self.title_lbl),
                         unlocked=self._mouse_available)
 
@@ -3521,6 +3552,19 @@ class Overlay:
                                   font=self.fonts_m["ui_tiny_i"], anchor="e",
                                   padx=8, pady=4)
         self.m_version.pack(side="right")
+        # The same link the Actions tab carries, up where the eye goes for
+        # "what is this thing" — beside the version. A real button, and kept
+        # OUT of the drag binding below on purpose: the header drags, the
+        # button clicks, and no widget does both.
+        self.m_repo = tk.Button(self.m_header, text="GitHub",
+                                command=self._enqueue(self._open_repo),
+                                bg=BG_HEADER_UNLOCKED, fg=FG_HEADER,
+                                activebackground=BG_HEADER,
+                                activeforeground=FG_HEADER,
+                                font=self.fonts_m["ui_tiny_i"],
+                                relief="flat", bd=0, padx=6, pady=0,
+                                cursor="hand2", highlightthickness=0)
+        self.m_repo.pack(side="right", pady=4)
         self._bind_drag(self.menu,
                         (self.m_header, self.m_title, self.m_version))
 
@@ -3788,6 +3832,14 @@ class Overlay:
             text=f"Reset encounter data   ({bind_label()})")
         self.btn_reset_pos = button(act, self._enqueue(self._reset_pos))
         self.btn_reset_pos.config(text="Reset window positions")
+
+        # Where the meter lives: the README, the releases, and the place to
+        # report a bug. A button rather than a clickable version label,
+        # because the header is a drag handle and a label that both drags and
+        # navigates does one of them by surprise.
+        section(act, "PROJECT")
+        self.btn_repo = button(act, self._enqueue(self._open_repo))
+        self.btn_repo.config(text="Farever+ on GitHub")
 
         # ---- footer: on every tab, because it ends the session ----
         # Here as well as on the tray icon because this is where the user
@@ -5004,9 +5056,14 @@ class Overlay:
     def _open_report_card(self):
         """Open (or re-open) the card over whatever _report_data holds."""
         self._report_flash.config(text="")
+        # A report can now outlive its session, so a bare clock isn't enough:
+        # "21:03" on yesterday's run reads as tonight's. The date appears
+        # exactly when it stops being obvious.
+        lt = time.localtime(self._report_data["at"])
+        fmt = ("%H:%M" if time.strftime("%Y%m%d", lt) == time.strftime("%Y%m%d")
+               else "%b %d, %H:%M")
         self._report_title.config(
-            text="RIFT REPORT — "
-            + time.strftime("%H:%M", time.localtime(self._report_data["at"])))
+            text="RIFT REPORT — " + time.strftime(fmt, lt))
         self._render_report()
         self._report_open = True
         self.reportwin.update_idletasks()
@@ -5026,38 +5083,87 @@ class Overlay:
             self._open_report_card()
 
     def _save_rift_report(self, report):
-        """The plaintext report into parses/ — same folder, same lifecycle as
-        the parse screenshots, and the menu button that opens the folder now
-        names both. Never fatal: an unwritable disk costs the file, not the
-        card that's about to open."""
+        """The report into parses/, three ways: .json is the full metrics —
+        the file _load_last_rift_report reads back, which is what lets 'Last
+        Rift Report' survive a meter restart; .txt is the chat-pasteable
+        lines; .png is the shareable image. Same folder, same lifecycle as
+        the parse screenshots. Never fatal, and each format fails alone: no
+        Pillow costs the picture, not the data."""
+        base = f"rift-{time.strftime('%Y%m%d-%H%M%S')}"
         try:
             PARSES_DIR.mkdir(parents=True, exist_ok=True)
-            name = f"rift-{time.strftime('%Y%m%d-%H%M%S')}.txt"
-            (PARSES_DIR / name).write_text(self._report_text(report),
-                                           encoding="utf-8")
-            print(f"[meter] rift report saved to {PARSES_DIR / name}",
+            (PARSES_DIR / f"{base}.json").write_text(json.dumps(report),
+                                                     encoding="utf-8")
+            (PARSES_DIR / f"{base}.txt").write_text(self._report_text(report),
+                                                    encoding="utf-8")
+            print(f"[meter] rift report saved to {PARSES_DIR / base}.json/.txt",
                   file=sys.stderr)
         except Exception as e:
             print(f"[meter] couldn't save the rift report: {e}",
                   file=sys.stderr)
+        try:
+            render_rift_report_image(report, PARSES_DIR / f"{base}.png")
+        except Exception as e:
+            print(f"[meter] couldn't render the rift report image: {e}",
+                  file=sys.stderr)
+
+    @staticmethod
+    def _load_last_rift_report():
+        """The newest saved rift report, or None — how a fresh session still
+        has a 'Last Rift Report'. Timestamped filenames sort lexicographically,
+        so newest is just last. Validated for shape, not trusted: a truncated
+        or hand-edited file costs the button, never the meter."""
+        try:
+            files = sorted(PARSES_DIR.glob("rift-*.json"))
+            if not files:
+                return None
+            data = json.loads(files[-1].read_text(encoding="utf-8"))
+            phases = data.get("phases")
+            if (isinstance(data.get("at"), (int, float))
+                    and isinstance(phases, list) and len(phases) == 2
+                    and all(isinstance(ph, dict)
+                            and isinstance(ph.get("players"), list)
+                            and isinstance(ph.get("elements"), list)
+                            for ph in phases)):
+                return data
+            print(f"[meter] ignoring malformed rift report {files[-1].name}",
+                  file=sys.stderr)
+        except Exception as e:
+            print(f"[meter] couldn't load the last rift report: {e}",
+                  file=sys.stderr)
+        return None
 
     def _close_report(self):
         self._report_open = False
         self._refresh_visibility()
 
     def _copy_report(self):
-        """Both phases go to the clipboard whichever tab is showing — 'copy
-        the report' means the report, and half of it is the part the person
-        you're pasting at didn't see."""
+        """Copy the report as an IMAGE — the leaderboard pastes into chat
+        looking like the leaderboard, and one picture carries both phases.
+        Rendered from the numbers (render_rift_report_image), never
+        screenshotted, so the game behind the card can't bleed in. Falls back
+        to the plaintext copy if Pillow or the clipboard declines — a Copy
+        button that sometimes copies nothing is worse than one that
+        occasionally copies text."""
         if not self._report_data:
             return
+        flash = "Copied to clipboard"
         try:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(self._report_text(self._report_data))
-        except tk.TclError as e:
-            print(f"[meter] couldn't copy the report: {e}", file=sys.stderr)
-            return
-        self._report_flash.config(text="Copied to clipboard")
+            copy_image_to_clipboard(
+                render_rift_report_image(self._report_data))
+        except Exception as e:
+            print(f"[meter] image copy failed ({e}) — copying text instead.",
+                  file=sys.stderr)
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(
+                    self._report_text(self._report_data))
+            except tk.TclError as e2:
+                print(f"[meter] couldn't copy the report: {e2}",
+                      file=sys.stderr)
+                return
+            flash = "Copied as text"
+        self._report_flash.config(text=flash)
         if self._report_flash_job is not None:
             try:
                 self.root.after_cancel(self._report_flash_job)
@@ -5536,13 +5642,18 @@ class Overlay:
     def _can_self_update(self):
         return IS_FROZEN and bool(UPDATE["asset"])
 
-    def _open_update(self):
+    def _open_url(self, url):
         import webbrowser
         try:
-            webbrowser.open(UPDATE["url"])
+            webbrowser.open(url)
         except Exception as e:
-            print(f"[update] couldn't open {UPDATE['url']}: {e}",
-                  file=sys.stderr)
+            print(f"[meter] couldn't open {url}: {e}", file=sys.stderr)
+
+    def _open_repo(self):
+        self._open_url(REPO_URL)
+
+    def _open_update(self):
+        self._open_url(UPDATE["url"])
 
     def _on_update_click(self):
         if self._updating:
@@ -5916,8 +6027,26 @@ class Overlay:
         self._save_settings()
         self._refresh_visibility()
 
+    def _sort_btn_text(self):
+        return "▼ Healing" if self._sort_heal else "▼ Damage"
+
+    def _toggle_sort(self):
+        self._sort_heal = not self._sort_heal
+        self.sort_btn.config(text=self._sort_btn_text())
+        self._save_settings()
+
     def _toggle_heal(self):
         self._show_heal = not self._show_heal
+        # The sort toggle lives and dies with the healing columns: turning
+        # them off while heal-sorted snaps the order back to damage, or the
+        # rows would sit in an order nothing on screen explains.
+        if self._show_heal:
+            self.sort_btn.pack(side="right")
+        else:
+            if self._sort_heal:
+                self._sort_heal = False
+                self.sort_btn.config(text=self._sort_btn_text())
+            self.sort_btn.pack_forget()
         self._save_settings()
 
     def _on_scale_pick(self, group):
@@ -6598,6 +6727,8 @@ class Overlay:
         self._apply_heal_columns()
         _, _, rows = self.session.snapshot()
         rows = self._apply_mode(rows)
+        if self._sort_heal:
+            rows.sort(key=lambda p: -p.heal_total)
         # The capture clock only advances while at least one *displayed*
         # (mode-filtered) player is in combat, per the game's isInCombat state.
         active = any(self.session.combat_of(p.name) for p in rows)
@@ -6627,10 +6758,13 @@ class Overlay:
             meter_bg, detail_bg = want
             for w in (self.header, self.title_lbl, self.timer_lbl):
                 w.config(bg=meter_bg)
+            self.sort_btn.config(bg=meter_bg, activebackground=meter_bg)
             for w in (self.d_header, self.d_title, self.d_tip):
                 w.config(bg=detail_bg)
             for w in (self.title_lbl, self.timer_lbl, self.d_title):
                 w.config(fg=theme["fg_header"])
+            self.sort_btn.config(fg=theme["fg_header"],
+                                 activeforeground=theme["fg_header"])
             self.d_tip.config(fg=theme["fg_header_dim"])
             self._header_bg = want
 
@@ -6644,10 +6778,10 @@ class Overlay:
             + f"   ({len(rows)})")
 
         focus = self._resolve_focus(rows)
-        # Bars scale against the biggest number of their own kind on screen:
-        # rows are damage-sorted so rows[0] holds the top damage, but the top
-        # healer can be anyone.
-        top_dmg = (rows[0].total if rows else 0.0) or 1.0
+        # Bars scale against the biggest number of their own kind on screen.
+        # Neither leader is positional: the sort toggle means rows[0] can be
+        # the top healer, and the top of either column can be anyone.
+        top_dmg = max((p.total for p in rows), default=0.0) or 1.0
         top_heal = max((p.heal_total for p in rows), default=0.0) or 1.0
         for i, row in enumerate(self.player_rows):
             if i < len(rows):
@@ -6776,19 +6910,41 @@ class PlayerRow:
         self.heal_track.pack(fill="x", pady=(1, 2))
         self.heal_bar = tk.Frame(self.heal_track, bg=HEAL_BAR, height=5)
         self.heal_bar.place(relwidth=0.0, relheight=1.0)
-        for w in (self.f, self.top, self.line, self.cls, self.nums):
-            w.bind("<Button-1>", lambda e: on_click(self._name))
         self._packed = False
         self._heal_packed = True
         self._name = None
         self._is_me = False
+        self._hover = False
+        # Every visible piece of the row — bars and tracks included — clicks,
+        # carries the hand cursor, and lifts the row on hover: the row IS the
+        # click target (it focuses the breakdown), and a target that only
+        # answers on its text is a target most of the cursor misses. Enter and
+        # Leave both land before Tk repaints, so crossing between the row's
+        # own widgets never flickers the lift.
+        for w in (self.f, self.top, self.line, self.cls, self.nums,
+                  self.dmg_track, self.dmg_bar,
+                  self.heal_track, self.heal_bar):
+            w.bind("<Button-1>", lambda e: on_click(self._name))
+            w.bind("<Enter>", lambda e: self._set_hover(True))
+            w.bind("<Leave>", lambda e: self._set_hover(False))
+            w.config(cursor="hand2")
+
+    def _set_hover(self, on):
+        if on == self._hover:
+            return
+        self._hover = on
+        bg = self.theme["soft"] if on else self.theme["body"]
+        for w in (self.f, self.top, self.line, self.cls, self.nums):
+            w.config(bg=bg)
 
     def set_theme(self, t):
-        self.f.config(bg=t["body"])
-        self.top.config(bg=t["body"])
+        self.theme = t
+        bg = t["soft"] if self._hover else t["body"]
+        self.f.config(bg=bg)
+        self.top.config(bg=bg)
         ink = t["fg_value"] if self._is_me else t["fg_text"]
         for w in (self.line, self.cls, self.nums):
-            w.config(bg=t["body"], fg=ink)
+            w.config(bg=bg, fg=ink)
         self.dmg_track.config(bg=t["track"])
         self.dmg_bar.config(bg=t["dmg"])
         self.heal_track.config(bg=t["track"])
@@ -6855,6 +7011,9 @@ class PlayerRow:
         if self._packed:
             self.f.pack_forget()
             self._packed = False
+            # A row that vanishes mid-hover gets no Leave event; without this
+            # it would come back lifted for whoever fills the slot next.
+            self._set_hover(False)
 
 
 class SkillColumn:
@@ -7287,6 +7446,200 @@ def render_parse_image(data, path):
     path.parent.mkdir(parents=True, exist_ok=True)
     img.save(path)
     return path
+
+
+# The rift report as an image — same reasoning as the parse image: drawn from
+# the numbers rather than screenshotted from the card, so it's pixel-clean at
+# any window opacity and works with the card closed. Same two-column layout,
+# same tiering, same palette, so a paste reads as the card it came from.
+RIFT_IMG_COL_W = 350
+RIFT_IMG_PAD = 20
+RIFT_IMG_GAP = 26
+
+
+def render_rift_report_image(data, path=None):
+    """Draw an end-of-rift report dict as a PIL image. Returns the image;
+    also writes a PNG when `path` is given."""
+    from PIL import Image, ImageDraw
+
+    ui_mvp = _parse_font(PARSE_FONT_UI, 22)
+    ui = _parse_font(PARSE_FONT_UI, 15)
+    ui_rank = _parse_font(PARSE_FONT_UI, 14)
+    ui_small = _parse_font(PARSE_FONT_UI, 11)
+    mono = _parse_font(PARSE_FONT_MONO, 13)
+    mono_small = _parse_font(PARSE_FONT_MONO, 11)
+
+    W = RIFT_IMG_PAD * 2 + RIFT_IMG_COL_W * 2 + RIFT_IMG_GAP
+    img = Image.new("RGB", (W, 1600), RIFT_BODY)
+    d = ImageDraw.Draw(img)
+
+    d.rectangle((0, 0, W - 1, 39), fill=RIFT_GLOW)
+    d.text((RIFT_IMG_PAD, 10), "RIFT REPORT", font=ui, fill=RIFT_TIME)
+    stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(data["at"]))
+    d.text((W - RIFT_IMG_PAD - d.textlength(stamp, font=mono_small), 14),
+           stamp, font=mono_small, fill=RIFT_PEAK)
+
+    def heading(cx, y, text):
+        d.text((cx, y), text, font=ui_small, fill=RIFT_TITLE)
+        tw = d.textlength(text, font=ui_small)
+        d.line((cx + tw + 8, y + 7, cx + RIFT_IMG_COL_W, y + 7), fill=RIFT_GLOW)
+        return y + 22
+
+    # The card's ★ and ✚ are DRAWN here rather than typed: PIL does no font
+    # fallback, so glyphs Segoe UI Bold doesn't carry come out as tofu boxes —
+    # measured on the first render. Shapes can't be missing from a font.
+    def star(x, y, r, fill):
+        pts = []
+        for i in range(10):
+            a = -math.pi / 2 + i * math.pi / 5
+            rad = r if i % 2 == 0 else r * 0.42
+            pts.append((x + rad * math.cos(a), y + rad * math.sin(a)))
+        d.polygon(pts, fill=fill)
+
+    def plus(x, y, r, fill):
+        t = max(2, int(r * 0.55))
+        d.rectangle((x - t // 2, y - r, x + t // 2, y + r), fill=fill)
+        d.rectangle((x - r, y - t // 2, x + r, y + t // 2), fill=fill)
+
+    def column(cx, ph):
+        y = 52
+        d.text((cx, y), ph["label"].upper(), font=ui, fill=RIFT_PEAK)
+        y += 24
+        d.text((cx, y), f"{Overlay._mmss(ph['duration'])}  ·  "
+               f"{int(ph['total']):,} dmg  ·  {int(ph['heal']):,} heal",
+               font=ui_small, fill=RIFT_TITLE)
+        y += 24
+        players = ph["players"]
+        if not players:
+            d.text((cx, y), "nothing was recorded for this phase",
+                   font=ui_small, fill=RIFT_TITLE)
+            return y + 20
+
+        y = heading(cx, y, "MVP")
+        mvp = players[0]
+        star(cx + 11, y + 14, 11, REPORT_MEDALS[0])
+        d.text((cx + 28, y), Overlay._elide_name(mvp["name"]),
+               font=ui_mvp, fill=REPORT_MEDALS[0])
+        y += 30
+        d.text((cx + 28, y), f"{int(mvp['total']):,} damage",
+               font=ui_small, fill=RIFT_TIME)
+        y += 18
+        healer = max(players, key=lambda p: p["heal"])
+        if healer["heal"] > 0.5:
+            plus(cx + 8, y + 9, 7, REPORT_HEAL)
+            d.text((cx + 22, y), f"{Overlay._elide_name(healer['name'])}   "
+                   f"{int(healer['heal']):,} heal",
+                   font=ui_rank, fill=REPORT_HEAL)
+            y += 22
+
+        def rank_rows(y, entries, total, key):
+            for i, p in enumerate(entries[:5], 1):
+                top3 = i <= 3
+                fg = REPORT_MEDALS[i - 1] if top3 else RIFT_TITLE
+                nfont = ui_rank if top3 else ui_small
+                d.text((cx, y), str(i), font=nfont, fill=fg)
+                d.text((cx + 18, y), Overlay._elide_name(p["name"]),
+                       font=nfont, fill=RIFT_TIME if top3 else RIFT_TITLE)
+                amt = f"{int(p[key]):,}"
+                pct = p[key] / total * 100 if total else 0.0
+                d.text((cx + RIFT_IMG_COL_W - 44
+                        - d.textlength(amt, font=mono), y + 2),
+                       amt, font=mono, fill=RIFT_TIME)
+                d.text((cx + RIFT_IMG_COL_W
+                        - d.textlength(f"{pct:.0f}%", font=mono_small), y + 3),
+                       f"{pct:.0f}%", font=mono_small, fill=RIFT_TITLE)
+                y += 22 if top3 else 19
+            return y
+
+        y = heading(cx, y + 6, "DAMAGE — TOP 5")
+        y = rank_rows(y, players, ph["total"], "total")
+        healers = sorted((p for p in players if p["heal"] > 0.5),
+                         key=lambda p: -p["heal"])
+        y = heading(cx, y + 4, "HEALING — TOP 5")
+        if healers:
+            y = rank_rows(y, healers, ph["heal"], "heal")
+        else:
+            d.text((cx, y), "no healing recorded", font=ui_small,
+                   fill=RIFT_TITLE)
+            y += 19
+
+        y = heading(cx, y + 4, "DAMAGE BY TYPE")
+        top = ph["elements"][0][1] if ph["elements"] else 0.0
+        for el, amt in ph["elements"][:8]:
+            colour = _lerp_hex(element_color(el), "#FFFFFF", 0.30)
+            d.text((cx, y), "Other" if el == "?" else str(el),
+                   font=ui_small, fill=colour)
+            frac = amt / top if top else 0.0
+            bar_x = cx + 78
+            bar_w = RIFT_IMG_COL_W - 78 - 44
+            d.rectangle((bar_x, y + 4, bar_x + int(bar_w * frac), y + 11),
+                        fill=colour)
+            pct = amt / ph["total"] * 100 if ph["total"] else 0.0
+            d.text((cx + RIFT_IMG_COL_W
+                    - d.textlength(f"{pct:.1f}%", font=mono_small), y + 2),
+                   f"{pct:.1f}%", font=mono_small, fill=RIFT_TIME)
+            y += 18
+        return y
+
+    bottoms = [column(RIFT_IMG_PAD, data["phases"][0]),
+               column(RIFT_IMG_PAD + RIFT_IMG_COL_W + RIFT_IMG_GAP,
+                      data["phases"][1])]
+    mid = RIFT_IMG_PAD + RIFT_IMG_COL_W + RIFT_IMG_GAP // 2
+    h = max(bottoms) + RIFT_IMG_PAD
+    d.line((mid, 52, mid, h - RIFT_IMG_PAD), fill=RIFT_GLOW)
+    img = img.crop((0, 0, W, h))
+    ImageDraw.Draw(img).rectangle((0, 0, W - 1, img.height - 1),
+                                  outline=RIFT_EDGE, width=2)
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(path)
+    return img
+
+
+def copy_image_to_clipboard(img):
+    """Put a PIL image on the Windows clipboard as CF_DIB — the format every
+    paste target understands. A BMP file is a 14-byte header ahead of a DIB,
+    so the conversion is a save and a slice, no encoder gymnastics."""
+    import io
+    if sys.platform != "win32":
+        raise OSError("image clipboard is Windows-only")
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, "BMP")
+    dib = buf.getvalue()[14:]
+
+    k32, u32 = ctypes.windll.kernel32, ctypes.windll.user32
+    k32.GlobalAlloc.restype = ctypes.c_void_p
+    k32.GlobalLock.restype = ctypes.c_void_p
+    k32.GlobalLock.argtypes = (ctypes.c_void_p,)
+    k32.GlobalUnlock.argtypes = (ctypes.c_void_p,)
+    k32.GlobalFree.argtypes = (ctypes.c_void_p,)
+    u32.SetClipboardData.restype = ctypes.c_void_p
+    u32.SetClipboardData.argtypes = (wintypes.UINT, ctypes.c_void_p)
+
+    GMEM_MOVEABLE = 0x0002
+    h = k32.GlobalAlloc(GMEM_MOVEABLE, len(dib))
+    if not h:
+        raise OSError("GlobalAlloc failed")
+    p = k32.GlobalLock(h)
+    ctypes.memmove(p, dib, len(dib))
+    k32.GlobalUnlock(h)
+    # The clipboard is one shared lock; whoever synced it last (clipboard
+    # managers love to) can hold it for a beat. Brief retries beat failing.
+    for attempt in range(5):
+        if u32.OpenClipboard(0):
+            break
+        time.sleep(0.05)
+    else:
+        k32.GlobalFree(h)
+        raise OSError("clipboard is held by another window")
+    try:
+        u32.EmptyClipboard()
+        if not u32.SetClipboardData(8, ctypes.c_void_p(h)):    # CF_DIB
+            k32.GlobalFree(h)
+            raise OSError("SetClipboardData failed")
+        # Ownership of `h` passed to the system on success — no free here.
+    finally:
+        u32.CloseClipboard()
 
 
 # ---------------------------------------------------------------------------
