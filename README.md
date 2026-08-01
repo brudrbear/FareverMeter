@@ -20,6 +20,7 @@ symbol name, then recompute offsets from the shipped bytecode).
 
 <img width="2559" height="1439" alt="image" src="https://github.com/user-attachments/assets/061b7b97-d27c-4051-9016-0c46e9d88135" />
 
+<img width="2559" height="1439" alt="image" src="https://github.com/user-attachments/assets/c8ebd1f7-2942-44d3-ac16-9d302a131428" />
 
 
 
