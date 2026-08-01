@@ -18,9 +18,11 @@ symbol name, then recompute offsets from the shipped bytecode).
 
 <img width="2559" height="1439" alt="image" src="https://github.com/user-attachments/assets/07feedb5-bd3d-45ff-bc8c-52e53dd67cb2" />
 
-<img width="2559" height="1439" alt="image" src="https://github.com/user-attachments/assets/061b7b97-d27c-4051-9016-0c46e9d88135" />
+<img width="2559" height="1439" alt="image" src="https://github.com/user-attachments/assets/8fcf0175-3526-4406-b910-910201f51f81" />
 
-<img width="2559" height="1439" alt="image" src="https://github.com/user-attachments/assets/c8ebd1f7-2942-44d3-ac16-9d302a131428" />
+<img width="2559" height="1439" alt="image" src="https://github.com/user-attachments/assets/f586f709-20fa-4810-a4ba-aedb8a51f3d0" />
+
+
 
 
 
