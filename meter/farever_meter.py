@@ -38,6 +38,7 @@ The only surviving hotkey (fires while Farever has focus):
 """
 from __future__ import annotations
 
+import colorsys
 import ctypes
 import json
 import math
@@ -48,6 +49,7 @@ import sys
 import tempfile
 import threading
 import time
+import zlib
 import tkinter as tk
 from ctypes import wintypes
 from tkinter import font as tkfont
@@ -203,9 +205,10 @@ OVERLAY_ALPHA = 0.94
 TRANSPARENCY_MAX = 80
 # The windows it applies to: everything that belongs to the game view. The
 # control menu and its hint are exempt because they're what you're reading
-# while you drag the slider, and the rift prompt because it's a question that
-# has to be answered.
-TRANSPARENCY_EXEMPT = ("menu", "hint", "prompt")
+# while you drag the slider, the rift prompt because it's a question that
+# has to be answered, and the rift report because it's a page of numbers you
+# stopped to read — the slider is for the things that sit over the fighting.
+TRANSPARENCY_EXEMPT = ("menu", "hint", "prompt", "report")
 FADE_SECS = 0.45
 # The control menu and its hint answer to a keypress, so they want to feel
 # immediate; the meter and breakdown fade on their own schedule, where a slower
@@ -280,6 +283,12 @@ MINIMAP_SIZE = 405          # square, in pixels at 100% UI scale
 # Landed on by eye, from 250 — which fit more in but had started to shrink a
 # fight back toward the couple of pixels the range exists to avoid.
 MINIMAP_RANGE = 175
+# The world-map backdrop under the minimap markers. Assets are built offline
+# by hltools/build_map_assets.py from the game's own map tiles and committed —
+# the meter never reads game files at runtime. The blend pulls the artwork
+# toward the panel colour so the markers stay the loudest thing on the map.
+MAPS_DIR = ROOT / "assets" / "maps"
+MINIMAP_BG_TINT = 0.45
 # The canvas is redrawn at roughly twice the sweep rate. Matching them exactly
 # would beat against the hook's timer and drop or double frames; drawing a bit
 # faster than the data arrives keeps motion even.
@@ -669,6 +678,12 @@ RIFT_PULSE_MS = 40
 RIFT_RIPPLE_MARGIN = 26     # transparent room around the panel for it
 RIFT_RIPPLE_FADEOUT = 0.8   # ripple is gone by this much of the cycle
 
+# ---- rift report leaderboard ----
+# Medal colours for ranks 1-3, tuned to read on the near-black rift body —
+# true silver (#C0C0C0) goes muddy there, so it leans bluer and lighter.
+REPORT_MEDALS = ("#FFD24A", "#CDD6E0", "#D89B66")
+REPORT_HEAL = "#8AE28A"         # the healer's colour, distinct from any medal
+
 # Big mono while counting; smaller and quieter for the idle placeholder, which
 # is only ever on screen so the window can be dragged into place.
 
@@ -721,6 +736,10 @@ FONT_SPECS = {
     "ui_lg_b":    ("Segoe UI", 13, "bold"),
     "ui_hint_b":  ("Segoe UI", 11, "bold"),
     "ui_parse_b": ("Segoe UI", 15, "bold"),
+    # The rift report's leaderboard: an MVP name is the headline of the card
+    # and reads like one; the top-three ranks sit between it and body text.
+    "ui_mvp_b":   ("Segoe UI", 17, "bold"),
+    "ui_rank_b":  ("Segoe UI", 12, "bold"),
     "ui_idle_i":  ("Segoe UI", 10, "italic"),
     "mono":       ("Consolas", 9),
     "mono_10":    ("Consolas", 10),
@@ -740,6 +759,13 @@ SCALE_GROUPS = (
     ("minimap", "Minimap"),
     ("compass", "Compass"),
 )
+# Where each group's slider starts when nothing is saved; absent means 100%.
+# The settings panel defaults to 130: it's read at arm's length mid-game with
+# the escape menu up, and the tabbed layout left it room to be bigger. Applied
+# through the same path as a restored slider (see __init__), so the
+# fonts-at-100 assumption inside _set_group_scale holds either way — a saved
+# value, including an explicit 100, always wins over this table.
+SCALE_DEFAULTS = {"menu": 1.30}
 # Wider than the UI's: a minimap is worth making genuinely large on a big
 # screen, and genuinely small when it's only there for a glance.
 MINIMAP_SCALE_MIN, MINIMAP_SCALE_MAX = 50, 250
@@ -802,12 +828,29 @@ THEME_RIFT = {
     "map_body": RIFT_BODY,
 }
 
+# The game's affinity vocabulary as it actually arrives off
+# DamageResult.affinity (yes, Cheese), each with a colour. This is the single
+# element-colour table — the rift report reads it through element_color().
 ELEMENT_COLORS = {
     "Physical": "#B68A4E", "Magic": "#5279B5", "Fire": "#C9612A",
     "Spark": "#D9B43C", "Earth": "#7C5A2E", "Water": "#4B8FB5",
     "Faith": "#C8B280", "Light": "#E5C95A", "Raw": "#8A6A4A",
     "Cheese": "#D8C25E", "Chaos": "#8E4FB5", "None": "#9A8B7A",
 }
+_ELEMENT_FOLD = {k.lower(): v for k, v in ELEMENT_COLORS.items()}
+
+
+def element_color(name):
+    """The colour a damage type wears — table first (case-folded), then a
+    stable pastel from the name hash, so an affinity a patch adds arrives
+    tinted rather than invisible, and the same colour every session."""
+    key = (name or "?").strip().lower()
+    hit = _ELEMENT_FOLD.get(key)
+    if hit:
+        return hit
+    h = (zlib.crc32(key.encode("utf-8")) % 360) / 360.0
+    r, g, b = colorsys.hsv_to_rgb(h, 0.45, 0.95)
+    return f"#{int(r * 255):02X}{int(g * 255):02X}{int(b * 255):02X}"
 
 GWL_EXSTYLE = -20
 WS_EX_LAYERED = 0x00080000
@@ -1527,6 +1570,151 @@ class PartySession:
             return duration, self.in_combat, [copy.copy(p) for p in rows]
 
 
+class RiftRecorder:
+    """Captures one rift run for the end-of-rift report.
+
+    Fed the same hit/heal stream as PartySession but never reset by the
+    player — its boundaries are the rift's own. Entering the rift starts
+    phase 1 (the trash), the boss-pull edge starts phase 2 (the boss), and
+    the kill that ends the fight freezes both into a report. Two phases and
+    not a running meter, because that's the question the report answers:
+    who carries the AoE clear and who carries the single-target, which are
+    different players on purpose.
+
+    A run that doesn't end in a kill — walking out, a wipe's loading screen —
+    produces nothing. Half a rift isn't a rift report.
+
+    Aggregates everything the hook sends rather than the meter's party/all
+    mode: the mode can change mid-rift (the rift prompt exists to change it),
+    and a report whose phase 1 and phase 2 counted different sets of players
+    would be comparing nothing with nothing."""
+
+    PHASE_LABELS = ("Rift phase", "Boss phase")
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.active = False
+        self.phase = 0
+        self._phases = [self._new_phase(), self._new_phase()]
+        # (timestamp, phase, "hit"|"heal", event) — kept so the boss-pull
+        # edge can move the opening burst across the phase boundary, same
+        # trick (and same measured bar lag) as reset_keeping_recent().
+        self._recent: deque = deque(maxlen=RECENT_EVENT_MAX)
+
+    @staticmethod
+    def _new_phase():
+        return {"players": {}, "elements": defaultdict(float),
+                "start": 0.0, "end": 0.0}
+
+    @staticmethod
+    def _player_of(ph, name):
+        p = ph["players"].get(name)
+        if p is None:
+            p = {"name": name, "total": 0.0, "hits": 0, "crits": 0,
+                 "kills": 0, "heal": 0.0, "heal_hits": 0}
+            ph["players"][name] = p
+        return p
+
+    def _apply(self, ph, kind, ev, sign):
+        """Add (or, for the phase-boundary rewind, subtract) one event. Every
+        stat is a plain sum, which is what makes the rewind exact."""
+        p = self._player_of(ph, ev.get("player") or "?")
+        amount = sign * float(ev.get("amount", 0.0))
+        if kind == "hit":
+            p["total"] += amount
+            p["hits"] += sign
+            p["crits"] += sign * int(ev.get("crit", 0))
+            p["kills"] += sign * int(ev.get("kill", 0))
+            ph["elements"][ev.get("element") or "?"] += amount
+        else:
+            p["heal"] += amount
+            p["heal_hits"] += sign
+
+    def set_rift(self, state: bool):
+        with self.lock:
+            if state:
+                self.active = True
+                self.phase = 0
+                self._phases = [self._new_phase(), self._new_phase()]
+                self._phases[0]["start"] = time.time()
+                self._recent.clear()
+            else:
+                # Leaving normally happens after the kill, when the report has
+                # already been taken; leaving mid-run abandons the recording.
+                self.active = False
+
+    def on_zone(self):
+        """A loading screen means the player left the instance — a wipe or a
+        walk-out. Whatever was building is not a finished rift."""
+        with self.lock:
+            self.active = False
+
+    def record(self, kind, ev: dict):
+        """kind is "hit" or "heal". Hits arrive already filtered of nullified
+        damage — the caller drops those before the meter sees them too."""
+        with self.lock:
+            if not self.active:
+                return
+            now = time.time()
+            self._recent.append((now, self.phase, kind, ev))
+            self._apply(self._phases[self.phase], kind, ev, 1)
+
+    def on_boss_pull(self, backlag=BOSS_PULL_BACKLAG_SECS):
+        """The healthbar the pull is detected from lags the pull itself
+        (fetchBosses is a 2/s timer), so the opening burst on the boss has
+        already been recorded as trash. Move the last few seconds across the
+        boundary — measured damage on the boss, miscounted only in which
+        column it landed."""
+        with self.lock:
+            if not self.active or self.phase != 0:
+                return
+            self.phase = 1
+            now = time.time()
+            boundary = now
+            cutoff = now - backlag
+            for ts, ph, kind, ev in self._recent:
+                if ph == 0 and ts >= cutoff:
+                    self._apply(self._phases[0], kind, ev, -1)
+                    self._apply(self._phases[1], kind, ev, 1)
+                    boundary = min(boundary, ts)
+            # The boundary is where the earliest moved event landed, not where
+            # the bar rose — the durations should agree with the totals.
+            self._phases[0]["end"] = boundary
+            self._phases[1]["start"] = boundary
+
+    def on_boss_kill(self):
+        """The kill that ended the fight. Returns the finished report as plain
+        data (safe to hand to the Tk thread), or None if nothing was recording.
+        One report per rift: taking it stops the recording, so the walk to the
+        exit portal can't dribble into the boss column."""
+        with self.lock:
+            if not self.active:
+                return None
+            self.active = False
+            now = time.time()
+            self._phases[self.phase]["end"] = now
+            phases = []
+            for label, ph in zip(self.PHASE_LABELS, self._phases):
+                players = sorted((dict(p) for p in ph["players"].values()),
+                                 key=lambda p: -p["total"])
+                # The rewind leaves float dust (and a player who only acted in
+                # the moved window ends up all-zero) — drop empty rows rather
+                # than showing "0" lines.
+                players = [p for p in players
+                           if p["total"] > 0.5 or p["heal"] > 0.5]
+                total = sum(p["total"] for p in players)
+                heal = sum(p["heal"] for p in players)
+                elements = sorted(((el, amt) for el, amt
+                                   in ph["elements"].items() if amt > 0.5),
+                                  key=lambda kv: -kv[1])
+                start, end = ph["start"] or now, ph["end"] or now
+                phases.append({"label": label,
+                               "duration": max(0.0, end - start),
+                               "players": players, "total": total,
+                               "heal": heal, "elements": elements})
+            return {"at": now, "phases": phases}
+
+
 class WorldSnapshot:
     """The latest sweep of nearby entities, for the minimap.
 
@@ -1671,6 +1859,103 @@ class WorldSnapshot:
             return self.stamp > 0 and (time.monotonic() - self.stamp) < max_age
 
 
+class MapBackdrop:
+    """The world map under the minimap markers.
+
+    Loads assets/maps/<world>.webp plus the transform its builder wrote next
+    to it: image_px = (world - origin) * px_per_unit, +y DOWN (the world's +y
+    is south — TESTING.md, Geometry). The transform comes from the game's own
+    tile grid (576 world units per tile), cross-checked against questlog.gg's
+    markers, so there is nothing here to calibrate — only to crop.
+
+    Pillow is optional exactly like it is for the parse screenshots: without
+    it (or without the asset) every call returns None and the minimap simply
+    keeps its flat panel."""
+
+    SQRT2 = 1.4143          # crop margin so corners survive a rotation
+
+    def __init__(self):
+        self._world = None
+        self._img = None       # PIL RGB image, or None
+        self._meta = None
+        self._failed = set()   # worlds not to retry every tick
+
+    @staticmethod
+    def available_world(zone_sig):
+        """Match the hook's Main.getMapId() sig to a shipped asset. Fuzzy on
+        purpose — the sig's exact spelling is the game's business; an asset
+        named w1_siagarta answers to any sig that mentions siagarta."""
+        if not zone_sig:
+            return None
+        s = str(zone_sig).lower()
+        try:
+            candidates = sorted(MAPS_DIR.glob("*.json"))
+        except OSError:
+            return None
+        for p in candidates:
+            world = p.stem
+            frag = world.split("_", 1)[-1].lower()
+            if frag and (frag in s or s in world.lower()):
+                return world
+        return None
+
+    def _ensure(self, world):
+        if world == self._world:
+            return self._img is not None
+        if world in self._failed:
+            return False
+        try:
+            from PIL import Image
+            meta = json.loads((MAPS_DIR / f"{world}.json").read_text())
+            img = Image.open(MAPS_DIR / f"{world}.webp").convert("RGB")
+        except ImportError:
+            print("[meter] map backdrop needs Pillow (pip install pillow) — "
+                  "keeping the flat minimap.", file=sys.stderr)
+            self._failed.add(world)
+            return False
+        except Exception as e:
+            print(f"[meter] couldn't load map asset {world!r}: {e}",
+                  file=sys.stderr)
+            self._failed.add(world)
+            return False
+        self._world, self._img, self._meta = world, img, meta
+        print(f"[meter] map backdrop loaded: {world} "
+              f"({meta['width']}x{meta['height']})", file=sys.stderr)
+        return True
+
+    def crop(self, world, wx, wy, half_units, out_px, heading=None):
+        """An out_px-square PIL image of the map centred on world (wx, wy)
+        showing ±half_units. `heading` None means fixed mode (north up);
+        otherwise the camera azimuth, and the image is turned so that heading
+        points up — the same convention as _minimap_px, and PROVEN against it
+        by map_bg_check.py rather than trusted from the derivation. Returns
+        None when there's nothing to draw (no asset, centre off the map)."""
+        if not self._ensure(world):
+            return None
+        from PIL import Image
+        m = self._meta
+        s = float(m["px_per_unit"])
+        cx = (wx - m["origin_x"]) * s
+        cy = (wy - m["origin_y"]) * s
+        if not (0 <= cx < m["width"] and 0 <= cy < m["height"]):
+            return None          # an instance reusing odd coordinates
+        half_px = half_units * s
+        r = half_px * (self.SQRT2 if heading is not None else 1.0)
+        box = (int(round(cx - r)), int(round(cy - r)),
+               int(round(cx + r)), int(round(cy + r)))
+        im = self._img.crop(box)   # pads with black past the world's edge
+        if heading is not None:
+            # PIL rotates content counterclockwise; heading+90deg brings the
+            # camera azimuth to the top. See map_bg_check.py for the proof.
+            im = im.rotate(math.degrees(heading) + 90.0,
+                           resample=Image.BILINEAR)
+            c = im.size[0] / 2.0
+            hp = int(round(half_px))
+            im = im.crop((int(round(c)) - hp, int(round(c)) - hp,
+                          int(round(c)) + hp, int(round(c)) + hp))
+        return im.resize((out_px, out_px), Image.BILINEAR)
+
+
 class GameUIState:
     """Which of the game's own UI windows are open, streamed by the hook.
 
@@ -1684,6 +1969,18 @@ class GameUIState:
         self._open: set[str] = set()
         self._rift = False
         self._boss_bar = 0
+        self._zone_sig = None
+
+    def set_zone(self, sig):
+        """layer.world.level from the hook — the loaded level's name, sent
+        once at attach and then on every change. (Its predecessor,
+        Main.getMapId(), turned out to return the machine hostname.)"""
+        with self._lock:
+            self._zone_sig = sig or None
+
+    def zone_sig(self):
+        with self._lock:
+            return self._zone_sig
 
     def set_rift(self, state: bool):
         with self._lock:
@@ -1945,8 +2242,8 @@ QUIT_LABEL = "Stop the meter"
 # the only way to run the meter was a console you could close out from under
 # it. The shipped build has no console and two proper exits, so the line just
 # says where they are — and doubles as the slot the update notice takes over.
-SHUTDOWN_HINT = ("To stop the meter, use the Stop button below — or right-click "
-                 "the Farever+ icon in the notification area by the clock.")
+SHUTDOWN_HINT = ("Stop the meter with the button at the bottom, or from the "
+                 "Farever+ tray icon by the clock.")
 
 
 def start_hotkeys(callbacks: dict, target_pid):
@@ -2632,6 +2929,13 @@ class Overlay:
         self._compass_filters = {key: True
                                  for key, _label, _cats in COMPASS_FILTERS}
         self._map_rate = "High"        # Ultra exists but is opt-in
+        # The world-map backdrop. On by default: it only ever draws when a
+        # shipped asset matches the zone, so "on with no asset" costs nothing.
+        self._map_bg_on = True
+        self._map_backdrop = MapBackdrop()
+        self._map_photo = None         # the reused PhotoImage, sized lazily
+        self._map_bg_key = None        # (zone sig) -> resolved world, cached
+        self._map_bg_world = None
         # Every cue — boss pull, boss kill, legendary drop — rides this one
         # setting. Off by default: an overlay that starts making noise on its
         # own the first time you meet a boss is a bad first impression, and the
@@ -2666,6 +2970,11 @@ class Overlay:
         self._pulse_job = None
         self._rift_box = None      # which palette the box is wearing
         self._rift_seen = False
+        # End-of-rift report: the frozen data the card is showing, and the
+        # "Copied" flash timer.
+        self._report_open = False
+        self._report_data = None
+        self._report_flash_job = None
 
         # Before any widget exists: the dropdowns and Show/hide ticks are built
         # from these, so loading afterwards would leave the menu disagreeing
@@ -2712,6 +3021,8 @@ class Overlay:
         self.parsewin.title("Farever+ Parse")
         self.promptwin = tk.Toplevel(self.root)
         self.promptwin.title("Farever+ Prompt")
+        self.reportwin = tk.Toplevel(self.root)
+        self.reportwin.title("Farever+ Rift Report")
         self.riftwin = tk.Toplevel(self.root)
         self.riftwin.title("Farever+ Rift Timer")
         self.mapwin = tk.Toplevel(self.root)
@@ -2719,8 +3030,8 @@ class Overlay:
         self.compasswin = tk.Toplevel(self.root)
         self.compasswin.title("Farever+ Compass")
         for win in (self.root, self.detail, self.menu, self.hintwin,
-                    self.parsewin, self.promptwin, self.riftwin, self.mapwin,
-                    self.compasswin):
+                    self.parsewin, self.promptwin, self.reportwin,
+                    self.riftwin, self.mapwin, self.compasswin):
             win.overrideredirect(True)
             win.attributes("-topmost", True)
             win.configure(bg=TRANSPARENT_KEY)
@@ -2742,9 +3053,11 @@ class Overlay:
         # Every window that fades: the two toggleable ones, plus the control
         # menu and its hint, which follow the game's escape menu.
         self._fade_win = dict(self._element_win, menu=self.menu,
-                              hint=self.hintwin, prompt=self.promptwin)
+                              hint=self.hintwin, prompt=self.promptwin,
+                              report=self.reportwin)
         self._shown["menu"] = self._shown["hint"] = False
         self._shown["prompt"] = False
+        self._shown["report"] = False
         self._shown["rift"] = False     # nothing to show until a timer arrives
         # Live opacity of each faded window, driven by _step_fade. The menu pair
         # starts at zero: they're withdrawn until the escape menu opens.
@@ -2754,12 +3067,13 @@ class Overlay:
         self._alpha = {k: self._alpha_for(k) for k in self._fade_win}
         self._alpha["menu"] = self._alpha["hint"] = 0.0
         self._alpha["prompt"] = self._alpha["rift"] = 0.0
+        self._alpha["report"] = 0.0
         for key, win in self._fade_win.items():
             if self._alpha[key]:
                 win.attributes("-alpha", self._alpha[key])
         self._fade_secs = {k: FADE_SECS for k in self._fade_win}
         self._fade_secs["menu"] = self._fade_secs["hint"] = MENU_FADE_SECS
-        self._fade_secs["prompt"] = MENU_FADE_SECS
+        self._fade_secs["prompt"] = self._fade_secs["report"] = MENU_FADE_SECS
         self._fade_job = None          # pending `after` id for the fade driver
 
         self._build_meter()
@@ -2768,6 +3082,7 @@ class Overlay:
         self._build_hint()
         self._build_parse()
         self._build_prompt()
+        self._build_report()
         self._build_rift()
         self._build_minimap()
         self._build_compass()
@@ -2776,7 +3091,12 @@ class Overlay:
         # Restored scales can only be applied now: they resize the fonts every
         # window has already been packed against. The sliders are set from them
         # too, or the menu would read 100% while the window is at 125.
-        for group, factor in (self._pending_scales or {}).items():
+        # Defaults underneath, saved values on top — a group nobody has ever
+        # touched starts at its SCALE_DEFAULTS entry, and a saved 100 stays a
+        # saved 100 rather than being "upgraded" to the default.
+        restored = dict(SCALE_DEFAULTS)
+        restored.update(self._pending_scales or {})
+        for group, factor in restored.items():
             if group in self._scales and abs(factor - 1.0) > 0.001:
                 self._scale_vars[group].set(int(round(factor * 100)))
                 self._set_group_scale(group, factor)
@@ -2796,6 +3116,7 @@ class Overlay:
         self.hintwin.withdraw()
         self.parsewin.withdraw()
         self.promptwin.withdraw()
+        self.reportwin.withdraw()
         self.riftwin.withdraw()
         self.root.after(60, self._apply_clickthrough)
         self._install_hotkeys()
@@ -2982,6 +3303,8 @@ class Overlay:
             self.mode = data["mode"]
         if isinstance(data.get("hide_ooc"), bool):
             self._hide_ooc = data["hide_ooc"]
+        if isinstance(data.get("map_bg"), bool):
+            self._map_bg_on = data["map_bg"]
         if isinstance(data.get("sounds_on"), bool):
             self._sounds_on = data["sounds_on"]
         if isinstance(data.get("auto_reset_boss"), bool):
@@ -3045,6 +3368,7 @@ class Overlay:
                     for k, _label, _cats in COMPASS_FILTERS},
                 "mode": self.mode,
                 "hide_ooc": self._hide_ooc,
+                "map_bg": bool(self._map_bg_on),
                 "sounds_on": bool(self._sounds_on),
                 "sound_volume": int(self._sound_volume),
                 "auto_reset_boss": bool(self._auto_reset_boss),
@@ -3211,31 +3535,50 @@ class Overlay:
                                  font=self.fonts_m["ui_sm_b"],
                                  anchor="w", justify="left",
                                  wraplength=WARN_WRAP)
-        self.warn_lbl.pack(fill="x", pady=(0, 8))
-        tk.Frame(body, bg=BG_BAR_TRACK, height=1).pack(fill="x", pady=(0, 2))
+        self.warn_lbl.pack(fill="x", pady=(0, 6))
 
-        # Two columns rather than one long strip: the menu had grown tall enough
-        # to be a scroll, and the scale slider can only make that worse.
-        cols = tk.Frame(body, bg=BG_BODY)
-        cols.pack(fill="both", expand=True)
-        left = tk.Frame(cols, bg=BG_BODY)
-        left.pack(side="left", fill="both", expand=True, anchor="n")
-        tk.Frame(cols, bg=BG_BAR_TRACK, width=1).pack(side="left", fill="y",
-                                                      padx=10)
-        right = tk.Frame(cols, bg=BG_BODY)
-        right.pack(side="left", fill="both", expand=True, anchor="n")
+        # Tabs rather than the old two-column wall. The menu had grown a row at
+        # a time until every visit meant reading all of it; four pages mean the
+        # page you're on is the only thing asking to be read. All four frames
+        # sit stacked in ONE grid cell and the active one is raised, so the
+        # holder takes the size of the largest page and the window never
+        # changes size when you switch — a settings panel that jumps around
+        # under the cursor is worse than a dense one.
+        tabbar = tk.Frame(body, bg=BG_BODY)
+        tabbar.pack(fill="x")
+        holder = tk.Frame(body, bg=BG_BODY)
+        holder.pack(fill="both", expand=True, pady=(8, 0))
+        holder.grid_rowconfigure(0, weight=1)
+        holder.grid_columnconfigure(0, weight=1)
+        self._menu_tab = "General"
+        self._menu_tab_btns = {}
+        self._menu_tab_frames = {}
+        for name in ("General", "Windows", "Map", "Actions"):
+            b = tk.Button(tabbar, text=name,
+                          command=self._enqueue(
+                              lambda n=name: self._set_menu_tab(n)),
+                          font=self.fonts_m["ui_b"], relief="flat", bd=0,
+                          padx=14, pady=4, cursor="hand2",
+                          highlightthickness=1)
+            b.pack(side="left", padx=(0, 4))
+            self._menu_tab_btns[name] = b
+            f = tk.Frame(holder, bg=BG_BODY)
+            f.grid(row=0, column=0, sticky="nsew")
+            self._menu_tab_frames[name] = f
+        gen = self._menu_tab_frames["General"]
+        winb = self._menu_tab_frames["Windows"]
+        mp = self._menu_tab_frames["Map"]
+        act = self._menu_tab_frames["Actions"]
 
-        def section(parent, text, first=False, note=None):
+        def section(parent, text, first=False):
             row = tk.Frame(parent, bg=BG_BODY)
-            row.pack(fill="x", pady=(0 if first else 9, 3))
+            row.pack(fill="x", pady=(2 if first else 10, 4))
             tk.Label(row, text=text, bg=BG_BODY, fg=ACCENT,
                      font=self.fonts_m["ui_sm_b"], anchor="w").pack(side="left")
-            if note:
-                # Quieter than the heading it hangs off: it's a note about how
-                # the section behaves, not another thing to read every time.
-                tk.Label(row, text=note, bg=BG_BODY, fg=FG_DIM,
-                         font=self.fonts_m["ui_tiny_i"],
-                         anchor="e").pack(side="right")
+            # The rule line carries the heading across the row, which is what
+            # lets the headings be quiet: the eye finds the break, not the word.
+            tk.Frame(row, bg=BG_BAR_TRACK, height=1).pack(
+                side="left", fill="x", expand=True, padx=(8, 0))
 
         def button(parent, cmd):
             b = tk.Button(parent, text="", command=cmd, anchor="w",
@@ -3265,147 +3608,44 @@ class Overlay:
                      width=FIELD_LABEL_CHARS).pack(side="left")
             return row
 
-        # Commands are queued rather than run inline: they mutate overlay state
-        # the refresh loop also touches, and _drain runs them on the Tk thread.
-        section(left, "OPTIONS", first=True)
-        self.btn_mode = button(left, self._enqueue(self._toggle_mode))
-        # Directly under the mode button: both are "what the meter does during
-        # a fight" rather than "how it looks".
-        self.btn_sounds = button(left, self._enqueue(self._toggle_sounds))
-        # Live rather than on release, unlike Transparency — this one costs a
-        # single MCI call, and hearing the level while you drag is the point.
-        row = field(left, "Volume")
-        self._volume_var = tk.IntVar(value=self._sound_volume)
-        scl_vol = tk.Scale(
-            row, from_=0, to=SOUND_VOLUME_MAX, resolution=5,
-            orient="horizontal", variable=self._volume_var, showvalue=True,
-            bg=BG_BODY, fg=FG_DIM, troughcolor=BG_BAR_TRACK,
-            activebackground=BTN_ON_BG, highlightthickness=0, bd=0,
-            sliderrelief="flat", font=self.fonts_m["ui_tiny_i"], length=120,
-            cursor="hand2")
-        scl_vol.bind("<ButtonRelease-1>", lambda _e: self._on_volume_pick())
-        scl_vol.pack(side="right", expand=True, fill="x", padx=(8, 0))
-
-        row = field(left, "Theme")
-        self._theme_var = tk.StringVar(value=self._theme_mode)
-        self.opt_theme = tk.OptionMenu(row, self._theme_var, *THEME_MODES,
-                                       command=self._on_theme_pick)
-        self.opt_theme.config(
-            bg=BG_BODY_SOFT, fg=FG_TEXT, activebackground=BG_BAR_TRACK,
-            activeforeground=FG_VALUE, relief="flat", bd=0, anchor="w",
-            padx=10, pady=3, font=self.fonts_m["ui"], cursor="hand2",
-            highlightthickness=1, highlightbackground=BG_BAR_TRACK,
-            direction="right")
-        self.opt_theme["menu"].config(
-            bg=BG_BODY, fg=FG_TEXT, activebackground=BTN_ON_BG,
-            activeforeground=FG_HEADER, bd=0, relief="flat",
-            font=self.fonts_m["ui"])
-        self.opt_theme.pack(side="right", expand=True, fill="x", padx=(8, 0))
-        self._option_menus.append(self.opt_theme)
-
-        # Under Theme because that's what it is — how the overlay looks, not
-        # what it does. Released rather than live, like the scale sliders: every
-        # step reconfigures five windows.
-        row = field(left, "Transparency")
-        self._transp_var = tk.IntVar(value=self._transparency)
-        scl = tk.Scale(
-            row, from_=0, to=TRANSPARENCY_MAX, resolution=5,
-            orient="horizontal", variable=self._transp_var, showvalue=True,
-            bg=BG_BODY, fg=FG_DIM, troughcolor=BG_BAR_TRACK,
-            activebackground=BTN_ON_BG, highlightthickness=0, bd=0,
-            sliderrelief="flat", font=self.fonts_m["ui_tiny_i"], length=120,
-            cursor="hand2")
-        scl.bind("<ButtonRelease-1>", lambda _e: self._on_transparency_pick())
-        scl.pack(side="right", expand=True, fill="x", padx=(8, 0))
-
-        row = field(left, "Minimap")
-        self._map_mode_var = tk.StringVar(value=self._map_mode)
-        self.opt_map = tk.OptionMenu(row, self._map_mode_var, *MINIMAP_MODES,
-                                     command=self._on_map_mode_pick)
-        self.opt_map.config(
-            bg=BG_BODY_SOFT, fg=FG_TEXT, activebackground=BG_BAR_TRACK,
-            activeforeground=FG_VALUE, relief="flat", bd=0, anchor="w",
-            padx=10, pady=3, font=self.fonts_m["ui"], cursor="hand2",
-            highlightthickness=1, highlightbackground=BG_BAR_TRACK,
-            direction="right")
-        self.opt_map["menu"].config(
-            bg=BG_BODY, fg=FG_TEXT, activebackground=BTN_ON_BG,
-            activeforeground=FG_HEADER, bd=0, relief="flat",
-            font=self.fonts_m["ui"])
-        self.opt_map.pack(side="right", expand=True, fill="x", padx=(8, 0))
-        self._option_menus.append(self.opt_map)
-
-        row = field(left, "Map refresh")
-        self._map_rate_var = tk.StringVar(value=self._map_rate)
-        self.opt_rate = tk.OptionMenu(row, self._map_rate_var,
-                                      *MINIMAP_RATE_NAMES,
-                                      command=self._on_map_rate_pick)
-        self.opt_rate.config(
-            bg=BG_BODY_SOFT, fg=FG_TEXT, activebackground=BG_BAR_TRACK,
-            activeforeground=FG_VALUE, relief="flat", bd=0, anchor="w",
-            padx=10, pady=3, font=self.fonts_m["ui"], cursor="hand2",
-            highlightthickness=1, highlightbackground=BG_BAR_TRACK,
-            direction="right")
-        self.opt_rate["menu"].config(
-            bg=BG_BODY, fg=FG_TEXT, activebackground=BTN_ON_BG,
-            activeforeground=FG_HEADER, bd=0, relief="flat",
-            font=self.fonts_m["ui"])
-        self.opt_rate.pack(side="right", expand=True, fill="x", padx=(8, 0))
-        self._option_menus.append(self.opt_rate)
-
-        # Every font in the overlay is a named Tk font, so dragging this resizes
-        # the lot. Released rather than live: repainting the whole tree on each
-        # pixel of drag is visibly slow.
-        section(left, "SCALING")
-        self._scale_vars = {}
-        for group, label in SCALE_GROUPS:
-            row = field(left, label)
-            var = tk.IntVar(value=int(round(self._scales[group] * 100)))
-            self._scale_vars[group] = var
-            lo, hi = (MINIMAP_SCALE_MIN, MINIMAP_SCALE_MAX) if group == "minimap"                 else (UI_SCALE_MIN, UI_SCALE_MAX)
-            scl = tk.Scale(
-                row, from_=lo, to=hi, resolution=5, orient="horizontal",
-                variable=var, showvalue=True, bg=BG_BODY, fg=FG_DIM,
-                troughcolor=BG_BAR_TRACK, activebackground=BTN_ON_BG,
-                highlightthickness=0, bd=0, sliderrelief="flat",
-                font=self.fonts_m["ui_tiny_i"], length=120, cursor="hand2")
-            # Released rather than live: repainting a whole window on each
-            # pixel of drag is visibly slow.
-            scl.bind("<ButtonRelease-1>",
-                     lambda _e, g=group: self._on_scale_pick(g))
-            scl.pack(side="right", expand=True, fill="x", padx=(8, 0))
-
-        section(left, "SHOW / HIDE")
-        self.element_vars = {}
-        for key, label in TOGGLEABLE_ELEMENTS:
-            row = field(left, label)
-            var = tk.StringVar(value=self._show.get(key, ELEMENT_SHOW))
-            self.element_vars[key] = var
-            opt = tk.OptionMenu(row, var, *ELEMENT_MODES,
-                                command=lambda v, k=key: self._on_element_pick(k, v))
+        # One styling for every dropdown and every slider, in one place each —
+        # the old menu configured five OptionMenus by hand, identically, and
+        # they only stayed identical by luck.
+        def dropdown(row, var, values, command, width=None):
+            opt = tk.OptionMenu(row, var, *values, command=command)
             opt.config(
                 bg=BG_BODY_SOFT, fg=FG_TEXT, activebackground=BG_BAR_TRACK,
                 activeforeground=FG_VALUE, relief="flat", bd=0, anchor="w",
-                padx=8, pady=2, font=self.fonts_m["ui"], cursor="hand2",
+                padx=10, pady=3, font=self.fonts_m["ui"], cursor="hand2",
                 highlightthickness=1, highlightbackground=BG_BAR_TRACK,
                 direction="right")
             opt["menu"].config(
                 bg=BG_BODY, fg=FG_TEXT, activebackground=BTN_ON_BG,
                 activeforeground=FG_HEADER, bd=0, relief="flat",
                 font=self.fonts_m["ui"])
-            opt.pack(side="right", expand=True, fill="x", padx=(8, 0))
+            if width is not None:
+                opt.config(width=width)
             self._option_menus.append(opt)
-        # Columns inside the meter rather than a window, so it keeps its tick.
-        self.btn_heal = button(left, self._enqueue(self._toggle_heal))
-        # Last in this section rather than under OPTIONS: it hides the same
-        # windows the dropdowns above do, just on a condition instead of a
-        # choice.
-        self.btn_hide_ooc = button(left, self._enqueue(self._toggle_hide_ooc))
+            return opt
 
-        # Above ACTIONS: these are settings you leave alone for hours, and the
-        # buttons below them are the ones you came here to press.
-        section(right, "CONTROLS", first=True)
-        row = field(right, "Reset data")
+        def slider(row, var, lo, hi, on_release, length=120):
+            scl = tk.Scale(
+                row, from_=lo, to=hi, resolution=5, orient="horizontal",
+                variable=var, showvalue=True, bg=BG_BODY, fg=FG_DIM,
+                troughcolor=BG_BAR_TRACK, activebackground=BTN_ON_BG,
+                highlightthickness=0, bd=0, sliderrelief="flat",
+                font=self.fonts_m["ui_tiny_i"], length=length, cursor="hand2")
+            scl.bind("<ButtonRelease-1>", on_release)
+            return scl
+
+        # ---- General: what the meter does, and how the overlay looks ----
+        # Commands are queued rather than run inline: they mutate overlay state
+        # the refresh loop also touches, and _drain runs them on the Tk thread.
+        section(gen, "METER", first=True)
+        self.btn_mode = button(gen, self._enqueue(self._toggle_mode))
+        self.btn_auto_reset = button(gen,
+                                     self._enqueue(self._toggle_auto_reset_boss))
+        row = field(gen, "Reset data")
         self.btn_bind = tk.Button(
             row, text="", command=self._begin_bind_capture, anchor="w",
             font=self.fonts_m["ui"], bg=BG_BODY_SOFT, fg=FG_TEXT,
@@ -3415,52 +3655,171 @@ class Overlay:
         self.btn_bind.pack(side="right", expand=True, fill="x", padx=(8, 0))
         # True while the button is listening for a keypress.
         self._binding_now = False
-        # Under the reset binding because it IS a reset trigger, just an
-        # automatic one. Bosses only: an elite raises the same healthbar, and
-        # wiping the meter for every elite on the way to a boss would be
-        # useless — see the bossbar handler.
-        self.btn_auto_reset = button(right,
-                                     self._enqueue(self._toggle_auto_reset_boss))
 
-        section(right, "COMPASS")
-        self.btn_compass_filter = {}
-        for key, label, _cats in COMPASS_FILTERS:
-            self.btn_compass_filter[key] = button(
-                right,
-                self._enqueue(lambda k=key: self._toggle_compass_filter(k)))
+        section(gen, "SOUND")
+        self.btn_sounds = button(gen, self._enqueue(self._toggle_sounds))
+        # Live rather than on release, unlike Transparency — this one costs a
+        # single MCI call, and hearing the level while you drag is the point.
+        row = field(gen, "Volume")
+        self._volume_var = tk.IntVar(value=self._sound_volume)
+        slider(row, self._volume_var, 0, SOUND_VOLUME_MAX,
+               lambda _e: self._on_volume_pick()).pack(
+            side="right", expand=True, fill="x", padx=(8, 0))
 
-        section(right, "MINIMAP")
+        section(gen, "LOOK")
+        row = field(gen, "Theme")
+        self._theme_var = tk.StringVar(value=self._theme_mode)
+        self.opt_theme = dropdown(row, self._theme_var, THEME_MODES,
+                                  self._on_theme_pick)
+        self.opt_theme.pack(side="right", expand=True, fill="x", padx=(8, 0))
+        # Released rather than live, like the scale sliders: every step
+        # reconfigures five windows.
+        row = field(gen, "Transparency")
+        self._transp_var = tk.IntVar(value=self._transparency)
+        slider(row, self._transp_var, 0, TRANSPARENCY_MAX,
+               lambda _e: self._on_transparency_pick()).pack(
+            side="right", expand=True, fill="x", padx=(8, 0))
+
+        # ---- Windows: one row per window — visibility and size together ----
+        # The old menu split these across SCALING and SHOW / HIDE, which meant
+        # the same five windows were listed twice, a screen apart. A window is
+        # one thing; its row is one row.
+        self._scale_vars = {}
+        self.element_vars = {}
+
+        def winrow(label, show_key=None, scale_group=None, note=None):
+            row = field(winb, label)
+            # The middle column: what shows this window. A fixed width keeps
+            # the sliders in a straight line down the page.
+            if show_key is not None:
+                var = tk.StringVar(value=self._show.get(show_key, ELEMENT_SHOW))
+                self.element_vars[show_key] = var
+                opt = dropdown(row, var, ELEMENT_MODES,
+                               lambda v, k=show_key: self._on_element_pick(k, v),
+                               width=10)
+                opt.pack(side="left", padx=(8, 0))
+            else:
+                # Same footprint as the dropdown it stands in for, so the
+                # slider column stays a column.
+                tk.Label(row, text=note or "", bg=BG_BODY, fg=FG_DIM,
+                         font=self.fonts_m["ui_tiny_i"], anchor="w",
+                         width=12, padx=10).pack(side="left", padx=(8, 0))
+                note = None
+            if scale_group is not None:
+                var = tk.IntVar(
+                    value=int(round(self._scales[scale_group] * 100)))
+                self._scale_vars[scale_group] = var
+                lo, hi = ((MINIMAP_SCALE_MIN, MINIMAP_SCALE_MAX)
+                          if scale_group == "minimap"
+                          else (UI_SCALE_MIN, UI_SCALE_MAX))
+                # Released rather than live: repainting a whole window on each
+                # pixel of drag is visibly slow.
+                slider(row, var, lo, hi,
+                       lambda _e, g=scale_group: self._on_scale_pick(g),
+                       length=110).pack(side="right", expand=True, fill="x",
+                                        padx=(8, 0))
+            else:
+                tk.Label(row, text=note or "", bg=BG_BODY, fg=FG_DIM,
+                         font=self.fonts_m["ui_tiny_i"],
+                         anchor="e").pack(side="right", expand=True, fill="x",
+                                          padx=(8, 0))
+
+        section(winb, "EACH WINDOW: VISIBILITY · SIZE", first=True)
+        winrow("Damage meter", "meter", "meter")
+        winrow("Breakdown", "detail", "detail")
+        # The rift timer wears the meter's fonts, so it has no size of its own.
+        winrow("Rift timer", "rift", None, note="sizes with Meter")
+        winrow("Minimap", "minimap", "minimap")
+        winrow("Compass", "compass", "compass")
+        # ...and this panel is only ever on screen with the escape menu, so
+        # visibility isn't a choice it can offer about itself.
+        winrow("Settings", None, "menu", note="ESC only")
+
+        section(winb, "CONTENT")
+        # Columns inside the meter rather than a window, so it keeps its tick.
+        self.btn_heal = button(winb, self._enqueue(self._toggle_heal))
+        # Hides the same windows the dropdowns above do, just on a condition
+        # instead of a choice.
+        self.btn_hide_ooc = button(winb, self._enqueue(self._toggle_hide_ooc))
+
+        # ---- Map: the minimap and compass, in one place ----
+        section(mp, "MINIMAP", first=True)
+        row = field(mp, "Style")
+        self._map_mode_var = tk.StringVar(value=self._map_mode)
+        self.opt_map = dropdown(row, self._map_mode_var, MINIMAP_MODES,
+                                self._on_map_mode_pick)
+        self.opt_map.pack(side="right", expand=True, fill="x", padx=(8, 0))
+        row = field(mp, "Refresh")
+        self._map_rate_var = tk.StringVar(value=self._map_rate)
+        self.opt_rate = dropdown(row, self._map_rate_var, MINIMAP_RATE_NAMES,
+                                 self._on_map_rate_pick)
+        self.opt_rate.pack(side="right", expand=True, fill="x", padx=(8, 0))
+        # The world-map backdrop. It only draws when a shipped asset matches
+        # the zone, so the tick is safe to leave on everywhere.
+        self.btn_map_bg = button(mp, self._enqueue(self._toggle_map_bg))
         self.btn_map_filter = {}
         for key, label, _cats in MINIMAP_FILTERS:
             self.btn_map_filter[key] = button(
-                right, self._enqueue(lambda k=key: self._toggle_map_filter(k)))
+                mp, self._enqueue(lambda k=key: self._toggle_map_filter(k)))
 
-        section(right, "ACTIONS")
-        self.btn_parse = button(right, self._enqueue(self._toggle_parse))
-        self.btn_parses = button(right, self._enqueue(self._open_parses))
-        self.btn_parses.config(text="Parse Screenshots")
+        section(mp, "COMPASS")
+        self.btn_compass_filter = {}
+        for key, label, _cats in COMPASS_FILTERS:
+            self.btn_compass_filter[key] = button(
+                mp,
+                self._enqueue(lambda k=key: self._toggle_compass_filter(k)))
 
-        # Last, and on their own: both throw work away, so they want distance
-        # from the settings you click casually.
-        section(right, "RESET")
+        # ---- Actions: the things you came here to press ----
+        section(act, "PARSE", first=True)
+        self.btn_parse = button(act, self._enqueue(self._toggle_parse))
+        # Brings the end-of-rift card back after a reflex-close. Greyed until
+        # a rift has produced one — see _refresh_menu.
+        self.btn_rift_report = button(act, self._enqueue(self._reopen_report))
+        self.btn_parses = button(act, self._enqueue(self._open_parses))
+        self.btn_parses.config(text="Parses & Rift Reports")
+
+        # Both throw work away, so they want distance from the buttons above.
+        section(act, "RESET")
         # Exactly what the hotkey fires, so the two can't diverge. Labelled with
         # the keybind because the hotkey is the one that's useful mid-fight,
         # when the escape menu (and so this button) isn't an option.
-        self.btn_reset_data = button(right, self._enqueue(self.session.reset))
+        self.btn_reset_data = button(act, self._enqueue(self.session.reset))
         self.btn_reset_data.config(
             text=f"Reset encounter data   ({bind_label()})")
-        self.btn_reset_pos = button(right, self._enqueue(self._reset_pos))
+        self.btn_reset_pos = button(act, self._enqueue(self._reset_pos))
         self.btn_reset_pos.config(text="Reset window positions")
 
-        # Bottom of the menu, on its own: the one button that ends the session.
-        # It's here as well as on the tray icon because this is where the user
+        # ---- footer: on every tab, because it ends the session ----
+        # Here as well as on the tray icon because this is where the user
         # already is — mid-game, escape menu open — and because a tray icon
-        # Windows 11 has filed into the overflow flyout is not somewhere you can
-        # count on them finding.
-        section(right, "QUIT")
-        self.btn_quit = button(right, self._enqueue(self._quit_clicked))
+        # Windows 11 has filed into the overflow flyout is not somewhere you
+        # can count on them finding.
+        tk.Frame(body, bg=BG_BAR_TRACK, height=1).pack(fill="x", pady=(10, 6))
+        self.btn_quit = button(body, self._enqueue(self._quit_clicked))
         self.btn_quit.config(text=QUIT_LABEL, fg=FG_WARN)
         self.menu.minsize(MIN_W["menu"], 0)
+        self._set_menu_tab("General")
+
+    def _set_menu_tab(self, name):
+        """Raise one settings page and paint its tab as the active one. The
+        frames all live in the same grid cell, so this is a lift, not a
+        re-layout."""
+        if name not in self._menu_tab_frames:
+            return
+        self._menu_tab = name
+        self._menu_tab_frames[name].tkraise()
+        for n, b in self._menu_tab_btns.items():
+            active = (n == name)
+            b.config(bg=BTN_ON_BG if active else BG_BODY_SOFT,
+                     fg=FG_HEADER if active else FG_TEXT,
+                     activebackground=BTN_ON_BG_ACTIVE if active
+                     else BG_BAR_TRACK,
+                     activeforeground=FG_HEADER if active else FG_VALUE,
+                     highlightbackground=BTN_ON_BG_ACTIVE if active
+                     else BG_BAR_TRACK)
+        # A dropdown posted from the page on the way out would float over the
+        # one arriving.
+        self._unpost_menus()
 
     def _build_hint(self):
         """The one remaining keybind, as free-floating text over the game — no
@@ -3554,12 +3913,22 @@ class Overlay:
 
         Facing is (cos r, sin r), i.e. r is measured from +x. Turning that to
         screen-up is a rotation by (pi/2 - r), which reduces to the form below;
-        substituting the facing vector gives (0, 1) as it should."""
+        substituting the facing vector gives (0, 1) as it should.
+
+        Fixed mode is NOT its own geometry: north-up is the rotating formula
+        evaluated at the north heading (270 deg — the game's +y is SOUTH, see
+        COMPASS_CARDINALS). Substituting ca=0, sa=-1 collapses mirror and
+        y-flip together into plain (+dx, +dy) — the mirror is still in there,
+        folded in, so don't "fix" its absence. This branch used to be
+        (-dx, -dy): a half-turn, which preserves handedness and so looked
+        perfectly self-consistent — arrows agreed with positions — while
+        putting north at the bottom against the sky."""
         dx, dy = ex - me["x"], ey - me["y"]
         if rot is not None:
             ca, sa = rot
             dx, dy = dx * sa - dy * ca, dx * ca + dy * sa
-        return half + MINIMAP_MIRROR_X * dx * scale, half - dy * scale
+            return half + MINIMAP_MIRROR_X * dx * scale, half - dy * scale
+        return half + dx * scale, half + dy * scale
 
     def _draw_minimap(self):
         if not self._shown.get("minimap"):
@@ -3613,6 +3982,11 @@ class Overlay:
         # constant rather than a rotation that has to agree with one.
         me_dir = ((0.0, -1.0) if rot is not None
                   else self._facing_screen(heading, heading, False))
+
+        # The map backdrop goes down before anything else — canvas stacking is
+        # creation order, so first drawn is bottom-most.
+        self._draw_map_backdrop(c, half, size, me,
+                                heading if rot is not None else None, body)
 
         # The minimap always shows everyone nearby, regardless of the meter's
         # party/all mode — a map that hid the player standing next to you would
@@ -3692,6 +4066,48 @@ class Overlay:
                           outline=self._map_ink(0.95),
                           width=max(1, int(round(self._scales["minimap"] * 2))))
 
+    def _draw_map_backdrop(self, c, half, size, me, heading, body):
+        """Paint the world map under the markers, if there is one to paint.
+
+        `heading` is None in fixed mode (the crop is already north-up, the
+        same +x-right/+y-down frame as _minimap_px's fixed branch) and the
+        camera azimuth in rotating mode. Every early-out below is the cheap
+        kind — the expensive path only runs when a real image is drawn."""
+        if not self._map_bg_on:
+            return
+        # Inside a rift the zone sig still names the world you left, but the
+        # rift is not that world — the flat panel is the honest background.
+        if self.ui_state.in_rift():
+            return
+        sig = self.ui_state.zone_sig()
+        if sig != self._map_bg_key:
+            # Resolve sig -> asset once per zone, not per tick: it globs disk.
+            self._map_bg_key = sig
+            self._map_bg_world = self._map_backdrop.available_world(sig)
+        if self._map_bg_world is None:
+            return
+        im = self._map_backdrop.crop(self._map_bg_world,
+                                     me.get("x", 0), me.get("y", 0),
+                                     float(self._map_range), size,
+                                     heading=heading)
+        if im is None:
+            return
+        try:
+            from PIL import Image, ImageTk
+        except ImportError:
+            return
+        # Pulled toward the panel colour so markers keep winning the contrast
+        # fight, and so every theme (parchment, dark, rift) tints its own map.
+        rgb = tuple(int(body.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+        im = Image.blend(im, Image.new("RGB", im.size, rgb), MINIMAP_BG_TINT)
+        # One PhotoImage, pasted into — a fresh photo per tick is garbage the
+        # collector has to chase four times a second.
+        if self._map_photo is None or self._map_photo.width() != size:
+            self._map_photo = ImageTk.PhotoImage(im)
+        else:
+            self._map_photo.paste(im)
+        c.create_image(half, half, image=self._map_photo)
+
     def _facing_screen(self, world_angle, heading, rotating):
         """A world heading as a screen-space unit vector.
 
@@ -3705,8 +4121,10 @@ class Overlay:
         if rotating:
             d = world_angle - heading
             return (MINIMAP_MIRROR_X * -math.sin(d), -math.cos(d))
-        return (MINIMAP_MIRROR_X * math.cos(world_angle),
-                -math.sin(world_angle))
+        # Same collapse as _minimap_px's fixed branch: the rotating form at
+        # the north heading. World (cos a, sin a) maps to screen (cos a,
+        # sin a) because the map now draws world offsets as (+dx, +dy).
+        return (math.cos(world_angle), math.sin(world_angle))
 
     def _draw_view_line(self, c, half, dx, dy, body):
         """A line out of the player marker to the edge of the panel, showing
@@ -4373,6 +4791,314 @@ class Overlay:
             self._rift_seen = False
             self._open_rift_prompt("leave")
 
+    # ---- end-of-rift report ----
+    def _build_report(self):
+        """The end-of-rift report card. Rift-styled like the prompts — it only
+        ever exists because of one — and clickable whenever it's up, for the
+        same reason the prompt is: close and copy are the whole point.
+
+        The chrome is built once; the numbers are torn down and rebuilt by
+        _render_report, which only runs when the card opens or a tab is
+        clicked — never on the refresh tick."""
+        glow = tk.Frame(self.reportwin, bg=RIFT_GLOW, padx=1, pady=1)
+        glow.pack(fill="both", expand=True)
+        border = tk.Frame(glow, bg=RIFT_EDGE, padx=2, pady=2)
+        border.pack(fill="both", expand=True)
+        header = tk.Frame(border, bg=RIFT_GLOW)
+        header.pack(fill="x")
+        # Stamped with the kill time on open — the card can be brought back
+        # from the menu long after the rift, and an unstamped one reads as
+        # current.
+        self._report_title = tk.Label(header, text="RIFT REPORT",
+                                      bg=RIFT_GLOW, fg=RIFT_TIME,
+                                      font=self.fonts["ui_b"], anchor="w",
+                                      padx=12, pady=6)
+        title = self._report_title
+        title.pack(side="left")
+        tk.Button(header, text="✕", command=self._enqueue(self._close_report),
+                  font=self.fonts["ui_b"], bg=RIFT_GLOW, fg=RIFT_TITLE,
+                  activebackground=RIFT_EDGE, activeforeground="#2C0A1E",
+                  relief="flat", bd=0, padx=10, cursor="hand2",
+                  highlightthickness=0).pack(side="right", fill="y")
+        # The header doubles as the drag handle, same as every other window —
+        # a card parked over the loot can be moved rather than dismissed.
+        self._bind_drag(self.reportwin, (header, title),
+                        unlocked=self._mouse_available)
+
+        body = tk.Frame(border, bg=RIFT_BODY, padx=16, pady=12)
+        body.pack(fill="both", expand=True)
+
+        # Both phases at once, side by side — the card exists to compare the
+        # AoE clear against the boss burn, and a comparison you have to click
+        # between isn't one.
+        self._report_body = tk.Frame(body, bg=RIFT_BODY)
+        self._report_body.pack(fill="both", expand=True)
+
+        footer = tk.Frame(body, bg=RIFT_BODY)
+        footer.pack(fill="x", pady=(10, 0))
+        tk.Button(footer, text="Copy", command=self._enqueue(self._copy_report),
+                  font=self.fonts["ui_b"], bg=RIFT_EDGE, fg="#2C0A1E",
+                  activebackground=RIFT_TITLE, activeforeground="#2C0A1E",
+                  relief="flat", bd=0, padx=24, pady=5, cursor="hand2",
+                  highlightthickness=1,
+                  highlightbackground=RIFT_EDGE).pack(side="left")
+        # The copy feedback. Empty text rather than pack_forget when idle, so
+        # the footer never changes height under the cursor.
+        self._report_flash = tk.Label(footer, text="", bg=RIFT_BODY,
+                                      fg=RIFT_TITLE, font=self.fonts["ui"],
+                                      anchor="w", padx=10)
+        self._report_flash.pack(side="left", fill="x", expand=True)
+        # Same wording as the minimap's tip: the card takes clicks whenever
+        # it's up, but there's only a cursor to click with once the game lets
+        # go of it, which isn't something you'd guess.
+        tk.Label(body, text="Press L-ALT or ESC to enable free mouse",
+                 bg=RIFT_BODY, fg=RIFT_GLOW, font=self.fonts["ui_tiny_i"],
+                 anchor="w").pack(fill="x", pady=(6, 0))
+
+    @staticmethod
+    def _mmss(secs):
+        m, s = divmod(int(max(0, secs)), 60)
+        return f"{m}:{s:02d}"
+
+    @staticmethod
+    def _elide_name(name, width=14):
+        return name if len(name) <= width else name[:width - 1] + "…"
+
+    def _render_report(self):
+        """Rebuild the card: both phase columns, leaderboard-weighted.
+
+        Rows are frames with the name packed left and the numbers packed
+        right, not one mono string — the ranks wear different font sizes, and
+        mono-space alignment dies the moment two sizes share a column."""
+        data = self._report_data
+        if not data:
+            return
+        for w in self._report_body.winfo_children():
+            w.destroy()
+        cols = tk.Frame(self._report_body, bg=RIFT_BODY)
+        cols.pack(fill="both", expand=True)
+        # Uniform grid columns, so the two phases stay the same width however
+        # long the names run — a comparison wants its columns comparable.
+        cols.grid_columnconfigure(0, weight=1, uniform="phase")
+        cols.grid_columnconfigure(2, weight=1, uniform="phase")
+        cols.grid_rowconfigure(0, weight=1)
+        for i, ph in enumerate(data["phases"]):
+            if i:
+                tk.Frame(cols, bg=RIFT_GLOW, width=1).grid(
+                    row=0, column=1, sticky="ns", padx=12)
+            col = tk.Frame(cols, bg=RIFT_BODY)
+            col.grid(row=0, column=i * 2, sticky="nsew")
+            self._render_phase_column(col, ph)
+
+    def _render_phase_column(self, col, ph):
+        def line(text, font="ui_10", fg=RIFT_TIME, pady=0):
+            tk.Label(col, text=text, bg=RIFT_BODY, fg=fg,
+                     font=self.fonts[font], anchor="w",
+                     pady=pady).pack(fill="x")
+
+        def heading(text):
+            row = tk.Frame(col, bg=RIFT_BODY)
+            row.pack(fill="x", pady=(10, 3))
+            tk.Label(row, text=text, bg=RIFT_BODY, fg=RIFT_TITLE,
+                     font=self.fonts["ui_sm_b"], anchor="w").pack(side="left")
+            tk.Frame(row, bg=RIFT_GLOW, height=1).pack(
+                side="left", fill="x", expand=True, padx=(8, 0))
+
+        def rank_row(i, name, amount, pct, medal=True):
+            """One leaderboard entry. Ranks 1-3 wear medal colours and the
+            bigger font; 4-5 are body text — the tiering IS the design."""
+            row = tk.Frame(col, bg=RIFT_BODY)
+            row.pack(fill="x", pady=1)
+            top3 = medal and i <= 3
+            rank_fg = REPORT_MEDALS[i - 1] if top3 else RIFT_TITLE
+            name_font = self.fonts["ui_rank_b" if top3 else "ui_10"]
+            tk.Label(row, text=str(i), bg=RIFT_BODY, fg=rank_fg,
+                     font=name_font, width=2, anchor="w").pack(side="left")
+            tk.Label(row, text=self._elide_name(name),
+                     bg=RIFT_BODY, fg=RIFT_TIME if top3 else RIFT_TITLE,
+                     font=name_font, anchor="w").pack(side="left")
+            tk.Label(row, text=f"{pct:4.0f}%", bg=RIFT_BODY, fg=RIFT_TITLE,
+                     font=self.fonts["mono_sm"], anchor="e",
+                     width=5).pack(side="right")
+            tk.Label(row, text=f"{int(amount):,}", bg=RIFT_BODY,
+                     fg=RIFT_TIME, font=self.fonts["mono_10"],
+                     anchor="e").pack(side="right", padx=(0, 6))
+
+        # The phase title is the column's headline; the totals sit under it.
+        line(ph["label"].upper(), font="ui_b", fg=RIFT_PEAK)
+        line(f"{self._mmss(ph['duration'])}   ·   "
+             f"{int(ph['total']):,} dmg   ·   {int(ph['heal']):,} heal",
+             fg=RIFT_TITLE)
+
+        players = ph["players"]
+        if not players:
+            line("nothing was recorded for this phase", font="ui_idle_i",
+                 fg=RIFT_TITLE, pady=12)
+            return
+
+        # The MVP block: the phase's top damage, at headline size — this is
+        # the line the card exists for. The top healer rides under it in their
+        # own colour; sorted by damage already, so [0] is the damage MVP.
+        heading("MVP")
+        mvp = players[0]
+        tk.Label(col, text=f"★ {self._elide_name(mvp['name'])}",
+                 bg=RIFT_BODY, fg=REPORT_MEDALS[0],
+                 font=self.fonts["ui_mvp_b"], anchor="w").pack(fill="x")
+        line(f"{int(mvp['total']):,} damage", fg=RIFT_TIME)
+        healer = max(players, key=lambda p: p["heal"])
+        if healer["heal"] > 0.5:
+            tk.Label(col, text=f"✚ {self._elide_name(healer['name'])}   "
+                     f"{int(healer['heal']):,} heal",
+                     bg=RIFT_BODY, fg=REPORT_HEAL,
+                     font=self.fonts["ui_rank_b"], anchor="w").pack(
+                fill="x", pady=(2, 0))
+
+        heading("DAMAGE — TOP 5")
+        for i, p in enumerate(players[:5], 1):
+            pct = p["total"] / ph["total"] * 100 if ph["total"] else 0.0
+            rank_row(i, p["name"], p["total"], pct)
+
+        healers = sorted((p for p in players if p["heal"] > 0.5),
+                         key=lambda p: -p["heal"])
+        heading("HEALING — TOP 5")
+        if not healers:
+            line("no healing recorded", font="ui_idle_i", fg=RIFT_TITLE)
+        for i, p in enumerate(healers[:5], 1):
+            pct = p["heal"] / ph["heal"] * 100 if ph["heal"] else 0.0
+            rank_row(i, p["name"], p["heal"], pct)
+
+        # Every type in its own colour — the bar and the name wear it, the
+        # percentage stays quiet. Unknown affinities get a stable hash tint
+        # from element_color, so a new patch element shows up coloured.
+        heading("DAMAGE BY TYPE")
+        top = ph["elements"][0][1] if ph["elements"] else 0.0
+        for el, amt in ph["elements"][:8]:
+            pct = amt / ph["total"] * 100 if ph["total"] else 0.0
+            # The table's colours are tuned mid-tone; lifted toward white here
+            # because they have to read on the card's near-black body.
+            color = _lerp_hex(element_color(el), "#FFFFFF", 0.30)
+            row = tk.Frame(col, bg=RIFT_BODY)
+            row.pack(fill="x", pady=1)
+            tk.Label(row, text="Other" if el == "?" else el, bg=RIFT_BODY,
+                     fg=color, font=self.fonts["ui_sm_b"], width=9,
+                     anchor="w").pack(side="left")
+            bar = "▰" * max(1, round(amt / top * 12)) if top else ""
+            tk.Label(row, text=bar, bg=RIFT_BODY, fg=color,
+                     font=self.fonts["mono_sm"], anchor="w").pack(side="left")
+            tk.Label(row, text=f"{pct:4.1f}%", bg=RIFT_BODY, fg=RIFT_TIME,
+                     font=self.fonts["mono_sm"], anchor="e").pack(side="right")
+
+    def show_rift_report(self, report):
+        """A rift's boss died — freeze the card over the game. Called from the
+        hook thread; everything real happens on the Tk one.
+
+        The text version goes to disk the moment the report exists, before the
+        card is even up — a card closed by reflex (it happened on day one)
+        must not be the only copy of a run that can't be re-fought."""
+        def open_():
+            self._report_data = report
+            self._save_rift_report(report)
+            self._open_report_card()
+        self._enqueue(open_)()
+
+    def _open_report_card(self):
+        """Open (or re-open) the card over whatever _report_data holds."""
+        self._report_flash.config(text="")
+        self._report_title.config(
+            text="RIFT REPORT — "
+            + time.strftime("%H:%M", time.localtime(self._report_data["at"])))
+        self._render_report()
+        self._report_open = True
+        self.reportwin.update_idletasks()
+        l, t, r, b = self._game_rect()
+        w = max(self.reportwin.winfo_reqwidth(), 300)
+        h = max(self.reportwin.winfo_reqheight(), 200)
+        self.reportwin.geometry(
+            f"+{l + ((r - l) - w) // 2}+{t + ((b - t) - h) // 2}")
+        self._apply_clickthrough()   # the card has to be clickable
+        self._refresh_visibility()
+
+    def _reopen_report(self):
+        """The menu's 'Last rift report' — the card back, exactly as it was.
+        The data is already frozen plain data, so there's nothing to rebuild;
+        a no-op until the first rift of the session produces one."""
+        if self._report_data is not None:
+            self._open_report_card()
+
+    def _save_rift_report(self, report):
+        """The plaintext report into parses/ — same folder, same lifecycle as
+        the parse screenshots, and the menu button that opens the folder now
+        names both. Never fatal: an unwritable disk costs the file, not the
+        card that's about to open."""
+        try:
+            PARSES_DIR.mkdir(parents=True, exist_ok=True)
+            name = f"rift-{time.strftime('%Y%m%d-%H%M%S')}.txt"
+            (PARSES_DIR / name).write_text(self._report_text(report),
+                                           encoding="utf-8")
+            print(f"[meter] rift report saved to {PARSES_DIR / name}",
+                  file=sys.stderr)
+        except Exception as e:
+            print(f"[meter] couldn't save the rift report: {e}",
+                  file=sys.stderr)
+
+    def _close_report(self):
+        self._report_open = False
+        self._refresh_visibility()
+
+    def _copy_report(self):
+        """Both phases go to the clipboard whichever tab is showing — 'copy
+        the report' means the report, and half of it is the part the person
+        you're pasting at didn't see."""
+        if not self._report_data:
+            return
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self._report_text(self._report_data))
+        except tk.TclError as e:
+            print(f"[meter] couldn't copy the report: {e}", file=sys.stderr)
+            return
+        self._report_flash.config(text="Copied to clipboard")
+        if self._report_flash_job is not None:
+            try:
+                self.root.after_cancel(self._report_flash_job)
+            except tk.TclError:
+                pass
+
+        def clear():
+            self._report_flash_job = None
+            try:
+                self._report_flash.config(text="")
+            except tk.TclError:
+                pass
+        self._report_flash_job = self.root.after(1600, clear)
+
+    def _report_text(self, data):
+        """The plaintext version — chat-pasteable lines, no box drawing."""
+        out = ["Farever+ Rift Report"]
+        for ph in data["phases"]:
+            out.append(f"== {ph['label']} — {self._mmss(ph['duration'])}, "
+                       f"{int(ph['total']):,} dmg, {int(ph['heal']):,} heal ==")
+            players = ph["players"]
+            if not players:
+                out.append("  (nothing recorded)")
+                continue
+            for i, p in enumerate(players[:5], 1):
+                pct = p["total"] / ph["total"] * 100 if ph["total"] else 0.0
+                out.append(f"  dmg {i}. {p['name']} "
+                           f"{int(p['total']):,} ({pct:.1f}%)")
+            healers = sorted((p for p in players if p["heal"] > 0.5),
+                             key=lambda p: -p["heal"])
+            for i, p in enumerate(healers[:5], 1):
+                pct = p["heal"] / ph["heal"] * 100 if ph["heal"] else 0.0
+                out.append(f"  heal {i}. {p['name']} "
+                           f"{int(p['heal']):,} ({pct:.1f}%)")
+            if ph["elements"]:
+                out.append("  types: " + " · ".join(
+                    f"{'Other' if el == '?' else el} "
+                    f"{amt / ph['total'] * 100 if ph['total'] else 0.0:.1f}%"
+                    for el, amt in ph["elements"][:8]))
+        return "\n".join(out)
+
     def _build_parse(self):
         """The parse banner — the same drop-shadowed floating text as the
         keybind hint, but its content changes every second, so the canvas and
@@ -4729,6 +5455,9 @@ class Overlay:
         # The prompt must take clicks whenever it's up, regardless of lock
         # state — it's the one overlay window that has to be answered.
         self._set_win_clickthrough(self.promptwin, False)
+        # The rift report too: close and copy are its whole interface, and it
+        # only ever appears the moment the fight (and the danger) is over.
+        self._set_win_clickthrough(self.reportwin, False)
 
     def _sync_map_tip(self):
         """Show the hover box only while the mouse is free.
@@ -5268,6 +5997,10 @@ class Overlay:
         self._compass_filters[key] = not self._compass_filters.get(key, True)
         self._save_settings()
 
+    def _toggle_map_bg(self):
+        self._map_bg_on = not self._map_bg_on
+        self._save_settings()
+
     def _toggle_map_filter(self, key):
         """One category group on or off. Nothing to redraw by hand — the map is
         repainted wholesale on the next tick and reads the ticks as it goes."""
@@ -5414,6 +6147,13 @@ class Overlay:
         changed |= self._want_visible("menu", menu_visible)
         changed |= self._want_visible("hint", menu_visible)
         changed |= self._want_visible("prompt", self._prompt_open)
+        # The report follows the blanket rules (alt-tab, the game's own
+        # screens, the modal prompt) but not the out-of-combat one — the boss
+        # just died, so out-of-combat is precisely when it exists. It stays up
+        # until its ✕ is clicked; a card that vanished on its own before you
+        # could read the numbers would be worse than no card.
+        changed |= self._want_visible("report",
+                                      self._report_open and not blanket)
         if changed:
             self._start_fade()
 
@@ -5768,6 +6508,9 @@ class Overlay:
             on = self._map_filters.get(key, True)
             self.btn_map_filter[key].config(
                 text=("☑  " if on else "☐  ") + label)
+        self.btn_map_bg.config(
+            text=("☑  World map background" if self._map_bg_on
+                  else "☐  World map background"))
         if not self._binding_now:
             self.btn_bind.config(text=bind_label())
         for key, label, _cats in COMPASS_FILTERS:
@@ -5791,6 +6534,14 @@ class Overlay:
         # silently binning the encounter mid-fight.
         # Tinted while a parse is live for the same reason the mode button is:
         # it's a state you can forget you're in, and the meter looks normal.
+        # Greyed rather than hidden before the first rift: a button that
+        # appears out of nowhere mid-session is a button nobody knew to look
+        # for. The label says why it does nothing yet.
+        have_report = self._report_data is not None
+        self.btn_rift_report.config(
+            text=("Last Rift Report" if have_report
+                  else "Last Rift Report   (no rift yet)"),
+            fg=FG_TEXT if have_report else FG_DIM)
         parsing = self._parse_state is not None
         self.btn_parse.config(
             text=(f"Stop {PARSE_LENGTH_SECS}s Parse" if parsing
@@ -6207,7 +6958,14 @@ REQUIRED_OFFSET_KEYS = ("Activity", "ArrayObj", "BossInfo", "BossesInfo",
                         # a pre-3.1 file is missing, and sweepInventory() bails
                         # silently without them.
                         "Hero.loadout", "Hero.weaponInHand", "Inventory",
-                        "Item", "Item.uid", "Loadout", "Weapon", "Weapon.rarity")
+                        "Item", "Item.uid", "Loadout", "Weapon", "Weapon.rarity",
+                        # The zone signal / map backdrop identity. GameLayer
+                        # has existed forever; these subkeys are what a
+                        # pre-3.0.4 file is missing — without them the hook
+                        # falls back to no zone identity at all (getMapId is a
+                        # hostname, see TESTING.md) and the backdrop never
+                        # draws.
+                        "GameLayer.world", "World.level")
 
 
 def _data_is_current():
@@ -6829,6 +7587,7 @@ def main():
     session = PartySession()
     ui_state = GameUIState()
     world = WorldSnapshot()
+    rift_rec = RiftRecorder()
 
     # Up before anything that can block. Attaching waits for the game to launch
     # and the hook's memory scan can run for minutes on a slow machine — with no
@@ -6838,7 +7597,7 @@ def main():
     tray = TrayIcon(request_stop)
     tray.start()
     try:
-        return _run(tray, session, ui_state, world)
+        return _run(tray, session, ui_state, world, rift_rec)
     finally:
         tray.stop()
         # Here as well as on the paths inside _run, which miss the early
@@ -6847,7 +7606,7 @@ def main():
         release_instance_lock()
 
 
-def _run(tray, session, ui_state, world):
+def _run(tray, session, ui_state, world, rift_rec):
     device = frida.get_local_device()
     proc = find_game_process(device)
     if proc is None:
@@ -6935,8 +7694,10 @@ def _run(tray, session, ui_state, world):
             # combat as far as the parse is concerned.
             if not dropped:
                 session.record(p)
+                rift_rec.record("hit", p)
         elif k == "heal":
             session.record_heal(p)
+            rift_rec.record("heal", p)
         elif k == "combat":
             session.set_combat(p.get("state") or {})
         elif k == "world":
@@ -6944,6 +7705,7 @@ def _run(tray, session, ui_state, world):
         elif k == "rift":
             state = bool(p.get("state"))
             ui_state.set_rift(state)
+            rift_rec.set_rift(state)
             print(f"[meter] rift: {state}", file=sys.stderr)
         elif k == "window":
             name, is_open = p.get("name"), bool(p.get("open"))
@@ -6985,6 +7747,10 @@ def _run(tray, session, ui_state, world):
                 print(f"[meter] boss fight started: "
                       f"{', '.join(k for k in kinds if k) or '?'}",
                       file=sys.stderr)
+                # The rift report's phase boundary — the same edge, whether or
+                # not the auto-reset setting below is on. A no-op outside a
+                # rift, or on a second pull edge in one.
+                rift_rec.on_boss_pull()
                 if ov is not None and ov.auto_reset_boss():
                     # Not a plain reset: the bar is refreshed on a timer, so
                     # this arrives after the opening burst has already landed.
@@ -7020,6 +7786,15 @@ def _run(tray, session, ui_state, world):
                         boss_fight_on[0] = False
                         print("[meter] last boss bar down — pull reset "
                               "re-armed", file=sys.stderr)
+                        # The fight is formally over — if a rift was recording,
+                        # this is its ending, and the report goes up on the
+                        # same signal the victory cue rides. Guarded by the
+                        # recorder itself: None outside a rift.
+                        report = rift_rec.on_boss_kill()
+                        if report is not None and ov is not None:
+                            print("[meter] rift complete — showing the "
+                                  "end-of-rift report", file=sys.stderr)
+                            ov.show_rift_report(report)
                     if ov is not None:
                         ov.on_boss_kill()
         elif k == "pickup":
@@ -7041,14 +7816,33 @@ def _run(tray, session, ui_state, world):
                 if ov is not None:
                     ov.on_legendary_pickup()
         elif k == "zone":
+            ui_state.set_zone(p.get("sig"))
+            # The first report after attach says where we already are — it
+            # keys the map background but is not a loading screen, so nothing
+            # resets on it.
+            # The sidecar fields ride along so their real meaning accumulates
+            # from normal play — `name`, `branchName` and `_isWorldMap` were
+            # emitted unmeasured, and this line is how they get measured.
+            extra = ", ".join(f"{k}={p.get(k)!r}"
+                              for k in ("name", "branch", "world_map")
+                              if p.get(k) is not None)
+            if p.get("initial"):
+                print(f"[meter] zone identified ({p.get('sig')!r}"
+                      + (f"; {extra}" if extra else "") + ")",
+                      file=sys.stderr)
+                return
             ui_state.clear()      # the UI is rebuilt across a loading screen
             session.reset()
+            # A loading screen mid-rift is a wipe or a walk-out, not a finished
+            # run — the recording is abandoned, not reported.
+            rift_rec.on_zone()
             # The other way a boss fight ends. Nothing else re-arms the pull
             # reset now that a dropped bar doesn't, so leaving an instance
             # mid-fight has to — otherwise a fight abandoned rather than won
             # would suppress the reset for the rest of the session.
             boss_fight_on[0] = False
-            print(f"[meter] zone change ({p.get('sig')!r}) — meter reset",
+            print(f"[meter] zone change ({p.get('sig')!r}"
+                  + (f"; {extra}" if extra else "") + ") — meter reset",
                   file=sys.stderr)
             # A loading screen is the one moment the player is demonstrably
             # not mid-fight, which makes it the right time to notice a new

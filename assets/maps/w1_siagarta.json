@@ -1,0 +1,19 @@
+{
+  "world": "w1_siagarta",
+  "origin_x": -2304.0,
+  "origin_y": -3456.0,
+  "px_per_unit": 0.8888888888888888,
+  "width": 5632,
+  "height": 5632,
+  "units_per_tile": 576.0,
+  "tile_px": 512,
+  "tiles_x": [
+    -4,
+    6
+  ],
+  "tiles_y": [
+    -6,
+    4
+  ],
+  "y_down": true
+}

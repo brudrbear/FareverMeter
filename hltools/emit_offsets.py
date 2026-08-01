@@ -60,6 +60,7 @@ def main():
     equip = offs("st.Equipment")
     item = offs("st.Item")
     weapon = offs("st.item.Weapon")
+    world = offs("world.World")
 
     # st.Equipment extends st.Inventory, so one `content` offset serves both
     # containers. Verified rather than assumed — if the two ever diverge, the
@@ -126,6 +127,10 @@ def main():
                       "mainActivity": layer["mainActivity"][0],
                       "worldEvents": layer["worldEvents"][0],
                       "time": layer["_time"][0],
+                      # world -> world.World, whose `level` string is the
+                      # honest zone/world identity. Main.getMapId() — the old
+                      # zone signal — turned out to return the MACHINE NAME.
+                      "world": layer["world"][0],
                       # Minimap: the layer keeps these lists built already, so
                       # the sweep is a walk of three arrays rather than a
                       # search. units = heroes + foes, interactibles = chests /
@@ -134,6 +139,14 @@ def main():
                       "units": layer["units"][0],
                       "interactibles": layer["interactibles"][0],
                       "entities": layer["entities"][0]},
+        # The loaded level's identity, for the zone signal and the map
+        # backdrop. `level` is the primary; name/branchName/_isWorldMap ship
+        # so the hook can report what they actually hold from normal play —
+        # field names lie in this game until measured.
+        "World": {"level": world["level"][0],
+                  "name": world["name"][0],
+                  "branchName": world["branchName"][0],
+                  "_isWorldMap": world["_isWorldMap"][0]},
         # Every drawable thing descends from ent.Entity, so one set of position
         # offsets serves heroes, foes, interactibles and activities alike.
         # rotationZ is radians (measured: observed values span ~2*pi).

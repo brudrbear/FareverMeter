@@ -197,34 +197,12 @@ function inCombat(hero) {
     } catch (e) { return 0; }
 }
 
-// Zone signature via Main.getMapId(). This allocates an HL string, so it must
-// only be called from the game thread (i.e. inside the damage hook), never a
-// background timer — doing so from an unregistered thread crashes the runtime.
-// Changes on any loading screen / instance entry -> auto-reset.
-let mapFn = null;
-let lastZoneSig = null;
-let lastZoneCheck = 0;
-function checkZone() {
-    const now = Date.now();
-    if (!mapFn || now - lastZoneCheck < 1000) return;   // throttle to ~1/sec
-    lastZoneCheck = now;
-    try {
-        const sig = hlStr(mapFn());
-        if (sig === null) return;
-        if (lastZoneSig !== null && sig !== lastZoneSig) {
-            resetWindows();          // the whole UI is rebuilt across a load
-            send({ kind: "zone", sig: sig });
-            // The loadout is re-replicated across a load, so re-baseline the
-            // inventory instead of reporting all of it as picked up.
-            invReady = false;
-            // Drop the camera: the layer is being rebuilt and the object we
-            // were holding may not survive it. postUpdate re-latches on the
-            // next frame the real camera runs.
-            camPtr = null;
-        }
-        lastZoneSig = sig;
-    } catch (e) {}
-}
+// RETIRED: the zone signature used to come from Main.getMapId(), called from
+// the game thread. Measured 2026-08-01: whatever that findex resolves to now
+// returns the MACHINE HOSTNAME ('CAM-PC' — the user's PC name), which never
+// changes — so the zone-change reset had gone silently dead. The zone signal
+// now comes from layer.world.level in checkRift() below: the loaded level's
+// own name, read with plain pointer walks (timer-safe, unlike an HL call).
 
 // ---- the game's own window state (native UI awareness) ----
 // ui.BaseUI.displayWindow(ui, win) / removeWindow(ui, win) fire for EVERY game
@@ -263,17 +241,56 @@ function windowClosed(win) {
     } catch (e) {}
 }
 
-// ---- rift detection ----
-// hero -> st.State.layer -> st.GameLayer.isRift. Pure pointer + byte reads, no
-// HL calls, so unlike checkZone() this is safe from the heartbeat timer rather
-// than having to ride along inside the damage hook — which matters, because you
-// can enter a rift long before you hit anything in it. Reported on change only.
+// ---- rift + zone detection ----
+// hero -> st.State.layer -> st.GameLayer: isRift for rifts, .world.level for
+// where you are. Pure pointer + byte reads, no HL calls, so it's safe from the
+// heartbeat timer rather than having to ride along inside a game-thread hook —
+// which matters, because you can enter a rift (or start the meter mid-session)
+// long before you hit anything. Reported on change only.
 let lastRift = null;
+let lastLevel = null;
 function checkRift() {
     try {
         if (!localHero || localHero.isNull() || !OFF.GameLayer) return;
         const layer = localHero.add(OFF.Hero.layer).readPointer();
         if (!layer || layer.isNull()) return;
+        // Zone identity AND the zone-change signal: layer.world.level names
+        // the loaded level. This replaced Main.getMapId(), which turned out
+        // to return the machine hostname. Everything here is plain pointer /
+        // string-bytes reads, so it stays timer-safe.
+        if (OFF.GameLayer.world != null && OFF.World
+                && OFF.World.level != null) {
+            const w = layer.add(OFF.GameLayer.world).readPointer();
+            if (w && !w.isNull()) {
+                const level = hlStr(w.add(OFF.World.level).readPointer());
+                if (level && level !== lastLevel) {
+                    const initial = lastLevel === null;
+                    lastLevel = level;
+                    const out = { kind: "zone", sig: level,
+                                  initial: initial ? 1 : 0 };
+                    // What the neighbouring fields actually hold, reported so
+                    // their meaning gets measured from normal play — names
+                    // lie in this game until they've been read live.
+                    try {
+                        out.name = hlStr(w.add(OFF.World.name).readPointer());
+                        out.branch = hlStr(
+                            w.add(OFF.World.branchName).readPointer());
+                        out.world_map = w.add(OFF.World._isWorldMap).readU8();
+                    } catch (e2) {}
+                    if (!initial) {
+                        // Everything a loading screen invalidates, moved here
+                        // from the retired checkZone: the game rebuilds its
+                        // whole UI, the loadout is re-replicated (re-baseline
+                        // instead of reporting it all as pickups), and the
+                        // camera object may not survive the layer rebuild.
+                        resetWindows();
+                        invReady = false;
+                        camPtr = null;
+                    }
+                    send(out);
+                }
+            }
+        }
         const state = layer.add(OFF.GameLayer.isRift).readU8() !== 0;
         if (state !== lastRift) {
             lastRift = state;
@@ -957,14 +974,28 @@ function itemInfo(it) {
     return out;
 }
 
-let invSeen = null;             // kind -> count, across inventory + equipment
+// The count key is kind + rarity, NOT kind alone, and that is the whole cue.
+// `kind` is the template (`Mace_Benediction`), rarity varies per copy, and a
+// player accumulates several copies of a kind over a session — the live log has
+// the same Mace_Benediction arriving twice hours apart. Keyed by kind alone the
+// counts still moved correctly, but the payload didn't: the sweep described the
+// gain with the FIRST item of that kind it happened to walk past, which is
+// normally the copy already in the bag. Loot a Legendary of a kind you already
+// own and the event went out saying "Epic", so the cue never fired.
+//
+// Rarity is safe in a key where uid is not: it is a property of the copy, and
+// it does not churn when the copy moves between containers. So this keeps the
+// uid-churn immunity described below intact and only sharpens the payload.
+const invKey = function (inf) { return inf.kind + "|" + (inf.rarity || ""); };
+
+let invSeen = null;             // kind|rarity -> count, inventory + equipment
 let invReady = false;           // first sweep only baselines, never fires
 
 // Returns false if the container could not be read. That distinction matters:
 // a failed read looks exactly like an empty bag, and treating one as the other
 // would drop the baseline to nothing and then report every item the hero owns
 // as a fresh pickup on the next good sweep.
-function readContainerKinds(invPtr, into, byUid) {
+function readContainerKinds(invPtr, into, byKey) {
     if (!invPtr || invPtr.isNull()) return false;
     let arr;
     try { arr = invPtr.add(OFF.Inventory.content).readPointer(); }
@@ -986,17 +1017,20 @@ function readContainerKinds(invPtr, into, byUid) {
         if (!it) continue;
         const inf = itemInfo(it);
         if (!inf || !inf.kind) continue;
-        into[inf.kind] = (into[inf.kind] || 0) + 1;
-        if (!(inf.kind in byUid)) byUid[inf.kind] = inf;
+        const key = invKey(inf);
+        into[key] = (into[key] || 0) + 1;
+        // Every item under one key shares kind AND rarity, so first-wins is no
+        // longer a coin toss over which copy describes the gain.
+        if (!(key in byKey)) byKey[key] = inf;
     }
     return true;
 }
 
-// Counting by KIND across BOTH containers is what makes this survive the uid
-// churn: unequipping a weapon and re-equipping it moves it from equipment to
-// inventory and back, minting a new uid each time, but the total number of
-// that kind the hero is carrying never changes. Only a genuine gain moves the
-// count up — which is exactly the event worth a cue.
+// Counting by KIND (+ rarity, see invKey) across BOTH containers is what makes
+// this survive the uid churn: unequipping a weapon and re-equipping it moves it
+// from equipment to inventory and back, minting a new uid each time, but the
+// number of that kind-and-rarity the hero is carrying never changes. Only a
+// genuine gain moves the count up — which is exactly the event worth a cue.
 function sweepInventory() {
     try {
         if (!localHero || localHero.isNull()
@@ -1019,12 +1053,14 @@ function sweepInventory() {
             // owns as a fresh pickup.
             invSeen = now; invReady = true; return;
         }
-        for (const kind in now) {
-            const gained = now[kind] - (invSeen[kind] || 0);
+        for (const key in now) {
+            const gained = now[key] - (invSeen[key] || 0);
             if (gained <= 0) continue;
-            const inf = info[kind];
+            const inf = info[key];
             if (!inf) continue;
-            send({ kind: "pickup", item: kind, cls: inf.cls,
+            // inf.kind, not `key` — the key carries the rarity suffix and is
+            // an internal bookkeeping string, never a name to show anyone.
+            send({ kind: "pickup", item: inf.kind, cls: inf.cls,
                    rarity: inf.rarity, level: inf.level, count: gained });
         }
         invSeen = now;
@@ -1076,11 +1112,8 @@ function main() {
 
     if (!setupNameApi()) log("skill-name API unavailable; showing raw ids");
 
-    if (DATA.map_fn != null) {
-        try { mapFn = new NativeFunction(base.add(DATA.map_fn * 8).readPointer(),
-                                         "pointer", []); }
-        catch (e) { log("map fn resolve failed; zone auto-reset disabled"); }
-    }
+    // DATA.map_fn (Main.getMapId) is no longer resolved or called — measured
+    // returning the machine hostname; the zone signal reads layer.world.level.
 
     for (const nm in DATA.funcs) {
         try { getHeroFns.push({ name: nm, addr: base.add(DATA.funcs[nm] * 8).readPointer() }); } catch (e) {}
@@ -1200,7 +1233,6 @@ function main() {
     Interceptor.attach(daddr, {
         onEnter() {
             try {
-                checkZone();   // safe here (game thread); throttled internally
                 const dealer = this.context.rcx;
                 // Only players (ent.Hero) — excludes monster/boss/summon dealers.
                 if (typeName(dealer) !== "ent.Hero") return;

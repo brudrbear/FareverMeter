@@ -29,6 +29,13 @@ datas = [
     (str(ROOT / "assets" / "legendary_pickup.mp3"), "res/assets"),
 ]
 
+# The minimap's world-map backdrops (hltools/build_map_assets.py outputs) —
+# globbed as a set, unlike the cues above: image and transform ship in pairs,
+# and a world absent from the folder is simply a world without a backdrop.
+for f in sorted((ROOT / "assets" / "maps").glob("*")):
+    if f.suffix in (".webp", ".json"):
+        datas.append((str(f), "res/assets/maps"))
+
 # The self-heal path re-runs these against the running game's hlboot.dat after a
 # Farever patch, so they have to ship — without them an installed meter couldn't
 # recover from a patch without a new release.
@@ -40,7 +47,9 @@ for tool in ("build_targets.py", "emit_offsets.py", "hlbc_parser.py",
 # level. PyInstaller does find nested imports, but naming them makes the parse
 # screenshots a guaranteed part of the build rather than a lucky one — users
 # should never see "pip install pillow" either.
-hiddenimports = ["PIL.Image", "PIL.ImageDraw", "PIL.ImageFont"]
+hiddenimports = ["PIL.Image", "PIL.ImageDraw", "PIL.ImageFont",
+                 # The map backdrop paints through Tk; ImageTk is its bridge.
+                 "PIL.ImageTk"]
 
 a = Analysis(
     [str(ROOT / "meter" / "farever_meter.py")],

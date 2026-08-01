@@ -58,9 +58,16 @@
     "mainActivity": 240,
     "worldEvents": 288,
     "time": 200,
+    "world": 216,
     "units": 336,
     "interactibles": 328,
     "entities": 312
+  },
+  "World": {
+    "level": 184,
+    "name": 152,
+    "branchName": 200,
+    "_isWorldMap": 352
   },
   "Entity": {
     "posx": 176,
