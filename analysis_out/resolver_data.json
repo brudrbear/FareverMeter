@@ -633,6 +633,9 @@
     "ent.Unit.isBoss": 4735,
     "ent.Unit.isElite": 4737
   },
+  "mount_targets": {
+    "ent.Hero.setMount": 7685
+  },
   "funcs": {
     "ui.Console.getMyHero": 12357,
     "GameApp.getCameraHero": 11658

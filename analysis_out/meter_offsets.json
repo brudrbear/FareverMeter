@@ -36,7 +36,8 @@
     "isInCombat": 688,
     "layer": 112,
     "loadout": 1232,
-    "weaponInHand": 1344
+    "weaponInHand": 1344,
+    "mountId": 1376
   },
   "Loadout": {
     "inventory": 136,
@@ -127,7 +128,20 @@
     "name": 192,
     "group": 256,
     "isMe": 312,
-    "lobbyId": 264
+    "lobbyId": 264,
+    "accountProgress": 224
+  },
+  "AccountProgress": {
+    "collection": 168
+  },
+  "Collection": {
+    "mounts": 128
+  },
+  "ArrayProxyData": {
+    "array": 40
+  },
+  "ArrayDyn": {
+    "array": 8
   },
   "Group": {
     "groupId": 176,

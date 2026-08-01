@@ -773,6 +773,9 @@ SCALE_DEFAULTS = {"menu": 1.30}
 # Wider than the UI's: a minimap is worth making genuinely large on a big
 # screen, and genuinely small when it's only there for a glance.
 MINIMAP_SCALE_MIN, MINIMAP_SCALE_MAX = 50, 250
+# How the mount feature picks from the favorites: a fresh roll per summon, or
+# strict rotation through the list. The hook receives it lowercased.
+MOUNT_MODES = ("Random", "Cycle")
 # Minimum widths, at 100%. They're pixel values, so the scale slider has to
 # scale them too or scaling down just hits the floor and nothing moves.
 MIN_W = {"meter": 360, "detail": 320, "menu": 230, "prompt": 320}
@@ -1164,6 +1167,28 @@ def _latest_version():
 # there is nothing left to learn, so the checks stop entirely.
 UPDATE_RECHECK_SECS = 900.0        # 15 minutes between checks at most
 _update_checked_at = [0.0]         # time.monotonic of the last attempt
+UPDATE_BTN_FLASH_MS = 4000         # how long the manual button shows a result
+
+
+def _record_newer(found):
+    """Publish a check result into UPDATE if it names a newer version than
+    this build; returns whether it did. Shared by the automatic check and the
+    menu's manual button, so the two can't drift on what "newer" means.
+    "latest" is written last: the overlay's tick treats it as the ready flag,
+    and the asset fields have to be in place before it fires."""
+    mine = _version_tuple(VERSION)
+    if not found or mine is None:
+        return False
+    v, name, url, asset_url, asset_size = found
+    if v <= mine:
+        return False
+    UPDATE["asset"], UPDATE["asset_size"] = asset_url, asset_size
+    UPDATE["latest"], UPDATE["url"] = name, url
+    print(f"[update] {name} is available (running {VERSION}) — {url}"
+          + ("" if asset_url else " (no installer asset — notice will "
+             "open the browser instead of self-updating)"),
+          file=sys.stderr)
+    return True
 
 
 def check_for_update(announce=False):
@@ -1191,21 +1216,8 @@ def check_for_update(announce=False):
     _update_checked_at[0] = now
 
     def work():
-        mine = _version_tuple(VERSION)
         found = _latest_version()
-        if not found or mine is None:
-            return
-        v, name, url, asset_url, asset_size = found
-        if v > mine:
-            # "latest" last: the overlay's tick treats it as the ready flag,
-            # and the asset fields have to be in place before it fires.
-            UPDATE["asset"], UPDATE["asset_size"] = asset_url, asset_size
-            UPDATE["latest"], UPDATE["url"] = name, url
-            print(f"[update] {name} is available (running {VERSION}) — {url}"
-                  + ("" if asset_url else " (no installer asset — notice will "
-                     "open the browser instead of self-updating)"),
-                  file=sys.stderr)
-        elif announce:
+        if not _record_newer(found) and found and announce:
             print(f"[update] up to date (running {VERSION}).", file=sys.stderr)
 
     threading.Thread(target=work, daemon=True, name="update-check").start()
@@ -1974,6 +1986,15 @@ class GameUIState:
         self._rift = False
         self._boss_bar = 0
         self._zone_sig = None
+        self._mounts: list[str] = []   # unlocked mount kinds, from the hook
+
+    def set_mounts(self, kinds):
+        with self._lock:
+            self._mounts = list(kinds)
+
+    def mounts(self):
+        with self._lock:
+            return list(self._mounts)
 
     def set_zone(self, sig):
         """layer.world.level from the hook — the loaded level's name, sent
@@ -2912,6 +2933,10 @@ class Overlay:
         # stays a plain on/off rather than gaining a mode it can't honour.
         self._show_heal = True
         self._sort_heal = False        # rows ordered by healing, not damage
+        self._mount_random = False     # random favorite mount on each summon
+        self._mount_mode = "Random"    # how the pick is made (MOUNT_MODES)
+        self._mount_favs: set[str] = set()   # mount kinds the swap may pick
+        self._mounts_shown = None      # unlock list the checkboxes were built from
         self._shown = {k: True for k, _ in TOGGLEABLE_ELEMENTS}
         self._heal_cols_shown = True   # last healing layout pushed to the widgets
         self._combat_seen_at = 0.0     # last moment a tracked player was fighting
@@ -2923,6 +2948,8 @@ class Overlay:
         self._quit_armed = False       # the Quit button's second-click window
         self._update_shown = False     # the update notice is applied once
         self._updating = False         # self-update running: overlay hidden
+        self._upd_checking = False     # manual check in flight (button armed)
+        self._upd_btn_after = None     # pending after() resetting the button
         self._dl = None                # download progress, written off-thread
         self._updwin = None            # the "Updating ..." progress window
         self._game_exit_win = None     # the "Farever has stopped" prompt
@@ -3346,6 +3373,13 @@ class Overlay:
         # that invariant; this covers a hand-edited file).
         if isinstance(data.get("sort_heal"), bool):
             self._sort_heal = data["sort_heal"] and self._show_heal
+        if isinstance(data.get("mount_random"), bool):
+            self._mount_random = data["mount_random"]
+        if data.get("mount_mode") in MOUNT_MODES:
+            self._mount_mode = data["mount_mode"]
+        favs = data.get("mount_favorites")
+        if isinstance(favs, list):
+            self._mount_favs = {k for k in favs if isinstance(k, str)}
         show = data.get("show")
         if isinstance(show, dict):
             for key, _label in TOGGLEABLE_ELEMENTS:
@@ -3390,6 +3424,9 @@ class Overlay:
                          for k, _label in TOGGLEABLE_ELEMENTS},
                 "show_heal": bool(self._show_heal),
                 "sort_heal": bool(self._sort_heal),
+                "mount_random": bool(self._mount_random),
+                "mount_mode": self._mount_mode,
+                "mount_favorites": sorted(self._mount_favs),
             }, indent=2))
         except OSError as e:
             print(f"[meter] couldn't save settings: {e}", file=sys.stderr)
@@ -3565,6 +3602,22 @@ class Overlay:
                                 relief="flat", bd=0, padx=6, pady=0,
                                 cursor="hand2", highlightthickness=0)
         self.m_repo.pack(side="right", pady=4)
+        # Its neighbour: ask GitHub for a newer build right now, answered on
+        # the button itself. The automatic check already runs at startup and
+        # on loading screens, but silently — this is for "did my update
+        # land?" and "am I current?", asked deliberately. It shares the
+        # automatic check's plumbing but not its 15-minute throttle: a click
+        # is a question, and a question deserves a fresh answer.
+        self.m_update = tk.Button(self.m_header, text="Check updates",
+                                  command=self._enqueue(
+                                      self._check_updates_clicked),
+                                  bg=BG_HEADER_UNLOCKED, fg=FG_HEADER,
+                                  activebackground=BG_HEADER,
+                                  activeforeground=FG_HEADER,
+                                  font=self.fonts_m["ui_tiny_i"],
+                                  relief="flat", bd=0, padx=6, pady=0,
+                                  cursor="hand2", highlightthickness=0)
+        self.m_update.pack(side="right", pady=4)
         self._bind_drag(self.menu,
                         (self.m_header, self.m_title, self.m_version))
 
@@ -3597,7 +3650,7 @@ class Overlay:
         self._menu_tab = "General"
         self._menu_tab_btns = {}
         self._menu_tab_frames = {}
-        for name in ("General", "Windows", "Map", "Actions"):
+        for name in ("General", "Windows", "Map", "Mounts", "Actions"):
             b = tk.Button(tabbar, text=name,
                           command=self._enqueue(
                               lambda n=name: self._set_menu_tab(n)),
@@ -3612,6 +3665,7 @@ class Overlay:
         gen = self._menu_tab_frames["General"]
         winb = self._menu_tab_frames["Windows"]
         mp = self._menu_tab_frames["Map"]
+        mnt = self._menu_tab_frames["Mounts"]
         act = self._menu_tab_frames["Actions"]
 
         def section(parent, text, first=False):
@@ -3812,6 +3866,36 @@ class Overlay:
             self.btn_compass_filter[key] = button(
                 mp,
                 self._enqueue(lambda k=key: self._toggle_compass_filter(k)))
+
+        # ---- Mounts: the random favorite mount ----
+        section(mnt, "RANDOM FAVORITE MOUNT", first=True)
+        # One row: the on/off toggle with the pick-mode dropdown to its
+        # right — the dropdown modifies what the toggle turns on, so they
+        # read as one control rather than two settings.
+        row = tk.Frame(mnt, bg=BG_BODY)
+        row.pack(fill="x")
+        self.btn_mount_random = button(
+            row, self._enqueue(self._toggle_mount_random))
+        self.btn_mount_random.pack_configure(side="left", expand=True,
+                                             padx=(0, 8))
+        self._mount_mode_var = tk.StringVar(value=self._mount_mode)
+        self.opt_mount_mode = dropdown(row, self._mount_mode_var,
+                                       MOUNT_MODES, self._on_mount_mode_pick)
+        self.opt_mount_mode.pack(side="right")
+        tk.Label(mnt,
+                 text=("Every summon becomes a pick from the favorites below "
+                       "— rolled fresh each time, or cycled through in order. "
+                       "Your equipped mount is never changed — only which one "
+                       "actually appears."),
+                 bg=BG_BODY, fg=FG_DIM, font=self.fonts_m["ui_tiny_i"],
+                 anchor="w", justify="left",
+                 wraplength=WARN_WRAP).pack(fill="x", pady=(0, 2))
+        section(mnt, "FAVORITES")
+        # Rebuilt from the hook's unlock list — see _rebuild_mounts.
+        self.mounts_box = tk.Frame(mnt, bg=BG_BODY)
+        self.mounts_box.pack(fill="x", pady=(2, 0))
+        self._mount_vars = {}
+        self._rebuild_mounts([])
 
         # ---- Actions: the things you came here to press ----
         section(act, "PARSE", first=True)
@@ -5639,6 +5723,62 @@ class Overlay:
             fg=FG_WARN, cursor="hand2")
         self.warn_lbl.bind("<Button-1>", lambda _e: self._on_update_click())
 
+    def _check_updates_clicked(self):
+        """The header's manual check. The result lands on the button itself,
+        because "up to date" has nowhere else to appear — the notice line
+        only exists for the other answer, and still takes over the moment a
+        newer version is found, exactly as if the automatic check had won."""
+        if self._upd_checking:
+            return
+        if os.environ.get("FAREVER_NO_UPDATE_CHECK"):
+            # The env var means "never phone home"; a click doesn't outrank
+            # it, but silence would read as a broken button.
+            self._flash_update_btn("Checks disabled")
+            return
+        if UPDATE["latest"]:
+            # Already found — nothing left to ask GitHub; repeat the answer.
+            self._flash_update_btn(f"{UPDATE['latest']} available")
+            return
+        self._upd_checking = True
+        self._flash_update_btn("Checking ...", reset=False)
+
+        def work():
+            found = _latest_version()
+
+            def finish():
+                # On the Tk thread via the action queue, so UPDATE and the
+                # button are only ever touched where the tick reads them.
+                self._upd_checking = False
+                if _record_newer(found):
+                    self._flash_update_btn(f"{UPDATE['latest']} available")
+                elif found:
+                    print(f"[update] up to date (running {VERSION}).",
+                          file=sys.stderr)
+                    self._flash_update_btn("Up to date")
+                else:
+                    self._flash_update_btn("Check failed")
+
+            self._enqueue(finish)()
+
+        threading.Thread(target=work, daemon=True,
+                         name="update-check-manual").start()
+
+    def _flash_update_btn(self, msg, reset=True):
+        """Show `msg` on the check button, returning to the resting label
+        after a few seconds so the button stays a button."""
+        self.m_update.config(text=msg)
+        if self._upd_btn_after is not None:
+            self.menu.after_cancel(self._upd_btn_after)
+            self._upd_btn_after = None
+        if reset:
+            self._upd_btn_after = self.menu.after(
+                UPDATE_BTN_FLASH_MS, self._reset_update_btn)
+
+    def _reset_update_btn(self):
+        self._upd_btn_after = None
+        if not self._upd_checking:
+            self.m_update.config(text="Check updates")
+
     def _can_self_update(self):
         return IS_FROZEN and bool(UPDATE["asset"])
 
@@ -6026,6 +6166,77 @@ class Overlay:
         self._show[key] = value
         self._save_settings()
         self._refresh_visibility()
+
+    def _rebuild_mounts(self, kinds):
+        """The favorites checklist, rebuilt whenever the hook's unlock list
+        changes (including from empty, at attach). Three columns keep ~30
+        mounts to ~10 rows, so the Mounts tab stays in the same size class as
+        the other pages."""
+        for w in self.mounts_box.winfo_children():
+            w.destroy()
+        self._mount_vars = {}
+        if not kinds:
+            tk.Label(self.mounts_box,
+                     text=("Waiting for the game — the list fills in once "
+                           "the meter is attached and your hero has loaded."),
+                     bg=BG_BODY, fg=FG_DIM, font=self.fonts_m["ui_tiny_i"],
+                     anchor="w", justify="left",
+                     wraplength=WARN_WRAP).grid(row=0, column=0, sticky="w")
+            return
+        # Two columns, ordered by what the labels SAY: real display names are
+        # longer than the old ids (three columns overflowed the panel), and a
+        # list sorted by backend id looks shuffled once the labels don't
+        # start with the same words.
+        cols = 2
+        kinds = sorted(kinds, key=lambda k: _mount_label(k).lower())
+        for i, kind in enumerate(kinds):
+            var = tk.BooleanVar(value=kind in self._mount_favs)
+            cb = tk.Checkbutton(
+                self.mounts_box, text=_mount_label(kind), variable=var,
+                command=self._enqueue(lambda k=kind: self._toggle_mount_fav(k)),
+                bg=BG_BODY, fg=FG_TEXT, activebackground=BG_BODY,
+                activeforeground=FG_VALUE, selectcolor=BG_BODY_SOFT,
+                font=self.fonts_m["ui"], anchor="w",
+                highlightthickness=0, bd=0, cursor="hand2")
+            cb.grid(row=i // cols, column=i % cols, sticky="w", padx=(0, 10))
+            self._mount_vars[kind] = var
+
+    def _toggle_mount_random(self):
+        self._mount_random = not self._mount_random
+        self._save_settings()
+        self._push_mount_cfg()
+
+    def _on_mount_mode_pick(self, value):
+        # Queued like every other dropdown: it mutates state the refresh
+        # loop reads, and Tk isn't thread-safe.
+        self._enqueue(lambda: self._set_mount_mode(value))()
+
+    def _set_mount_mode(self, value):
+        if value not in MOUNT_MODES:
+            return
+        self._mount_mode = value
+        self._save_settings()
+        self._push_mount_cfg()
+
+    def _toggle_mount_fav(self, kind):
+        # The Checkbutton's var has already flipped by the time this runs on
+        # the queue — sync the set from it rather than toggling blind.
+        var = self._mount_vars.get(kind)
+        if var is None:
+            return
+        if var.get():
+            self._mount_favs.add(kind)
+        else:
+            self._mount_favs.discard(kind)
+        self._save_settings()
+        self._push_mount_cfg()
+
+    def _push_mount_cfg(self):
+        """Hand the standing mount config to the hook. Also called once at
+        startup (main), because the agent boots with the feature off."""
+        self._configure(mounts={"enabled": bool(self._mount_random),
+                                "mode": self._mount_mode.lower(),
+                                "favorites": sorted(self._mount_favs)})
 
     def _sort_btn_text(self):
         return "▼ Healing" if self._sort_heal else "▼ Damage"
@@ -6653,6 +6864,13 @@ class Overlay:
         self.btn_sounds.config(
             text=("☑  Enable sounds" if self._sounds_on
                   else "☐  Enable sounds"))
+        self.btn_mount_random.config(
+            text=("☑  Random favorite mount" if self._mount_random
+                  else "☐  Random favorite mount"))
+        mounts = self.ui_state.mounts()
+        if mounts != self._mounts_shown:
+            self._mounts_shown = mounts
+            self._rebuild_mounts(mounts)
         self.btn_auto_reset.config(
             text=("☑  Auto reset on boss pull" if self._auto_reset_boss
                   else "☐  Auto reset on boss pull"))
@@ -6861,6 +7079,35 @@ class Overlay:
         # has no business delaying the overlay coming up.
         self.root.after(1200, self.check_whats_new)
         self.root.mainloop()
+
+
+_ITEM_NAMES = None
+
+
+def _item_names():
+    """id -> display name, from analysis_out/item_names.json — the game's own
+    data.cdb rows, extracted by emit_offsets.py on the same self-heal cycle as
+    the offsets. Loaded once; {} when the file is absent (an old analysis_out
+    before its regeneration, or the extraction failed and logged why)."""
+    global _ITEM_NAMES
+    if _ITEM_NAMES is None:
+        try:
+            _ITEM_NAMES = json.loads(
+                (ANALYSIS / "item_names.json").read_text(encoding="utf-8"))
+        except Exception:
+            _ITEM_NAMES = {}
+    return _ITEM_NAMES
+
+
+def _mount_label(kind):
+    """The item's real display name ('Mount_Aries_05' -> 'Aegis'), falling
+    back to the prettified id for anything the name table doesn't carry —
+    a kind a patch added is still tickable, just under its backend name."""
+    nm = _item_names().get(kind)
+    if nm:
+        return nm
+    base = kind[6:] if kind.startswith("Mount_") else kind
+    return base.replace("_", " ")
 
 
 def _lerp_hex(a, b, t):
@@ -7096,7 +7343,8 @@ DATA_STAMP = ANALYSIS / ".data_stamp.json"
 # `if (!OFF.Entity || !OFF.ArrayObj) return`, which fails silently forever.
 # Add to these lists whenever the hook starts reading something new.
 REQUIRED_RESOLVER_KEYS = ("anchors", "boss_fns", "boss_targets", "cam_targets",
-                          "count_targets", "funcs", "ui_targets")
+                          "count_targets", "funcs", "mount_targets",
+                          "ui_targets")
 # The minimap's half of the offsets. The combat half (DamageResult, HitData,
 # ...) is deliberately not listed wholesale: it has been there since the first
 # release, so it can't be what an upgrade is missing, and a list that mentions
@@ -7124,7 +7372,13 @@ REQUIRED_OFFSET_KEYS = ("Activity", "ArrayObj", "BossInfo", "BossesInfo",
                         # falls back to no zone identity at all (getMapId is a
                         # hostname, see TESTING.md) and the backdrop never
                         # draws.
-                        "GameLayer.world", "World.level")
+                        "GameLayer.world", "World.level",
+                        # The random-favorite mount. Player has existed since
+                        # the party meter; the collection walk is what a
+                        # pre-3.2 file is missing, and hookMountSwap refuses
+                        # to arm without it.
+                        "Player.accountProgress", "AccountProgress",
+                        "Collection", "ArrayProxyData", "ArrayDyn")
 
 
 def _data_is_current():
@@ -7158,6 +7412,14 @@ def _data_is_current():
             print(f"[meter] {name} predates this build — missing "
                   f"{', '.join(missing)}; regenerating.", file=sys.stderr)
             return False
+    # item_names.json arrived with the Mounts tab (3.2). The generators only
+    # re-run when this returns False, so an upgrade over an older analysis_out
+    # has to fail here once or the tab shows backend ids until the next game
+    # patch. Existence only — its content is cosmetic and self-describing.
+    if not (ANALYSIS / "item_names.json").exists():
+        print("[meter] item_names.json absent — regenerating for the mount "
+              "labels.", file=sys.stderr)
+        return False
     return True
 
 
@@ -8053,6 +8315,13 @@ def _run(tray, session, ui_state, world, rift_rec):
             rift_rec.record("heal", p)
         elif k == "combat":
             session.set_combat(p.get("state") or {})
+        elif k == "mounts":
+            # The unlocked-mount list for the Mounts tab. Sent once the hook
+            # can walk the collection, then only when the set changes.
+            kinds = p.get("list") or []
+            ui_state.set_mounts(kinds)
+            print(f"[meter] mount collection: {len(kinds)} unlocked",
+                  file=sys.stderr)
         elif k == "world":
             world.update(p)
         elif k == "rift":
@@ -8332,6 +8601,9 @@ def _run(tray, session, ui_state, world, rift_rec):
     overlay = Overlay(session, pid, ui_state, world, configure=configure_hook)
     # Push the starting rate, since the agent boots on its own default.
     overlay._set_map_rate(overlay._map_rate)
+    # Same for the mount config: the agent boots with the swap off, and a
+    # saved "on" that never reached it would be a checkbox that lies.
+    overlay._push_mount_cfg()
     # From here the overlay owns shutdown: it's the only thing that can return
     # from the mainloop and let the finally below unload the hook and detach.
     _OVERLAY["ref"] = overlay

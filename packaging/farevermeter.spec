@@ -18,6 +18,7 @@ datas = [
     (str(ROOT / "frida" / "meter_hook.js"), "res/frida"),
     (str(ROOT / "analysis_out" / "resolver_data.json"), "res/analysis_out"),
     (str(ROOT / "analysis_out" / "meter_offsets.json"), "res/analysis_out"),
+    (str(ROOT / "analysis_out" / "item_names.json"), "res/analysis_out"),
     (str(ROOT / "assets" / "farevermeter.ico"), "res/assets"),
     # Boss-fight cues. Played through Windows' own MCI, so they add two files
     # rather than an audio dependency.
@@ -39,8 +40,10 @@ for f in sorted((ROOT / "assets" / "maps").glob("*")):
 # The self-heal path re-runs these against the running game's hlboot.dat after a
 # Farever patch, so they have to ship — without them an installed meter couldn't
 # recover from a patch without a new release.
+# pak_extract is emit_offsets' import for the item-name table (data.cdb out
+# of res.light.pak) — same self-heal argument as the rest.
 for tool in ("build_targets.py", "emit_offsets.py", "hlbc_parser.py",
-             "gamepath.py"):
+             "gamepath.py", "pak_extract.py"):
     datas.append((str(ROOT / "hltools" / tool), "res/hltools"))
 
 # Pillow is imported inside the parse-image functions rather than at module

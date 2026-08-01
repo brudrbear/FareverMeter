@@ -118,6 +118,15 @@ boss_targets = {nm: fi for fi, nm in names.items() if nm in BOSS_TARGETS}
 BOSS_FNS = ["ent.Unit.isBoss", "ent.Unit.isElite"]
 boss_fns = {nm: fi for fi, nm in names.items() if nm in BOSS_FNS}
 
+# ---- the mount summon entry ----
+# ent.Hero.setMount(id) is the LOCAL summon request — measured 2026-08-01
+# (mount_probe.js): it fires only for the local hero, args[1] is the mount
+# kind String (null on dismount), and everything downstream — setMount__impl,
+# setupMount, the replicated set_mountId — inherits its argument. The random-
+# favorite feature swaps that argument in place; nothing is ever called.
+MOUNT_TARGETS = ["ent.Hero.setMount"]
+mount_targets = {nm: fi for fi, nm in names.items() if nm in MOUNT_TARGETS}
+
 payload = {
     "nfunctions": code.counts["nfunctions"],
     "nnatives": code.counts["nnatives"],
@@ -128,6 +137,7 @@ payload = {
     "cam_targets": cam_targets,
     "boss_targets": boss_targets,
     "boss_fns": boss_fns,
+    "mount_targets": mount_targets,
     "funcs": funcs,
     "map_fn": map_fn,
 }
@@ -143,6 +153,9 @@ for nm in CAM_TARGETS:
 for nm in BOSS_TARGETS + BOSS_FNS:
     if nm not in boss_targets and nm not in boss_fns:
         print(f"    [!] boss target not found in this build: {nm}")
+for nm in MOUNT_TARGETS:
+    if nm not in mount_targets:
+        print(f"    [!] mount target not found in this build: {nm}")
 for nm, fi in sorted(candidates.items()):
     print(f"    {nm:<45} findex={fi}")
 print(f"[written] {OUT / 'resolver_data.json'}")

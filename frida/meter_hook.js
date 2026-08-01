@@ -1097,6 +1097,116 @@ function refreshLocalHero() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Random favorite mount (measured 2026-08-01, mount_probe.js + swap probe)
+// ---------------------------------------------------------------------------
+// ent.Hero.setMount(id) is the LOCAL summon request; everything downstream
+// (setMount__impl, setupMount, the replicated set_mountId) inherits its
+// argument, so replacing args[1] in place is the whole feature. The
+// replacement String pointers come from the account collection's own mounts
+// array — GC-rooted by the collection, and HL's GC doesn't move objects, so
+// no allocation is ever needed. Nothing is called; the hook body is plain
+// reads plus one pointer swap.
+//
+// Two rules paid for in probe rounds:
+//   * NO cached hero pointers. Round 1 gated on a once-latched localHero and
+//     logged nothing — a re-replicated hero (any zone change) stales the
+//     pointer silently. Every check walks the hooked object itself.
+//   * The local test is this -> player -> isMe, plain reads.
+// mode "random" rolls per summon; "cycle" walks the favorites in the order
+// the host sent them, one step per summon. cycleIdx is session state and
+// resets whenever the config changes — a rotation that survived an edited
+// list would start mid-way through a different sequence.
+let mountCfg = { enabled: false, favorites: [], mode: "random", cycleIdx: 0 };
+let lastMountsSig = null;
+
+function mountOffsetsOk() {
+    return OFF.Player && OFF.Player.accountProgress !== undefined
+        && OFF.AccountProgress && OFF.Collection
+        && OFF.ArrayProxyData && OFF.ArrayDyn;
+}
+
+function heroIsMe(hero) {
+    try {
+        const player = hero.add(OFF.Hero.player).readPointer();
+        if (!player || player.isNull()) return false;
+        return player.add(OFF.Player.isMe).readU8() === 1;
+    } catch (e) { return false; }
+}
+
+// {kind -> String ptr} for the hero's unlocked mounts; empty on any failure.
+function readMountKinds(hero) {
+    const out = {};
+    if (!mountOffsetsOk()) return out;
+    try {
+        const player = hero.add(OFF.Hero.player).readPointer();
+        const acct = player.add(OFF.Player.accountProgress).readPointer();
+        const coll = acct.add(OFF.AccountProgress.collection).readPointer();
+        const proxy = coll.add(OFF.Collection.mounts).readPointer();
+        const dyn = proxy.add(OFF.ArrayProxyData.array).readPointer();
+        const inner = dyn.add(OFF.ArrayDyn.array).readPointer();
+        if (typeName(inner) !== "hl.types.ArrayObj") return out;
+        const n = inner.add(OFF.ArrayObj.length).readS32();
+        if (n < 0 || n > 4096) return out;
+        const data = inner.add(OFF.ArrayObj.array).readPointer();
+        for (let i = 0; i < n; i++) {
+            const s = data.add(OFF.ArrayObj.data + i * 8).readPointer();
+            const k = hlStr(s);
+            if (k) out[k] = s;
+        }
+    } catch (e) {}
+    return out;
+}
+
+function hookMountSwap(base) {
+    const fi = (DATA.mount_targets || {})["ent.Hero.setMount"];
+    if (fi === undefined) {
+        log("!! ent.Hero.setMount missing from resolver data — random mount "
+            + "disabled. The data file is older than this build; delete "
+            + "analysis_out and restart.");
+        return;
+    }
+    if (!mountOffsetsOk()) {
+        log("!! mount offsets missing — random mount disabled. The offsets "
+            + "file is older than this build; delete analysis_out and restart.");
+        return;
+    }
+    Interceptor.attach(base.add(fi * 8).readPointer(), {
+        onEnter: function (args) {
+            try {
+                if (!mountCfg.enabled || !mountCfg.favorites.length) return;
+                const orig = hlStr(args[1]);
+                if (orig === null) return;         // dismount — never touched
+                if (!heroIsMe(args[0])) return;    // replication traffic
+                const pool = readMountKinds(args[0]);
+                const owned = mountCfg.favorites.filter(
+                    function (k) { return k in pool; });
+                if (!owned.length) return;
+                let pick;
+                if (mountCfg.mode === "cycle") {
+                    // Strict rotation, one step per summon, in the host's
+                    // list order. The equipped mount is not excluded — a
+                    // cycle that skipped it would be a different sequence
+                    // than the checklist reads.
+                    pick = owned[mountCfg.cycleIdx % owned.length];
+                    mountCfg.cycleIdx = (mountCfg.cycleIdx + 1) % owned.length;
+                } else {
+                    // Random: prefer a different one than what was asked
+                    // for, so the swap always reads as random, but a single-
+                    // favorite list still wins over the selection.
+                    let picks = owned.filter(
+                        function (k) { return k !== orig; });
+                    if (!picks.length) picks = owned;
+                    pick = picks[Math.floor(Math.random() * picks.length)];
+                }
+                args[1] = pool[pick];
+                log("mount swap (" + mountCfg.mode + "): " + orig + " -> "
+                    + pick);
+            } catch (e) {}
+        }
+    });
+}
+
 function main() {
     const resolved = resolveAnchors();
     const t0 = Date.now();
@@ -1156,6 +1266,22 @@ function main() {
     // setting as soon as it connects.
     hookCamera(base);
     hookBossBar(base);
+    hookMountSwap(base);
+    // The unlocked-mount list, for the menu's favorites checklist. Plain
+    // reads on a slow timer; re-sent only when the set changes (a new unlock
+    // mid-session shows up within a tick).
+    setInterval(function () {
+        try {
+            if (!localHero || localHero.isNull()) return;
+            const kinds = Object.keys(readMountKinds(localHero)).sort();
+            if (!kinds.length) return;
+            const sig = kinds.join(",");
+            if (sig !== lastMountsSig) {
+                lastMountsSig = sig;
+                send({ kind: "mounts", list: kinds });
+            }
+        } catch (e) {}
+    }, 5000);
     // Say so if the sweep can't run. sweepWorld bails on its first line when
     // an offset it needs is absent, and it does that inside a try/catch on a
     // timer — so without this the minimap simply stays on "waiting for the
@@ -1174,7 +1300,19 @@ function main() {
     // Host -> agent config. re-armed after each message, which is how frida's
     // recv() works: a handler fires once.
     function onConfig(msg) {
-        try { if (msg && msg.worldTick) setWorldTick(msg.worldTick); }
+        try {
+            if (msg && msg.worldTick) setWorldTick(msg.worldTick);
+            if (msg && msg.mounts) {
+                mountCfg.enabled = !!msg.mounts.enabled;
+                mountCfg.favorites = Array.isArray(msg.mounts.favorites)
+                    ? msg.mounts.favorites : [];
+                mountCfg.mode = msg.mounts.mode === "cycle" ? "cycle" : "random";
+                mountCfg.cycleIdx = 0;
+                log("mount config: " + (mountCfg.enabled ? "on" : "off")
+                    + " (" + mountCfg.mode + "), "
+                    + mountCfg.favorites.length + " favorites");
+            }
+        }
         catch (e) { log("config failed: " + e); }
         recv("config", onConfig);
     }

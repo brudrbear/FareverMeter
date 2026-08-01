@@ -61,6 +61,10 @@ def main():
     item = offs("st.Item")
     weapon = offs("st.item.Weapon")
     world = offs("world.World")
+    acct = offs("st.player.AccountProgress")
+    coll = offs("st.player.Collection")
+    aproxy = offs("hxbit.ArrayProxyData")
+    adyn = offs("hl.types.ArrayDyn")
 
     # st.Equipment extends st.Inventory, so one `content` offset serves both
     # containers. Verified rather than assumed — if the two ever diverge, the
@@ -104,7 +108,10 @@ def main():
                  # equipped weapon (which is the same st.item.Weapon pointer
                  # the equipment slot holds — measured).
                  "loadout": hero["loadout"][0],
-                 "weaponInHand": hero["weaponInHand"][0]},
+                 "weaponInHand": hero["weaponInHand"][0],
+                 # The live summoned mount (null while dismounted) — the
+                 # random-mount hook logs it; the swap itself rides setMount.
+                 "mountId": hero["mountId"][0]},
         "Loadout": {"inventory": loadout["inventory"][0],
                     "equipment": loadout["equipment"][0]},
         # content is an ArrayObj of SLOT VIRTUALS, not of items: each entry is
@@ -203,7 +210,15 @@ def main():
                        "startTime": wevent["startTime"][0],
                        "stopTime": wevent["stopTime"][0]},
         "Player": {"name": player["name"][0], "group": player["group"][0],
-                   "isMe": player["isMe"][0], "lobbyId": player["lobbyId"][0]},
+                   "isMe": player["isMe"][0], "lobbyId": player["lobbyId"][0],
+                   "accountProgress": player["accountProgress"][0]},
+        # The account-wide unlock collection (mount walk measured 2026-08-01):
+        # player -> accountProgress -> collection -> mounts, an ArrayProxyData
+        # whose ArrayDyn wraps an ArrayObj of kind Strings.
+        "AccountProgress": {"collection": acct["collection"][0]},
+        "Collection": {"mounts": coll["mounts"][0]},
+        "ArrayProxyData": {"array": aproxy["array"][0]},
+        "ArrayDyn": {"array": adyn["array"][0]},
         "Group": {"groupId": group["groupId"][0], "players": group["players"][0]},
         # The game's boss/elite healthbar. `bossInfos` is NOT a fixed pool —
         # measured lengths were only ever 0 (no bar) or 1 (bar up), so its
@@ -219,7 +234,38 @@ def main():
     }
     OUT.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     print(f"[written] {OUT}")
+
+    # Item display names, from the game's own data.cdb (res.light.pak, found
+    # 2026-08-01 — NOT res.pak, which only carries assets and the non-English
+    # lang exports). The Mounts tab shows these instead of backend kinds.
+    # Cosmetic, so a failure costs the labels and nothing else — but it is
+    # still reported, because "the tab shows ids again" should be explainable
+    # from the log.
+    try:
+        names = extract_item_names(Path(hlboot).parent)
+        out_names = _OUT_DIR / "item_names.json"
+        out_names.write_text(json.dumps(names, ensure_ascii=False, indent=0),
+                             encoding="utf-8")
+        print(f"[written] {out_names} ({len(names)} items)")
+    except Exception as e:
+        print(f"[!] item names skipped ({e}) — mount labels fall back to ids")
+
     print(json.dumps(meta, indent=2))
+
+
+def extract_item_names(game_dir):
+    """id -> texts.name for every row of the item sheet in data.cdb."""
+    import pak_extract
+    data, entries, data_off = pak_extract.load(Path(game_dir) / "res.light.pak")
+    e = next(x for x in entries if x.path.endswith("data.cdb"))
+    cdb = json.loads(data[data_off + e.pos: data_off + e.pos + e.size])
+    sheet = next(s for s in cdb["sheets"] if s["name"] == "item")
+    out = {}
+    for ln in sheet["lines"]:
+        iid, nm = ln.get("id"), (ln.get("texts") or {}).get("name")
+        if isinstance(iid, str) and isinstance(nm, str) and nm:
+            out[iid] = nm
+    return out
 
 
 if __name__ == "__main__":
