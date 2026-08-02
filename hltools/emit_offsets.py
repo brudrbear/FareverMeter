@@ -61,10 +61,12 @@ def main():
     item = offs("st.Item")
     weapon = offs("st.item.Weapon")
     world = offs("world.World")
+    gath = offs("ent.interactible.Gatherable")
     acct = offs("st.player.AccountProgress")
     coll = offs("st.player.Collection")
     aproxy = offs("hxbit.ArrayProxyData")
     adyn = offs("hl.types.ArrayDyn")
+    cdbidx = offs("cdb.IndexId")
 
     # st.Equipment extends st.Inventory, so one `content` offset serves both
     # containers. Verified rather than assumed — if the two ever diverge, the
@@ -176,6 +178,15 @@ def main():
         # thing: it reads "Opened" on chests that are plainly shut.
         "Element": {"kind": elem["kind"][0], "stateId": elem["stateId"][0],
                     "currentVisualState": elem["currentVisualState"][0]},
+        # Ore/herb nodes (ent.interactible.Gatherable, an Element subclass).
+        # hitPoints is the replicated "gatherable right now" signal — measured
+        # 2026-08-01: each gather tick steps it down (200..0), depletion flips
+        # enabled 1->0 and NOTHING else (stateId stays "None"), and the respawn
+        # arrives as hp back at max. gatherInf is the CDB row; its texts.type
+        # ("Ore" | "Plant") and texts.name resolve on the game thread the same
+        # way foe nameplates do.
+        "Gatherable": {"hitPoints": gath["hitPoints"][0],
+                       "gatherInf": gath["gatherInf"][0]},
         # curDirection is the camera yaw actually being rendered; `direction`
         # is the value it is easing towards. Following the eased one would make
         # the minimap lead the view it is supposed to match.
@@ -212,13 +223,19 @@ def main():
         "Player": {"name": player["name"][0], "group": player["group"][0],
                    "isMe": player["isMe"][0], "lobbyId": player["lobbyId"][0],
                    "accountProgress": player["accountProgress"][0]},
-        # The account-wide unlock collection (mount walk measured 2026-08-01):
-        # player -> accountProgress -> collection -> mounts, an ArrayProxyData
-        # whose ArrayDyn wraps an ArrayObj of kind Strings.
+        # The account-wide unlock collection (mount walk measured 2026-08-01,
+        # gliders 2026-08-02 — same shape): player -> accountProgress ->
+        # collection -> mounts/gliders, an ArrayProxyData whose ArrayDyn wraps
+        # an ArrayObj of kind Strings.
         "AccountProgress": {"collection": acct["collection"][0]},
-        "Collection": {"mounts": coll["mounts"][0]},
+        "Collection": {"mounts": coll["mounts"][0],
+                       "gliders": coll["gliders"][0]},
         "ArrayProxyData": {"array": aproxy["array"][0]},
         "ArrayDyn": {"array": adyn["array"][0]},
+        # Data.item's cdb.IndexId — `all` is an ArrayDyn of every CDB item
+        # row; the glider re-equip walks it (hl_obj_get_field on "id") to map
+        # kind -> row with zero HL bytecode calls (measured 2026-08-02).
+        "IndexId": {"all": cdbidx["all"][0]},
         "Group": {"groupId": group["groupId"][0], "players": group["players"][0]},
         # The game's boss/elite healthbar. `bossInfos` is NOT a fixed pool —
         # measured lengths were only ever 0 (no bar) or 1 (bar up), so its

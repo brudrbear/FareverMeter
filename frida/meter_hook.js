@@ -413,6 +413,7 @@ function hookCamera(base) {
                 // sweep queues up — and for the getHero calls below, which are
                 // HL calls like any other findex invocation.
                 drainUnitNames();
+                drainGatherKinds();
                 if (heroRefreshDue) { heroRefreshDue = false; refreshLocalHero(); }
             }
         });
@@ -608,6 +609,53 @@ const ORB_STATE = "Enabled";
 // The name is all there is to go on, which is why no state check follows it.
 const SOULSTONE_KIND = /soulstone/i;
 
+// Ore and herb nodes are all ONE class, unlike the orbs. Not in SWEEP_CLASS
+// because one class maps to TWO categories: the split is the CDB row's
+// texts.type ("Ore" | "Plant"), which needs the game thread — so the sweep
+// reads Element.kind (a plain read) and classifies through this cache, queueing
+// unresolved kinds the same way foe nameplates are. An entry of "" means the
+// CDB answered something other than Ore/Plant; the node stays hidden and the
+// oddity is logged once rather than guessed at.
+// The kind is the ELEMENT id ("CopperOre_Small_Generic", "R2Plant2_Small_3"),
+// not the Gatherable row id — placements alias freely, which is why the cache
+// is per element-kind and the answer comes from gatherInf, not string-matching.
+const GATHER_CLASS = "ent.interactible.Gatherable";
+const gatherKindCache = {};    // Element kind -> {c, n} | "" once resolved
+let gatherPending = [];        // [{kind, ptr}] awaiting a game-thread lookup
+const GATHER_QUEUE_MAX = 32;
+
+function queueGatherKind(kind, ptr) {
+    if (!kind || kind in gatherKindCache) return;
+    if (gatherPending.length >= GATHER_QUEUE_MAX) return;
+    for (let i = 0; i < gatherPending.length; i++)
+        if (gatherPending[i].kind === kind) return;
+    gatherPending.push({ kind: kind, ptr: ptr });
+}
+
+function drainGatherKinds() {
+    if (!gatherPending.length || !hl_getField) return;
+    for (let i = 0; i < 2 && gatherPending.length; i++) {
+        const job = gatherPending.shift();
+        if (job.kind in gatherKindCache) continue;
+        let out = "";
+        try {
+            const inf = job.ptr.add(OFF.Gatherable.gatherInf).readPointer();
+            const texts = getField(inf, "texts");
+            const ty = hlStr(getField(texts, "type"));
+            const nm = hlStr(getField(texts, "name")) || "";
+            // The Gatherable ROW id ("Ore_Tin_Large", "Tungstene") — the
+            // stable material identity the overlay styles by. Element kinds
+            // won't do: placements alias ("R2Plant2_Small_3" is a Lavendula).
+            const rid = hlStr(getField(inf, "id")) || "";
+            if (ty === "Ore") out = { c: "ore", n: nm, g: rid };
+            else if (ty === "Plant") out = { c: "herb", n: nm, g: rid };
+            else log("gatherable " + job.kind + ": CDB texts.type="
+                     + JSON.stringify(ty) + " is not Ore/Plant — hidden");
+        } catch (e) {}
+        gatherKindCache[job.kind] = out;
+    }
+}
+
 // ent.Element.stateId, measured on the live game:
 //   chests  Closed | Locked        obelisks  Closed        orbs  Enabled
 // A state on this list means the thing is spent and not worth drawing. Kept as
@@ -681,6 +729,26 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
             } else if (elemKind && SOULSTONE_KIND.test(elemKind)) {
                 cat = "soulstone";
             }
+        }
+        let gatherInfo = null;
+        if (!cat && cls === GATHER_CLASS && OFF.Gatherable) {
+            try {
+                // "Mineable only" is the category's contract, and hitPoints is
+                // the mineable signal (measured 2026-08-01): each gather tick
+                // steps it down, 0 means depleted-awaiting-respawn — the node
+                // STAYS in the arrays with enabled 0 and stateId still "None",
+                // so without this check the map would keep a marker on every
+                // stump. The respawn replicates hp back to max and the marker
+                // simply returns.
+                if (e.add(OFF.Gatherable.hitPoints).readDouble() <= 0) continue;
+                const gk = hlStr(e.add(OFF.Element.kind).readPointer());
+                gatherInfo = gk ? gatherKindCache[gk] : "";
+                // Unresolved kind: queue it and skip this tick — the CDB
+                // answer lands within a frame or two, once per kind ever.
+                if (gatherInfo === undefined) { queueGatherKind(gk, e); continue; }
+                if (!gatherInfo) continue;      // resolved to not-a-node; logged once
+                cat = gatherInfo.c;
+            } catch (x) { continue; }
         }
         if (!cat) continue;
         try {
@@ -770,6 +838,12 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
                         hlStr(e.add(OFF.Element.kind).readPointer());
                     if (k) ent.k = k;
                 }
+                // Node display name off the CDB cache ("Copper Lode"), so the
+                // hover line names the thing rather than its placement id —
+                // and the row id, which is what the overlay picks a material
+                // colour (and the rare halo) by.
+                if (gatherInfo && gatherInfo.n) ent.n = gatherInfo.n;
+                if (gatherInfo && gatherInfo.g) ent.g = gatherInfo.g;
             }
             out.push(ent);
         } catch (x) {}
@@ -847,7 +921,7 @@ function setupNameApi() {
                                          "pointer", ["pointer", "int"]);
         hl_hashUtf8 = new NativeFunction(m.findExportByName("hl_hash_utf8"),
                                          "int", ["pointer"]);
-        for (const n of ["texts", "name"]) fieldHash[n] = hl_hashUtf8(Memory.allocUtf8String(n));
+        for (const n of ["texts", "name", "type", "id"]) fieldHash[n] = hl_hashUtf8(Memory.allocUtf8String(n));
         return true;
     } catch (e) { return false; }
 }

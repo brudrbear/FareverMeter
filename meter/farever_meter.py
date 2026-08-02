@@ -341,6 +341,16 @@ MINIMAP_STYLE = (
     ("chest",    {"fill": "#FF9E3D", "r": 3.5, "shape": "square"}),
     ("orb",      {"fill": "#FFD400", "r": 3.6, "shape": "dot",
                   "ring": "#A24BE0"}),
+    # Gathering nodes, mineable only — the hook drops depleted ones outright
+    # (hitPoints 0, waiting on their respawn timer), so a marker here always
+    # means "walk over and you can gather it". Both get pictorial glyphs
+    # rather than borrowed geometry: a silver rock cluster and a green leaf
+    # are what the things ARE, which beats any legend. Slightly larger radii
+    # than the squares and dots carry — an irregular silhouette has less
+    # visual mass than a solid square of the same r, so these sit level with
+    # the chest rather than over it.
+    ("ore",      {"fill": "#C9D3DC", "r": 5.2, "shape": "rock"}),
+    ("herb",     {"fill": "#5ED97A", "r": 5.0, "shape": "leaf"}),
     # The smallest thing on the map, and drawn last so it sits on top of
     # everything. There are far more of these than anything else — a pack is a
     # dozen dots on one spot — so size is what keeps them from swamping the
@@ -351,6 +361,40 @@ MINIMAP_STYLE = (
 MINIMAP_STYLE_MAP = dict(MINIMAP_STYLE)
 MINIMAP_ORDER = [k for k, _ in MINIMAP_STYLE]
 
+# Per-material styling for gathering nodes, keyed by the CDB Gatherable row id
+# the hook ships as `g` — prefix-matched, since rows come as Foo_Small /
+# Foo_Large. The shape stays the category (rock = ore, leaf = herb); the fill
+# is the material, roughly the colour of the thing itself. Rarity is the
+# game's own data, not a judgement call: each node's hitLoot item in data.cdb
+# carries a rarity, and TungsteneOre and ZealotusPetal are the two Rare ones —
+# everything else reads Common. The rares get a halo ring and a size bump, the
+# same "this one is special" grammar the orb's ring already speaks.
+NODE_STYLES = (
+    ("Ore_Copper",   {"fill": "#E28B58"}),   # copper: warm and brown
+    ("Ore_Iron",     {"fill": "#C9D3DC"}),   # iron: the plain silver
+    ("Ore_Tin",      {"fill": "#9FB8CE"}),   # tin: paler and colder than iron
+    # Tungsten is dark metal under a bright halo — the dark body is what lets
+    # the halo carry "rare" instead of the fill having to shout it.
+    ("Tungstene",    {"fill": "#6E7F94", "ring": "#F2F7FF", "rare": True}),
+    ("Madrigold",    {"fill": "#E8C558"}),   # marigold gold
+    ("Lavendula",    {"fill": "#B08FE8"}),   # lavender
+    ("AncientThyme", {"fill": "#3FA86B"}),   # deep thyme green
+    ("Zealotus",     {"fill": "#E8506E", "ring": "#FFD9E4", "rare": True}),
+)
+NODE_RARE_SCALE = 1.18          # on top of the category radius
+
+
+def _node_style(g):
+    """The material override for a node's `g` (Gatherable row id), or None —
+    None falls back to the category style, which is what an unmapped material
+    added in a future patch should do rather than vanish."""
+    if g:
+        for prefix, st in NODE_STYLES:
+            if g.startswith(prefix):
+                return st
+    return None
+
+
 # The minimap's own show/hide, grouped the way you'd think about them rather
 # than one tick per sweep category: nobody wants orbs without chests.
 #
@@ -360,6 +404,10 @@ MINIMAP_ORDER = [k for k, _ in MINIMAP_STYLE]
 # each would be four more rows of menu for a problem nobody has.
 MINIMAP_FILTERS = (
     ("collect",    "Collectibles", ("orb", "chest")),
+    # One tick for both node kinds: there are no professions to specialise —
+    # everyone gathers everything — so ore-without-herbs isn't a want the way
+    # chests-without-orbs isn't.
+    ("nodes",      "Ore & herb nodes", ("ore", "herb")),
     ("players",    "Players",      ("hero",)),
     ("enemies",    "Enemies",      ("foe",)),
     ("activities", "Activities",   ("activity",)),
@@ -376,6 +424,10 @@ MINIMAP_FILTER_OF = {cat: key for key, _label, cats in MINIMAP_FILTERS
 # for.
 COMPASS_FILTERS = (
     ("collect", "Collectibles", ("orb", "chest")),
+    # Same single tick as the map's: no professions, so nobody farms ore
+    # without herbs. The compass pair stays independent of the map's — see
+    # the note above these tables.
+    ("nodes",   "Ore & herb nodes", ("ore", "herb")),
     ("party",   "Party Members", ("hero",)),
 )
 COMPASS_FILTER_OF = {cat: key for key, _label, cats in COMPASS_FILTERS
@@ -448,7 +500,7 @@ def _class_tag(kind):
 MINIMAP_LABELS = {
     "hero": "Player", "foe": "Enemy", "chest": "Chest", "orb": "Orb",
     "obelisk": "Obelisk", "respawn": "Respawn point", "activity": "Activity",
-    "soulstone": "Soulstone",
+    "soulstone": "Soulstone", "ore": "Ore", "herb": "Herb",
 }
 
 # ---------------------------------------------------------------------------
@@ -520,14 +572,19 @@ COMPASS_FOV = 180.0         # degrees of bearing shown, centred on your view
 # for things you're travelling to, and a compass crowded with mobs is a smear.
 # Obelisks are off it too — there are ten in a zone, they're permanent scenery,
 # and at whole-map range they were most of what the strip was carrying.
-COMPASS_CATS = ("chest", "orb", "hero", "soulstone", "obelisk")
+COMPASS_CATS = ("chest", "orb", "hero", "soulstone", "obelisk", "ore", "herb")
 # Two categories keep a radius, and they're the two that are worth knowing
 # about when you're near one and noise when you aren't — which is the opposite
 # of how the chests and party members on this strip behave. Obelisks came off
 # the compass entirely at one point for that reason: ten in a zone, permanently
 # there, and at whole-map range they were most of what the strip was carrying.
 # With a radius they're useful again without being the wallpaper.
-COMPASS_LIMITS = {"soulstone": 200.0, "obelisk": 200.0}
+COMPASS_LIMITS = {"soulstone": 200.0, "obelisk": 200.0,
+                  # Nodes are the obelisk case again: static, always some in
+                  # the loaded area, and at whole-map range they'd be most of
+                  # what the strip carries. Near one, the bearing is useful;
+                  # the map is what answers "where's the nearest one at all".
+                  "ore": 200.0, "herb": 200.0}
 # The ground plane is left-handed against the screen — the same fact
 # MINIMAP_MIRROR_X exists for — so the axis that trigonometry calls north is
 # the game's SOUTH. Naming +y "north" gave a compass that was a mirror of a
@@ -4148,6 +4205,12 @@ class Overlay:
                 if not (0 <= x <= size and 0 <= y <= size):
                     continue        # outside the square; the hook's cull is round
                 r = style["r"] * MINIMAP_ICON_SCALE * self._scales["minimap"]
+                # Nodes swap in their material's colour (and the rare halo)
+                # while keeping the category's shape — rock stays rock.
+                nst = (_node_style(e.get("g"))
+                       if cat in ("ore", "herb") else None)
+                if nst and nst.get("rare"):
+                    r *= NODE_RARE_SCALE
                 # The local player is drawn last, as an arrow, not a dot.
                 if cat == "hero" and e.get("n") and e["n"] == local:
                     continue
@@ -4158,7 +4221,7 @@ class Overlay:
                 # just makes the thing you're navigating to harder to see.
                 far = abs(e.get("z", mez) - mez) > MINIMAP_Z_FADE
                 fade = far and cat in ("hero", "foe")
-                fill = self._marker_fill(style["fill"])
+                fill = self._marker_fill((nst or style)["fill"])
                 if fade:
                     fill = _lerp_hex(body, fill, MINIMAP_Z_DIM)
                 # Other players point where they're facing. In rotating mode
@@ -4172,7 +4235,8 @@ class Overlay:
                 # hard black edge on a dark body reads as a hole.
                 edge = _lerp_hex(body, BG_BORDER, 0.35 if fade else 0.8)
                 self._map_glyph(c, x, y, r, style, fill, facing, edge,
-                                ring=self._marker_fill(style.get("ring")))
+                                ring=self._marker_fill(
+                                    (nst or style).get("ring")))
                 if far:
                     self._map_z_marker(c, x, y, r, e.get("z", mez) - mez,
                                        _contrast_ink(body))
@@ -4346,6 +4410,13 @@ class Overlay:
             # the internal id, prettified, so a foe is never just "Enemy".
             nm = (name or "").strip() or _pretty_id(e.get("k") or "")
             return f"{self._elide(nm)} (Enemy)" if nm else "Enemy"
+        if cat in ("ore", "herb"):
+            # "Copper Lode (Ore)", from the same CDB texts the game's own
+            # widget shows. The placement id fallback is prettified for the
+            # frame or two before the name resolves.
+            nm = (name or "").strip() or _pretty_id(e.get("k") or "")
+            tag = MINIMAP_LABELS[cat]
+            return f"{self._elide(nm)} ({tag})" if nm else tag
         label = MINIMAP_LABELS.get(cat, cat.title())
         state = (e.get("s") or "").strip()
         if state and state not in MINIMAP_PLAIN_STATES:
@@ -4398,6 +4469,14 @@ class Overlay:
         drawn — both the map and the compass tone them for their panel — so
         nothing in here consults the theme."""
         shape = style["shape"]
+        # The rare-node halo: a ring around the whole glyph, drawn first so
+        # the shape sits on it. The dot keeps its own tighter ring below —
+        # that one is the orb's second colour, not a rarity mark.
+        if ring and shape in ("rock", "leaf"):
+            rr = r * 1.5
+            c.create_oval(x - rr, y - rr, x + rr, y + rr,
+                          outline=ring, fill="",
+                          width=max(1, int(round(self._scales["minimap"] * 1.5))))
         if shape == "chevron" and facing is not None:
             # Same arrow as the player marker, smaller. The outline is what
             # keeps a stack of players readable: several chevrons on the same
@@ -4453,6 +4532,55 @@ class Overlay:
                              fill=fill, outline=edge or "", width=1)
             c.create_polygon(*_star(r * 0.32, r * 0.48, 0.62),
                              fill=_lerp_hex(fill, "#FFFFFF", 0.62), outline="")
+            return
+        if shape == "rock":
+            # The ore cluster, after the game's own icon: a tall central
+            # crystal flanked by lower chunks. At marker size the cluster is
+            # one blob, so what's drawn is what survives the shrinking — the
+            # jagged skyline — plus a single lit facet down the tall crystal's
+            # right side, which is what makes it read as stone rather than as
+            # a grey splat. Same reduction the soulstone shard went through.
+            def P(pts):
+                out = []
+                for px_, py_ in pts:
+                    out.extend((x + px_ * r, y + py_ * r))
+                return out
+            c.create_polygon(*P(((-1.05, 0.75), (-1.25, 0.05), (-0.5, -0.7),
+                                 (-0.15, -0.4), (0.3, -1.3), (0.9, -0.4),
+                                 (1.2, 0.2), (0.85, 0.75))),
+                             fill=fill, outline=edge or "", width=1)
+            c.create_polygon(*P(((0.3, -1.3), (0.9, -0.4), (0.45, 0.75),
+                                 (0.05, -0.25))),
+                             fill=_lerp_hex(fill, "#FFFFFF", 0.4), outline="")
+            return
+        if shape == "leaf":
+            # A pointed oval on the diagonal, with a vein and a stub of stem —
+            # the two details that say "leaf" once the outline is four pixels
+            # tall. Sides are quadratic beziers sampled into a plain polygon
+            # rather than tk's smoothed splines: sampled points draw the same
+            # on every renderer, and the tip and base stay sharp instead of
+            # being rounded off with the rest of the corners.
+            B, T = (-0.95, 0.95), (0.95, -0.95)
+            def side(p0, p1, cx_, cy_):
+                pts = []
+                for i in range(1, 8):
+                    t = i / 8.0
+                    mt = 1.0 - t
+                    pts.append((mt * mt * p0[0] + 2 * mt * t * cx_ + t * t * p1[0],
+                                mt * mt * p0[1] + 2 * mt * t * cy_ + t * t * p1[1]))
+                return pts
+            outline_pts = [B] + side(B, T, 0.92, 0.92) + [T] \
+                        + side(T, B, -0.92, -0.92)
+            flat = []
+            for px_, py_ in outline_pts:
+                flat.extend((x + px_ * r, y + py_ * r))
+            c.create_polygon(*flat, fill=fill, outline=edge or "", width=1)
+            vein = _lerp_hex(fill, "#000000", 0.45)
+            # Vein base-to-tip; the stem carries past the base on the same
+            # line, so the two read as one stroke through the leaf.
+            c.create_line(x + B[0] * 1.35 * r, y + B[1] * 1.35 * r,
+                          x + T[0] * 0.72 * r, y + T[1] * 0.72 * r,
+                          fill=vein, width=1)
             return
         if shape in ("dot", "chevron"):
             # `ring` is a second colour around the dot, for markers the game
@@ -4635,7 +4763,11 @@ class Overlay:
         my = h * COMPASS_MARK_Y
         for dist, cat, x, e in rows:
             style = MINIMAP_STYLE_MAP[cat]
-            r = style["r"] * scale
+            # Same material override as the map's, so a tungsten bearing looks
+            # like the tungsten marker you'd walk to.
+            nst = _node_style(e.get("g")) if cat in ("ore", "herb") else None
+            r = style["r"] * scale * (NODE_RARE_SCALE
+                                      if nst and nst.get("rare") else 1.0)
             facing = None
             if cat == "hero":
                 # Always up, never their heading. On the MAP a chevron pointing
@@ -4647,9 +4779,10 @@ class Overlay:
             # Toned for the panel, like the map's — the strip has one again, and
             # the yellow orb on parchment is exactly as unreadable here.
             edge = _lerp_hex(body, BG_BORDER, 0.8)
-            self._map_glyph(c, x, my, r, style, self._marker_fill(style["fill"]),
+            self._map_glyph(c, x, my, r, style,
+                            self._marker_fill((nst or style)["fill"]),
                             facing, edge,
-                            ring=self._marker_fill(style.get("ring")))
+                            ring=self._marker_fill((nst or style).get("ring")))
         self._draw_compass_dists(c, rows, h, scale, mez)
 
     def _draw_compass_dists(self, c, rows, h, scale, mez):
@@ -7378,7 +7511,10 @@ REQUIRED_OFFSET_KEYS = ("Activity", "ArrayObj", "BossInfo", "BossesInfo",
                         # pre-3.2 file is missing, and hookMountSwap refuses
                         # to arm without it.
                         "Player.accountProgress", "AccountProgress",
-                        "Collection", "ArrayProxyData", "ArrayDyn")
+                        "Collection", "ArrayProxyData", "ArrayDyn",
+                        # Ore/herb nodes. A pre-3.2.1 file lacks the group and
+                        # sweepArray quietly draws no nodes at all.
+                        "Gatherable")
 
 
 def _data_is_current():

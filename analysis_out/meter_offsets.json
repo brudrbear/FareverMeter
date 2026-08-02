@@ -92,6 +92,10 @@
     "stateId": 664,
     "currentVisualState": 680
   },
+  "Gatherable": {
+    "hitPoints": 760,
+    "gatherInf": 736
+  },
   "Camera": {
     "direction": 208,
     "curDirection": 256,
