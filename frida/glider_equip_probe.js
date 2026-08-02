@@ -1,33 +1,32 @@
-// glider_equip_probe.js — GLIDER RE-EQUIP PROOF (round 3).
+// glider_equip_probe.js — GLIDER RE-EQUIP PROOF (round 4).
 //
 // Rounds 1-2 measured: the deploy chain carries no glider id (nothing to
 // arg-swap), the glider model is pre-spawned at equip time, and the UI's
-// persistent equip is Collection.equipItem(kind, infRow, 65535) — the same
-// call as mounts. Brudr chose the real-re-equip design: the meter performs
-// that same call with a random favorite, so the change replicates and other
-// players see it. This probe proves the mechanism in three gated stages:
+// persistent equip is st.player.Collection.equipItem(...) — the same call
+// as mounts. Brudr chose the real-re-equip design: the meter performs that
+// same call with a random favorite, so the change replicates and other
+// players see it.
 //
-//   1. PASSIVE CAPTURE — cdb.IndexId.resolve is hooked enter+leave; the
-//      first item-kind id through it identifies the Data.item index
-//      instance (it fires at spawn for Glider_Generic). A manual equip is
-//      captured with FOUR arg slots logged (arity check) and its a2 row.
-//   2. ROW MAP (plain reads only) — the IndexId's `all` array (@8, an
-//      ArrayDyn of every CDB item row) is walked, each row's id read via
-//      libhl's hl_obj_get_field — the same C API the meter's name lookup
-//      already uses. rowMap[capturedKind] must equal the captured a2: that
-//      proves row identity without calling any HL bytecode. (Round 3b tried
-//      CALLING resolve — access violation, cleanly caught; the walk
-//      replaces it.)
-//   3. AUTO-EQUIP — armed ONLY via rpc.exports.go() (the host calls it when
-//      the GO file appears — rpc instead of recv() because a pending recv
-//      is the prime suspect for the round-3b unload wedge), and only if the
-//      map proof passed. On each glide-end of the LOCAL hero (isMe walked
-//      from the hooked object, never cached), the next camera frame calls
-//      equipItem(collection, <random other unlocked glider>, row, 65535).
-//      5s cooldown, hard cap 5 per session.
+// Round 3 chased the second argument, believing it was the CDB item row,
+// and built an index walk to produce one. Round 3d's diagnostics killed
+// that theory outright:
 //
-// The String pointers passed to equipItem come from the collection's own
-// gliders array — GC-rooted, and HL's GC doesn't move objects.
+//     [self-test] captured=0x1739aafbb00 kind=10        <- HFUN: a CLOSURE
+//     [self-test] indexRow=0x17276d220b0 kind=16 id="Glider_Bat_Burning"
+//
+// args[2] is a freshly allocated closure (a different pointer for the same
+// kind on every click) — the UI's result callback, i.e. an OPTIONAL Haxe
+// argument. args[3] (65535) is caller register leftover, not a parameter:
+// round 3c saw args[4] mirror args[2] the same way. So the only argument
+// that carries meaning is the kind String, which the collection already
+// hands us. No row, no index, no heap scan, no hl_to_virtual.
+//
+// This round therefore calls, on the game thread, exactly:
+//
+//     equipItem(collection, kindString, null)
+//
+// null being what "callback not passed" means in generated Haxe. Gated
+// behind the GO file as before: log-only until Brudr has read the capture.
 //
 // DATA + OFF + P are prepended by run_glider_equip.py.
 
@@ -52,6 +51,9 @@ function typeName(p) {
         typeCache[key] = nm;
         return nm;
     } catch (e) { return null; }
+}
+function kindOf(p) {
+    try { return p.readPointer().readU32(); } catch (e) { return -1; }
 }
 
 let base = null;
@@ -81,7 +83,11 @@ function describe(p) {
             return tn + "(" + (nm || "?") + ")";
         }
         if (tn) return tn;
-        return p.toString();
+        const k = kindOf(p);
+        if (k === 10) return "closure@" + p;
+        if (k === 16) return "dynobj@" + p;
+        if (k === 15) return "virtual@" + p;
+        return p.toString() + " kind=" + k;
     } catch (e) { return "err:" + e.message; }
 }
 
@@ -101,7 +107,8 @@ function collectionOf(hero) {
     } catch (e) { return null; }
 }
 
-// {kind -> String ptr} from the collection's gliders array (GC-rooted).
+// {kind -> String ptr} from the collection's gliders array (GC-rooted, and
+// HL's GC doesn't move objects — so these pointers stay valid as call args).
 function readGliderKinds(hero) {
     const out = {};
     try {
@@ -122,36 +129,13 @@ function readGliderKinds(hero) {
     return out;
 }
 
-// ---- the row map: hl_obj_get_field over IndexId.all (plain reads) ----------
-let hl_getField = null;
-let idHash = 0;
-
-function setupFieldApi() {
-    try {
-        const m = Process.findModuleByName("libhl.dll");
-        hl_getField = new NativeFunction(m.findExportByName("hl_obj_get_field"),
-                                         "pointer", ["pointer", "int"]);
-        const hasher = new NativeFunction(m.findExportByName("hl_hash_utf8"),
-                                          "int", ["pointer"]);
-        idHash = hasher(Memory.allocUtf8String("id"));
-        return true;
-    } catch (e) { return false; }
-}
-
 // ---- state -----------------------------------------------------------------
 let goArmed = false;              // set by the host via rpc.exports.go()
-let capturedKind = null;          // last manual glider equip: kind string
-let capturedInf = null;           // last manual glider equip: a2 (the row)
-let indexIdThis = null;           // VERIFIED Data.item cdb.IndexId instance
-const candidates = [];            // unverified IndexId instances, in order
-const candidateSeen = {};         // ptr string -> true (dedupe)
-let rowMap = {};                  // id -> row, walked from the verified inst
-let rowMapBuilt = false;
-let typeScanDone = false;         // heap scan for sibling IndexId instances
-let selfTested = false;
-let mapProven = false;
-let pendingEquip = null;          // kind chosen at glide-end, fired next frame
-let lastAutoEquip = 0;
+let capturedKind = null;          // last glider kind seen through equipItem
+let sawManualEquip = false;       // the capture gate for arming
+let equipAddr = null;
+let pendingEquip = null;          // {kind, str, hero} set at glide end
+let lastEquipMs = 0;
 let autoEquipCount = 0;
 let lastGlideUp = false;
 const AUTO_CAP = 5;
@@ -161,55 +145,32 @@ const COOLDOWN_MS = 5000;
 function hookEquipItem() {
     const fi = P.hooks["Collection.equipItem"];
     if (fi == null) { log("!! Collection.equipItem missing"); return; }
-    Interceptor.attach(base.add(fi * 8).readPointer(), {
+    equipAddr = base.add(fi * 8).readPointer();
+    Interceptor.attach(equipAddr, {
         onEnter: function (args) {
             let line = ">>> Collection.equipItem  this=" + describe(args[0]);
-            for (let i = 1; i <= 4; i++) {
+            for (let i = 1; i <= 3; i++) {
                 try { line += "  a" + i + "=" + describe(args[i]); }
                 catch (e) { break; }
             }
             log(line);
             try {
                 const kind = hlStr(args[1]);
-                if (kind && kind.indexOf("Glider_") === 0) {
+                if (kind && kind.lastIndexOf("Glider_", 0) === 0) {
                     capturedKind = kind;
-                    capturedInf = args[2];
-                    selfTested = false;    // re-run against the new capture
-                    log("[capture] manual equip: " + kind + " row=" + args[2]);
-                }
-            } catch (e) {}
-        }
-    });
-    log("hooked Collection.equipItem");
-}
-
-function hookResolve() {
-    const fi = P.hooks["IndexId.resolve"];
-    if (fi == null) { log("!! cdb.IndexId.resolve missing — cannot prove the "
-                          + "resolver; auto-equip will never arm."); return; }
-    Interceptor.attach(base.add(fi * 8).readPointer(), {
-        onEnter: function (args) {
-            // Round 3c latched the FIRST Glider_/Mount_ id — and captured the
-            // FXSET sheet, because "Glider_Generic" is an FxSetKind too. Now
-            // every such caller is only a CANDIDATE; verifyCandidates() walks
-            // each one and demands real glider item kinds in its rows.
-            try {
-                if (indexIdThis) return;
-                const id = hlStr(args[1]);
-                if (id && (id.indexOf("Glider_") === 0
-                           || id.indexOf("Mount_") === 0)) {
-                    const key = args[0].toString();
-                    if (!candidateSeen[key]) {
-                        candidateSeen[key] = true;
-                        candidates.push(args[0]);
-                        log("[candidate] IndexId " + key
-                            + " (via resolve(\"" + id + "\"))");
+                    if (!sawManualEquip) {
+                        sawManualEquip = true;
+                        log("[capture] glider equip seen (" + kind + "). "
+                            + "a2 kind=" + kindOf(args[2])
+                            + " (10 = closure / optional callback). "
+                            + "READY — create the GO file to arm the "
+                            + "auto-equip.");
                     }
                 }
             } catch (e) {}
         }
     });
-    log("hooked cdb.IndexId.resolve (candidate capture)");
+    log("hooked Collection.equipItem");
 }
 
 function hookGlideEdge() {
@@ -224,22 +185,18 @@ function hookGlideEdge() {
                 if (up) { lastGlideUp = true; return; }
                 if (!lastGlideUp) return;
                 lastGlideUp = false;
-                if (!goArmed) { log("[skip] glide end, but GO not armed"); return; }
-                if (!mapProven) { log("[skip] row map unproven"); return; }
+                if (!goArmed) { log("[skip] glide end, GO not armed"); return; }
                 if (autoEquipCount >= AUTO_CAP) { log("[skip] cap reached"); return; }
                 const now = Date.now();
-                if (now - lastAutoEquip < COOLDOWN_MS) { log("[skip] cooldown"); return; }
-                // Pick a random unlocked glider different from the current
-                // one, from the hooked hero's own collection — mapped kinds
-                // only, so the fire step never needs a fallback.
+                if (now - lastEquipMs < COOLDOWN_MS) { log("[skip] cooldown"); return; }
                 const pool = readGliderKinds(args[0]);
                 const kinds = Object.keys(pool).filter(function (k) {
-                    return k !== capturedKind && (k in rowMap);
+                    return k !== capturedKind;
                 });
                 if (!kinds.length) { log("[skip] no alternative gliders"); return; }
                 const pick = kinds[Math.floor(Math.random() * kinds.length)];
                 pendingEquip = { kind: pick, str: pool[pick], hero: args[0] };
-                lastAutoEquip = now;
+                lastEquipMs = now;
                 log("[auto] glide end -> will equip " + pick + " next frame");
             } catch (e) { log("glide-edge ERR " + e); }
         }
@@ -247,7 +204,8 @@ function hookGlideEdge() {
     log("hooked Hero.toggleGlide (glide-end trigger)");
 }
 
-// Rebuild observers — the equip should retrigger the gear-display path.
+// Rebuild observers — a successful equip retriggers the gear-display path,
+// which is the visual confirmation that the call did something real.
 function hookDisplay() {
     ["UnitView.displayGearSlot", "UnitView.loadGearProps"].forEach(function (name) {
         const fi = P.hooks[name];
@@ -266,134 +224,23 @@ function hookDisplay() {
 }
 
 // ---- game-thread work (called from the camera hook) ------------------------
-// Walk a candidate's `all` array (@P.IndexId.all, an ArrayDyn of rows) and
-// read each row's id via hl_obj_get_field. Plain reads plus a C helper — no
-// HL bytecode is ever called. Returns {id -> row} or null.
-function walkAll(inst) {
-    try {
-        const dyn = inst.add(P.IndexId.all).readPointer();
-        if (!dyn || dyn.isNull()) return null;
-        const inner = dyn.add(P.ArrayDyn.array).readPointer();
-        if (!inner || inner.isNull()
-                || typeName(inner) !== "hl.types.ArrayObj") return null;
-        const n = inner.add(OFF.ArrayObj.length).readS32();
-        if (n <= 0 || n > 4096) return null;
-        const data = inner.add(OFF.ArrayObj.array).readPointer();
-        const map = {};
-        for (let i = 0; i < n; i++) {
-            const row = data.add(OFF.ArrayObj.data + i * 8).readPointer();
-            if (!row || row.isNull()) continue;
-            const id = hlStr(hl_getField(row, idHash));
-            if (id) map[id] = row;
-        }
-        return map;
-    } catch (e) { return null; }
-}
-
-// The item sheet is bulk-resolved at game boot, so its resolve never fires
-// while we're attached (measured round 3c: previews and equips produced no
-// new candidates). Instead, the first REJECTED candidate seeds a heap scan:
-// every heap object whose first quadword is the same hl_type* is a sibling
-// cdb.IndexId instance. Pure memory reads, off the game thread; hits are
-// fingerprinted on the game thread like any other candidate. Stack copies
-// and stale pointers walk-fail and get rejected harmlessly.
-function typeScan(typePtr) {
-    try {
-        const pat = ptrPattern(typePtr);
-        let found = 0;
-        const ranges = Process.enumerateRanges("rw-")
-            .filter(function (r) { return r.size < 0x4000000; });
-        for (const r of ranges) {
-            let mm;
-            try { mm = Memory.scanSync(r.base, r.size, pat); }
-            catch (e) { continue; }
-            for (const m of mm) {
-                const key = m.address.toString();
-                if (candidateSeen[key]) continue;
-                candidateSeen[key] = true;
-                candidates.push(m.address);
-                found++;
-            }
-        }
-        log("[scan] " + found + " same-type IndexId candidates queued");
-    } catch (e) { log("[scan] ERR " + e); }
-}
-
-// A candidate is Data.item iff its rows contain the player's own glider
-// kinds — 5 hits out of a 31-kind pool is an unforgeable fingerprint (the
-// fxset sheet that fooled round 3c shares "Glider_Generic" but not the
-// per-item kinds). Capped per frame: a scan can queue hundreds of hits and
-// each walk is ~650 field reads.
-function verifyCandidates() {
-    if (rowMapBuilt || !hl_getField || !localHero || !candidates.length) return;
-    const pool = Object.keys(readGliderKinds(localHero));
-    if (pool.length < 5) return;
-    let budget = 3;
-    while (candidates.length && budget-- > 0) {
-        const inst = candidates.shift();
-        const map = walkAll(inst);
-        if (!map) continue;               // scan noise — expected, stay quiet
-        let hits = 0;
-        for (const k of pool) if (k in map) hits++;
-        const total = Object.keys(map).length;
-        if (hits >= 5) {
-            indexIdThis = inst;
-            rowMap = map;
-            rowMapBuilt = true;
-            candidates.length = 0;
-            log("[rowmap] VERIFIED Data.item = " + inst + " — " + total
-                + " rows, " + hits + "/" + pool.length
-                + " of the player's gliders present");
-            return;
-        }
-        log("[verify] " + inst + " rejected: " + total + " rows, only "
-            + hits + " glider kinds");
-        if (!typeScanDone) {
-            typeScanDone = true;
-            const tp = inst.readPointer();
-            log("[scan] seeding heap scan from rejected candidate's type "
-                + tp);
-            setTimeout(function () { typeScan(tp); }, 0);
-        }
-    }
-}
-
-function selfTestOnGameThread() {
-    // Once per manual capture: the walked row for the SAME kind Brudr
-    // equipped must be the row the UI passed. Pure comparison, no calls.
-    if (selfTested || !capturedKind || !capturedInf || !rowMapBuilt) return;
-    selfTested = true;
-    const row = rowMap[capturedKind];
-    mapProven = !!(row && capturedInf && row.equals(capturedInf));
-    log("[self-test] rowMap[\"" + capturedKind + "\"] = " + row
-        + "  captured row = " + capturedInf + "  MATCH=" + mapProven);
-    log(mapProven
-        ? "ROW MAP PROVEN — review the log, then create the GO file to arm "
-          + "the auto-equip."
-        : "!! self-test failed — auto-equip stays disarmed.");
-}
-
 function fireAutoEquipOnGameThread() {
     if (!pendingEquip) return;
     const job = pendingEquip;
     pendingEquip = null;
     try {
-        if (!mapProven) { log("[auto] row map unproven — refusing"); return; }
+        if (!equipAddr) return;
         if (!heroIsMe(job.hero)) { log("[auto] hero not me — refusing"); return; }
         const coll = collectionOf(job.hero);
         if (!coll || coll.isNull()) { log("[auto] no collection"); return; }
-        const row = rowMap[job.kind];
-        if (!row || row.isNull()) { log("[auto] no row for " + job.kind); return; }
-        const addr = base.add(P.hooks["Collection.equipItem"] * 8).readPointer();
         autoEquipCount++;
-        log("[auto] CALLING equipItem(coll, \"" + job.kind + "\", " + row
-            + ", 65535)  [" + autoEquipCount + "/" + AUTO_CAP + "]");
-        // Same extra-null trick as resolve, in case of a trailing optional.
-        new NativeFunction(addr, "pointer",
-                           ["pointer", "pointer", "pointer", "int", "pointer"])(
-            coll, job.str, row, 65535, ptr(0));
-        log("[auto] equipItem returned — watch for the rebuild, then deploy "
-            + "to confirm visually");
+        log("[auto] CALLING equipItem(coll, \"" + job.kind + "\", null)  ["
+            + autoEquipCount + "/" + AUTO_CAP + "]");
+        new NativeFunction(equipAddr, "pointer",
+                           ["pointer", "pointer", "pointer"])(
+            coll, job.str, ptr(0));
+        log("[auto] returned — expect a Slot_Glider rebuild below, then "
+            + "deploy to confirm visually");
         capturedKind = job.kind;   // next pick avoids repeating this one
     } catch (e) { log("[auto] equip ERR " + e); }
 }
@@ -413,8 +260,8 @@ function sweep() {
             dumped = true;
             const pool = readGliderKinds(localHero);
             log("PROBE ARMED (log-only) — " + Object.keys(pool).length
-                + " gliders in the pool. Equip any glider manually now; the "
-                + "self-test runs automatically after the capture.");
+                + " gliders in the pool. Equip any glider manually once, so "
+                + "the capture confirms the call shape.");
         }
     } catch (e) { log("sweep ERR " + e); }
 }
@@ -424,36 +271,29 @@ function main() {
     if (!base) { log("!! functions_ptrs table not found"); return; }
     log("table base " + base);
     if (P.fn.postUpdate == null) { log("!! no postUpdate findex; refusing."); return; }
-    if (!setupFieldApi())
-        log("!! hl_obj_get_field unavailable — row map cannot build; "
-            + "auto-equip will never arm.");
     Interceptor.attach(base.add(P.fn.postUpdate * 8).readPointer(), {
         onEnter: function () {
             frames++;
             refreshLocalHeroOnGameThread();
-            verifyCandidates();
-            selfTestOnGameThread();
             fireAutoEquipOnGameThread();
         }
     });
     hookEquipItem();
-    hookResolve();
     hookGlideEdge();
     hookDisplay();
     log("waiting for the hero. Log-only until the GO file appears.");
     setInterval(sweep, 500);
 }
 
-// rpc instead of recv: a pending recv() is the prime suspect for the
-// round-3b unload wedge, and rpc.exports leaves nothing pending.
+// rpc instead of recv: a pending recv() leaves work outstanding at unload.
 rpc.exports = {
     go: function () {
         goArmed = true;
         log("GO received — auto-equip armed (cap " + AUTO_CAP + ", cooldown "
             + (COOLDOWN_MS / 1000) + "s)"
-            + (mapProven ? ". Glide and land to trigger it."
-                         : ", but the self-test has not passed yet."));
-        return mapProven;
+            + (sawManualEquip ? ". Glide and land to trigger it."
+                              : ", but no manual equip has been captured yet."));
+        return sawManualEquip;
     }
 };
 

@@ -66,7 +66,6 @@ def main():
     coll = offs("st.player.Collection")
     aproxy = offs("hxbit.ArrayProxyData")
     adyn = offs("hl.types.ArrayDyn")
-    cdbidx = offs("cdb.IndexId")
 
     # st.Equipment extends st.Inventory, so one `content` offset serves both
     # containers. Verified rather than assumed — if the two ever diverge, the
@@ -113,7 +112,12 @@ def main():
                  "weaponInHand": hero["weaponInHand"][0],
                  # The live summoned mount (null while dismounted) — the
                  # random-mount hook logs it; the swap itself rides setMount.
-                 "mountId": hero["mountId"][0]},
+                 "mountId": hero["mountId"][0],
+                 # The class ("Warrior"/"Priest"/"Rogue"/"Mage") and level, for
+                 # the Social tab's roster. st.player.HeroData would be the
+                 # tidier home for both, but it is null on the client for every
+                 # player including yourself — the entity is the only source.
+                 "kind": hero["kind"][0], "level": hero["_level"][0]},
         "Loadout": {"inventory": loadout["inventory"][0],
                     "equipment": loadout["equipment"][0]},
         # content is an ArrayObj of SLOT VIRTUALS, not of items: each entry is
@@ -147,7 +151,12 @@ def main():
                       # net and the only place activities show up.
                       "units": layer["units"][0],
                       "interactibles": layer["interactibles"][0],
-                      "entities": layer["entities"][0]},
+                      "entities": layer["entities"][0],
+                      # The whole-shard roster — every player the client has
+                      # state for, not merely the ones streamed in around you.
+                      # This is what the Social tab lists; `units` would only
+                      # ever show your neighbours.
+                      "players": layer["players"][0]},
         # The loaded level's identity, for the zone signal and the map
         # backdrop. `level` is the primary; name/branchName/_isWorldMap ship
         # so the hook can report what they actually hold from normal play —
@@ -220,9 +229,19 @@ def main():
                        "creationTime": wevent["creationTime"][0],
                        "startTime": wevent["startTime"][0],
                        "stopTime": wevent["stopTime"][0]},
+        # `uid` is the player's STEAM ACCOUNT ID, not an internal handle:
+        # "S" + the id's bytes as hex in LITTLE-ENDIAN order, trailing zero
+        # bytes trimmed. Measured 2026-08-02 (frida/steamid_probe.js) and
+        # calibrated against both steam_get_steam_id() and the registry's
+        # ActiveUser. Read the digits big-endian and you get a wrong,
+        # plausible-looking number — see steam64_from_uid() in the meter.
+        # `hero` is the player's live ent.Hero; it was populated for 24/24
+        # players on the layer when measured, which is what lets the Social
+        # tab show a class for everyone rather than only for people nearby.
         "Player": {"name": player["name"][0], "group": player["group"][0],
                    "isMe": player["isMe"][0], "lobbyId": player["lobbyId"][0],
-                   "accountProgress": player["accountProgress"][0]},
+                   "accountProgress": player["accountProgress"][0],
+                   "uid": player["uid"][0], "hero": player["hero"][0]},
         # The account-wide unlock collection (mount walk measured 2026-08-01,
         # gliders 2026-08-02 — same shape): player -> accountProgress ->
         # collection -> mounts/gliders, an ArrayProxyData whose ArrayDyn wraps
@@ -232,10 +251,6 @@ def main():
                        "gliders": coll["gliders"][0]},
         "ArrayProxyData": {"array": aproxy["array"][0]},
         "ArrayDyn": {"array": adyn["array"][0]},
-        # Data.item's cdb.IndexId — `all` is an ArrayDyn of every CDB item
-        # row; the glider re-equip walks it (hl_obj_get_field on "id") to map
-        # kind -> row with zero HL bytecode calls (measured 2026-08-02).
-        "IndexId": {"all": cdbidx["all"][0]},
         "Group": {"groupId": group["groupId"][0], "players": group["players"][0]},
         # The game's boss/elite healthbar. `bossInfos` is NOT a fixed pool —
         # measured lengths were only ever 0 (no bar) or 1 (bar up), so its

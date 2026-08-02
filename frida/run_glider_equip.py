@@ -1,20 +1,19 @@
-"""Host for glider_equip_probe.js — the glider re-equip proof (round 3).
+"""Host for glider_equip_probe.js — the glider re-equip proof (round 4).
 
     py frida\\run_glider_equip.py [seconds] [path\\to\\hlboot.dat]
 
 Proves the real-re-equip design end to end:
-  * a manual equip is captured with four arg slots (arity + the inf row),
-    and cdb.IndexId.resolve is watched enter+leave so the Data.item index
-    instance and its id->row pairs are learned passively;
-  * one read-only self-test call — resolve(instance, capturedKind) — must
-    return the captured row;
+  * a manual equip is captured and its argument kinds logged. Round 3d
+    established that args[2] is a CLOSURE (kind 10 / HFUN, freshly allocated
+    per click) — the UI's optional result callback, NOT the item row — and
+    that args[3] is caller register leftover. Only the kind String matters;
   * only after the GO file appears next to this script
     (frida\\glider_equip_GO.txt) does the probe arm the auto-equip: each
     local glide-end calls Collection.equipItem(collection, random unlocked
-    glider, inf, 65535) — the UI's own call. Cooldown 5s, cap 5/session.
+    glider, null) — the UI's own call. Cooldown 5s, cap 5/session.
 
-The GO file is the review gate: the host polls for it and posts "go" to the
-agent. Delete it before launching to re-run the gated flow.
+The GO file is the review gate: the host polls for it and calls the agent's
+rpc go(). Delete it before launching to re-run the gated flow.
 """
 import json
 import sys
@@ -56,7 +55,6 @@ def build_targets():
         "fn": {"postUpdate": proto("client.BaseCamera", "postUpdate")},
         "hooks": {
             "Collection.equipItem":    proto("st.player.Collection", "equipItem"),
-            "IndexId.resolve":         proto("cdb.IndexId", "resolve"),
             "Hero.toggleGlide":        proto("ent.Hero", "toggleGlide"),
             "UnitView.displayGearSlot":
                 proto("client.UnitView", "displayGearSlot"),
@@ -70,11 +68,10 @@ def build_targets():
         "Collection": offs("st.player.Collection", gliders="gliders"),
         "ArrayProxyData": offs("hxbit.ArrayProxyData", array="array"),
         "ArrayDyn": offs("hl.types.ArrayDyn", array="array"),
-        "IndexId": offs("cdb.IndexId", all="all"),
     }
     for grp, need in (("Hero", 2), ("Player", 3), ("AccountProgress", 1),
                       ("Collection", 1), ("ArrayProxyData", 1),
-                      ("ArrayDyn", 1), ("IndexId", 1)):
+                      ("ArrayDyn", 1)):
         if len(p[grp]) < need:
             raise SystemExit(f"[!] offsets for {grp} did not fully resolve "
                              f"({p[grp]}) - aborting rather than guessing.")

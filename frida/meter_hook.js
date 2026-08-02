@@ -319,8 +319,12 @@ function checkRift() {
 //
 // Foes keep a radius, and are the only category that does. They are the
 // numerous class (95 of those 252), they are worthless on a compass that
-// deliberately doesn't draw them, and the minimap can't zoom past 600 anyway.
-const SWEEP_RADIUS_FOE = 600;    // world units; matches MINIMAP_RANGE_MAX
+// deliberately doesn't draw them, and the minimap cannot zoom past 600 —
+// MINIMAP_RANGE_MAX is pinned to this number for exactly that reason, so the
+// map's widest view and the last foe we send end at the same place. Raising
+// this without raising that just sends foes nobody draws; raising that without
+// raising this puts a ring of missing mobs around the edge of the map.
+const SWEEP_RADIUS_FOE = 600;    // world units; MINIMAP_RANGE_MAX matches it
 const SWEEP_MAX = 400;           // hard cap on entities reported, worst case
 // Foes get their own slice of SWEEP_MAX. Without it, `units` being swept first
 // means a crowded fight can spend the whole budget on mobs and push the chests
@@ -414,6 +418,7 @@ function hookCamera(base) {
                 // HL calls like any other findex invocation.
                 drainUnitNames();
                 drainGatherKinds();
+                drainGliderEquip();
                 if (heroRefreshDue) { heroRefreshDue = false; refreshLocalHero(); }
             }
         });
@@ -975,6 +980,79 @@ function readParty(hero) {
     return names;
 }
 
+// ---- the shard roster (Social tab) ----
+// st.GameLayer.players is EVERY player the client holds state for, not just
+// the ones streamed in around you — which is the whole point, since `units`
+// (what the minimap sweeps) only ever contains your neighbours.
+//
+// Each entry carries the player's Steam account id in `uid`, as
+// "S" + the id's bytes in LITTLE-ENDIAN hex with trailing zero bytes trimmed.
+// It is sent on as-is and converted host-side; doing the arithmetic here would
+// put a second implementation of a fiddly byte-order rule in a second language.
+//
+// The class lives on the player's ent.Hero, not on st.player.HeroData — that
+// object is null client-side for everyone, including you.
+//
+// Plain pointer reads throughout, so this is safe on a timer thread: no HL
+// call, no allocation, nothing that needs the GC lock.
+const SHARD_MAX = 256;          // a sane ceiling on a corrupt length read
+let shardTimer = null;
+let shardSig = "";              // last payload signature, to skip idle resends
+
+function readShard(hero) {
+    const out = [];
+    const P = OFF.Player, H = OFF.Hero, G = OFF.GameLayer;
+    if (!P || !H || !G || P.uid == null || G.players == null) return out;
+    const layer = hero.add(H.layer).readPointer();
+    if (!layer || layer.isNull()) return out;
+    const proxy = layer.add(G.players).readPointer();
+    if (!proxy || proxy.isNull()) return out;
+    const arrDyn = proxy.add(OFF.ArrayProxyData.array).readPointer();
+    if (!arrDyn || arrDyn.isNull()) return out;
+    const arrObj = arrDyn.add(OFF.ArrayDyn.array).readPointer();
+    if (!arrObj || arrObj.isNull()) return out;
+    const length = arrObj.add(OFF.ArrayObj.length).readS32();
+    const varr = arrObj.add(OFF.ArrayObj.array).readPointer();
+    if (length < 0 || length > SHARD_MAX || !varr || varr.isNull()) return out;
+    for (let i = 0; i < length; i++) {
+        try {
+            const p = varr.add(24 + i * 8).readPointer();
+            if (!p || p.isNull()) continue;
+            const nm = hlStr(p.add(P.name).readPointer());
+            if (!nm) continue;                  // a slot mid-population
+            const row = { n: nm, uid: hlStr(p.add(P.uid).readPointer()) };
+            try { row.me = p.add(P.isMe).readU8() !== 0; } catch (e) {}
+            // The hero entity is absent for a player who is on the layer but
+            // not yet built — a real state, so the row still ships, just
+            // without a class. The tab shows "-" rather than dropping them.
+            const h = p.add(P.hero).readPointer();
+            if (h && !h.isNull()) {
+                if (H.kind != null) row.k = hlStr(h.add(H.kind).readPointer());
+                if (H.level != null) row.lvl = h.add(H.level).readS32();
+            }
+            out.push(row);
+        } catch (e) {}
+    }
+    return out;
+}
+
+function sweepShard() {
+    try {
+        if (!localHero || localHero.isNull()) return;
+        const list = readShard(localHero);
+        if (!list.length) return;
+        // A hub roster is re-read every couple of seconds but changes rarely;
+        // resending an identical list would repaint the tab under the cursor
+        // for nothing. Level is in the signature so a ding still lands.
+        const sig = list.map(function (r) {
+            return r.n + "|" + (r.uid || "") + "|" + (r.k || "") + "|" + (r.lvl || "");
+        }).sort().join(";");
+        if (sig === shardSig) return;
+        shardSig = sig;
+        send({ kind: "shard", list: list });
+    } catch (e) {}
+}
+
 // ---- legendary pickup cue ----
 // Plain pointer reads only, so this is safe on the sweep's timer thread.
 //
@@ -1281,6 +1359,158 @@ function hookMountSwap(base) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Random favorite glider (measured 2026-08-02, glider probes 1-4)
+// ---------------------------------------------------------------------------
+// Gliders have NO setMount-style summon to arg-swap: the deploy chain is
+// bool-only (ent.Hero.toggleGlide -> UnitView.toggleGlider) and the model is
+// pre-spawned at equip time. Brudr chose the real-re-equip design instead:
+// at each glide end this performs the UI's own persistent equip —
+// st.player.Collection.equipItem(kind) — with a random favorite, so the
+// change replicates and other players see it. This is the meter's one
+// deliberate state-changing call; it is off until the host enables it.
+//
+// The call takes only the kind String, which the collection walk already
+// provides. Probe round 3 spent itself on the theory that args[2] was the
+// item's CDB row and built an index walk to produce one; round 3d's type
+// dump refuted it — args[2] is kind=10 (HFUN), a closure the UI allocates
+// per click (a different pointer for the same kind each time), i.e. the
+// optional result callback. args[3] (65535) is caller register leftover,
+// not a parameter — round 3c saw args[4] mirror args[2] the same way. So
+// null is passed for the callback and nothing else is needed: no CDB index,
+// no heap scan (an early background-thread scan raced the collection UI's
+// allocations and crashed the game — see TESTING.md).
+let gliderCfg = { enabled: false, favorites: [], mode: "random", cycleIdx: 0 };
+let lastGlidersSig = null;
+let gliderEquipAddr = null;       // Collection.equipItem entry, cached once
+let lastGliderKind = null;        // last kind seen through equipItem
+let pendingGliderEquip = null;    // {kind, str, hero} set at glide end
+let lastGliderEquipMs = 0;
+let localGlideUp = false;
+
+function readGliderKinds(hero) {
+    const out = {};
+    if (!mountOffsetsOk() || OFF.Collection.gliders === undefined) return out;
+    try {
+        const player = hero.add(OFF.Hero.player).readPointer();
+        const acct = player.add(OFF.Player.accountProgress).readPointer();
+        const coll = acct.add(OFF.AccountProgress.collection).readPointer();
+        const proxy = coll.add(OFF.Collection.gliders).readPointer();
+        const dyn = proxy.add(OFF.ArrayProxyData.array).readPointer();
+        const inner = dyn.add(OFF.ArrayDyn.array).readPointer();
+        if (typeName(inner) !== "hl.types.ArrayObj") return out;
+        const n = inner.add(OFF.ArrayObj.length).readS32();
+        if (n < 0 || n > 4096) return out;
+        const data = inner.add(OFF.ArrayObj.array).readPointer();
+        for (let i = 0; i < n; i++) {
+            const s = data.add(OFF.ArrayObj.data + i * 8).readPointer();
+            const k = hlStr(s);
+            if (k) out[k] = s;
+        }
+    } catch (e) {}
+    return out;
+}
+
+// Game thread (camera hook). Fires at most one queued equip per frame.
+function drainGliderEquip() {
+    if (!pendingGliderEquip) return;
+    const job = pendingGliderEquip;
+    pendingGliderEquip = null;
+    try {
+        if (!gliderEquipAddr) return;
+        if (!heroIsMe(job.hero)) return;
+        const player = job.hero.add(OFF.Hero.player).readPointer();
+        const acct = player.add(OFF.Player.accountProgress).readPointer();
+        const coll = acct.add(OFF.AccountProgress.collection).readPointer();
+        if (!coll || coll.isNull()) return;
+        // (collection, kind, onResult=null) — see the section header for why
+        // the third argument is a callback and why null is what the game's
+        // own generated code treats as "not passed".
+        new NativeFunction(gliderEquipAddr, "pointer",
+                           ["pointer", "pointer", "pointer"])(
+            coll, job.str, ptr(0));
+        // Frida routes a NativeFunction built from a hooked address through
+        // the original trampoline, so the equipItem hook above does NOT see
+        // our own call (measured: 5/5 auto-equips produced no hook line).
+        // Without this the "don't repeat the current one" filter would keep
+        // comparing against the last MANUAL equip forever.
+        lastGliderKind = job.kind;
+        log("glider equip (" + gliderCfg.mode + "): -> " + job.kind);
+    } catch (e) { log("glider equip failed: " + e); }
+}
+
+function hookGliderEquip(base) {
+    const gt = DATA.glider_targets || {};
+    const fiEquip = gt["st.player.Collection.equipItem"];
+    const fiToggle = gt["ent.Hero.toggleGlide"];
+    if (fiEquip === undefined || fiToggle === undefined) {
+        log("!! glider targets missing from resolver data — random glider "
+            + "disabled. The data file is older than this build; delete "
+            + "analysis_out and restart.");
+        return;
+    }
+    if (OFF.Collection.gliders === undefined) {
+        log("!! glider offsets missing — random glider disabled. The offsets "
+            + "file is older than this build; delete analysis_out and restart.");
+        return;
+    }
+    try { gliderEquipAddr = base.add(fiEquip * 8).readPointer(); }
+    catch (e) { log("!! equipItem unreadable: " + e.message); return; }
+    // Passive: remember the current glider through EVERY equip (manual or
+    // ours) so the random pick can avoid repeating it.
+    Interceptor.attach(gliderEquipAddr, {
+        onEnter: function (args) {
+            try {
+                const kind = hlStr(args[1]);
+                if (kind && kind.lastIndexOf("Glider_", 0) === 0)
+                    lastGliderKind = kind;
+            } catch (e) {}
+        }
+    });
+    // The trigger: local glide END (toggleGlide args[1] null after a start).
+    // Same no-cached-pointers rule as the mount swap: everything is walked
+    // from the hooked hero itself.
+    Interceptor.attach(base.add(fiToggle * 8).readPointer(), {
+        onEnter: function (args) {
+            try {
+                const up = args[1] && !args[1].isNull();
+                if (!heroIsMe(args[0])) return;
+                if (up) { localGlideUp = true; return; }
+                if (!localGlideUp) return;
+                localGlideUp = false;
+                if (!gliderCfg.enabled || !gliderCfg.favorites.length) return;
+                // Short cooldown, not a cap: gliding is often a rapid
+                // tap-on-tap-off, and every equip is a real server RPC. Long
+                // enough to swallow a double-tap, short enough that ordinary
+                // landings all count (the proof probe's 5s felt like the
+                // feature was misfiring — measured 2026-08-02).
+                const now = Date.now();
+                if (now - lastGliderEquipMs < 1500) return;
+                const pool = readGliderKinds(args[0]);
+                const owned = gliderCfg.favorites.filter(function (k) {
+                    return k in pool;
+                });
+                if (!owned.length) return;
+                let pick;
+                if (gliderCfg.mode === "cycle") {
+                    pick = owned[gliderCfg.cycleIdx % owned.length];
+                    gliderCfg.cycleIdx =
+                        (gliderCfg.cycleIdx + 1) % owned.length;
+                } else {
+                    let picks = owned.filter(function (k) {
+                        return k !== lastGliderKind;
+                    });
+                    if (!picks.length) picks = owned;
+                    pick = picks[Math.floor(Math.random() * picks.length)];
+                }
+                pendingGliderEquip = { kind: pick, str: pool[pick],
+                                       hero: args[0] };
+                lastGliderEquipMs = now;
+            } catch (e) {}
+        }
+    });
+}
+
 function main() {
     const resolved = resolveAnchors();
     const t0 = Date.now();
@@ -1323,6 +1553,22 @@ function main() {
         sweepInventory();     // plain reads; see the legendary-pickup section
     }, 400);
 
+    // The shard roster, on its own slow clock. A hub list of 30 people is not
+    // worth rebuilding at the minimap's 150ms, and sweepShard() suppresses
+    // resends of an unchanged list anyway — so this costs one array walk every
+    // two seconds and usually sends nothing.
+    if (OFF.Player && OFF.Player.uid != null
+        && OFF.GameLayer && OFF.GameLayer.players != null) {
+        shardTimer = setInterval(sweepShard, 2000);
+    } else {
+        // Same failure mode the inventory sweep warns about: a stale
+        // analysis_out silently has no `uid`, readShard() returns [] on its
+        // first line forever, and the Social tab just looks empty rather than
+        // broken. Say so once.
+        log("!! Player.uid / GameLayer.players missing from analysis_out — "
+            + "the Social tab will stay empty. Regenerate offsets.");
+    }
+
     // Same reasoning as the minimap warning below: sweepInventory() bails on
     // its first line when an offset is absent, silently and forever. An
     // upgrade that keeps an older %LOCALAPPDATA%\analysis_out is exactly how
@@ -1341,18 +1587,28 @@ function main() {
     hookCamera(base);
     hookBossBar(base);
     hookMountSwap(base);
-    // The unlocked-mount list, for the menu's favorites checklist. Plain
-    // reads on a slow timer; re-sent only when the set changes (a new unlock
-    // mid-session shows up within a tick).
+    hookGliderEquip(base);
+    // The unlocked mount/glider lists, for the menus' favorites checklists.
+    // Plain reads on a slow timer; re-sent only when a set changes (a new
+    // unlock mid-session shows up within a tick).
     setInterval(function () {
         try {
             if (!localHero || localHero.isNull()) return;
             const kinds = Object.keys(readMountKinds(localHero)).sort();
-            if (!kinds.length) return;
-            const sig = kinds.join(",");
-            if (sig !== lastMountsSig) {
-                lastMountsSig = sig;
-                send({ kind: "mounts", list: kinds });
+            if (kinds.length) {
+                const sig = kinds.join(",");
+                if (sig !== lastMountsSig) {
+                    lastMountsSig = sig;
+                    send({ kind: "mounts", list: kinds });
+                }
+            }
+            const gkinds = Object.keys(readGliderKinds(localHero)).sort();
+            if (gkinds.length) {
+                const gsig = gkinds.join(",");
+                if (gsig !== lastGlidersSig) {
+                    lastGlidersSig = gsig;
+                    send({ kind: "gliders", list: gkinds });
+                }
             }
         } catch (e) {}
     }, 5000);
@@ -1385,6 +1641,17 @@ function main() {
                 log("mount config: " + (mountCfg.enabled ? "on" : "off")
                     + " (" + mountCfg.mode + "), "
                     + mountCfg.favorites.length + " favorites");
+            }
+            if (msg && msg.gliders) {
+                gliderCfg.enabled = !!msg.gliders.enabled;
+                gliderCfg.favorites = Array.isArray(msg.gliders.favorites)
+                    ? msg.gliders.favorites : [];
+                gliderCfg.mode = msg.gliders.mode === "cycle" ? "cycle"
+                                                              : "random";
+                gliderCfg.cycleIdx = 0;
+                log("glider config: " + (gliderCfg.enabled ? "on" : "off")
+                    + " (" + gliderCfg.mode + "), "
+                    + gliderCfg.favorites.length + " favorites");
             }
         }
         catch (e) { log("config failed: " + e); }

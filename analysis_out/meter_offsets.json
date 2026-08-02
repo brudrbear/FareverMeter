@@ -37,7 +37,9 @@
     "layer": 112,
     "loadout": 1232,
     "weaponInHand": 1344,
-    "mountId": 1376
+    "mountId": 1376,
+    "kind": 600,
+    "level": 992
   },
   "Loadout": {
     "inventory": 136,
@@ -62,7 +64,8 @@
     "world": 216,
     "units": 336,
     "interactibles": 328,
-    "entities": 312
+    "entities": 312,
+    "players": 224
   },
   "World": {
     "level": 184,
@@ -133,13 +136,16 @@
     "group": 256,
     "isMe": 312,
     "lobbyId": 264,
-    "accountProgress": 224
+    "accountProgress": 224,
+    "uid": 184,
+    "hero": 304
   },
   "AccountProgress": {
     "collection": 168
   },
   "Collection": {
-    "mounts": 128
+    "mounts": 128,
+    "gliders": 120
   },
   "ArrayProxyData": {
     "array": 40

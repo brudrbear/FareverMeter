@@ -127,16 +127,15 @@ boss_fns = {nm: fi for fi, nm in names.items() if nm in BOSS_FNS}
 MOUNT_TARGETS = ["ent.Hero.setMount"]
 mount_targets = {nm: fi for fi, nm in names.items() if nm in MOUNT_TARGETS}
 
-# ---- the glider re-equip (measured 2026-08-02, glider probes 1-3) ----
+# ---- the glider re-equip (measured 2026-08-02, glider probes 1-4) ----
 # Gliders have NO setMount-style summon: the deploy chain is bool-only and
 # the model is pre-spawned at equip time, so the feature performs the UI's
-# own persistent equip — st.player.Collection.equipItem(kind, row, 65535) —
-# with a random favorite at each glide end (ent.Hero.toggleGlide false edge,
-# local hero only). The row comes from walking Data.item's cdb.IndexId.all;
-# the instance is captured by hooking cdb.IndexId.resolve and waiting for an
-# item-kind id (Glider_Generic resolves at spawn).
-GLIDER_TARGETS = ["st.player.Collection.equipItem", "cdb.IndexId.resolve",
-                  "ent.Hero.toggleGlide"]
+# own persistent equip — st.player.Collection.equipItem(kind) — with a random
+# favorite at each glide end (ent.Hero.toggleGlide false edge, local hero
+# only). Only the kind String matters: args[2] is the UI's optional result
+# callback (measured kind=10/HFUN, freshly allocated per click) and args[3]
+# is caller register leftover, not a parameter.
+GLIDER_TARGETS = ["st.player.Collection.equipItem", "ent.Hero.toggleGlide"]
 glider_targets = {nm: fi for fi, nm in names.items() if nm in GLIDER_TARGETS}
 
 payload = {
