@@ -1355,32 +1355,6 @@ def _record_newer(found):
     return True
 
 
-def _fake_update():
-    """Test hook: FAREVER_FAKE_UPDATE=9.9.9 makes the automatic check behave as
-    though GitHub had announced that version.
-
-    The offer popup is otherwise only reachable at release time, on a machine
-    running a build that is already stale — which is exactly the kind of path
-    that ships broken because nobody could press it. This makes it a one-line
-    thing to exercise.
-
-    Deliberately produces NO installer asset, so it always takes the "open the
-    download page" branch. A fake asset would send the self-updater off to
-    download a release that does not exist, and a test hook that can start a
-    real update is worse than no test hook.
-    """
-    name = os.environ.get("FAREVER_FAKE_UPDATE")
-    if not name:
-        return None
-    v = _version_tuple(name)
-    if v is None:
-        print(f"[update] FAREVER_FAKE_UPDATE={name!r} is not a version.",
-              file=sys.stderr)
-        return None
-    print(f"[update] FAKE update {name} (test hook).", file=sys.stderr)
-    return (v, name, REPO_URL, None, 0)
-
-
 def check_for_update(announce=False):
     """Ask GitHub whether there's a newer version, on a background thread.
 
@@ -1406,7 +1380,7 @@ def check_for_update(announce=False):
     _update_checked_at[0] = now
 
     def work():
-        found = _fake_update() or _latest_version()
+        found = _latest_version()
         if _record_newer(found):
             # Automatic discovery, so the overlay may offer the update rather
             # than only writing a line into the menu. Set after _record_newer,
@@ -1418,96 +1392,39 @@ def check_for_update(announce=False):
     threading.Thread(target=work, daemon=True, name="update-check").start()
 
 
-# The half of the self-update that has to outlive the meter. A running exe
-# can't be overwritten on Windows, so the meter's part ends at "installer
-# downloaded" — this script waits for the process to be fully gone, runs the
-# installer silently (Inno shows its own small progress window), and starts
-# the new build. PowerShell 5.1 syntax only: it runs on user machines, and
-# Windows ships nothing newer.
-UPDATER_PS1 = r'''param(
-    [Parameter(Mandatory=$true)][int]$MeterPid,
-    [Parameter(Mandatory=$true)][string]$Installer,
-    [Parameter(Mandatory=$true)][string]$ExePath
-)
-$log = Join-Path (Split-Path -Parent $Installer) 'updater.log'
-function Say([string]$m) {
-    $line = ('[{0}] {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m)
-    try { Add-Content -Path $log -Value $line -Encoding utf8 } catch {}
-}
-function Fail([string]$m) {
-    Say ('FAILED: ' + $m)
-    try {
-        Add-Type -AssemblyName System.Windows.Forms
-        [void][System.Windows.Forms.MessageBox]::Show(
-            $m + [Environment]::NewLine + [Environment]::NewLine +
-            'The downloaded installer was left at:' + [Environment]::NewLine +
-            $Installer + [Environment]::NewLine + [Environment]::NewLine +
-            'Run it yourself to finish the update.',
-            'Farever+ Meter - update failed',
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Warning)
-    } catch {}
-    exit 1
-}
-
-try {
-    Say ('waiting for meter pid ' + $MeterPid + ' to exit')
-    $deadline = (Get-Date).AddSeconds(120)
-    while ($true) {
-        $p = Get-Process -Id $MeterPid -ErrorAction SilentlyContinue
-        if ($null -eq $p) { break }
-        if ((Get-Date) -gt $deadline) {
-            Fail 'The old meter never exited, so the update was not installed.'
-        }
-        Start-Sleep -Milliseconds 250
-    }
-    # The pid can vanish a beat before its file locks do.
-    Start-Sleep -Milliseconds 500
-
-    Say ('running installer: ' + $Installer)
-    $proc = Start-Process -FilePath $Installer -PassThru -Wait `
-        -ArgumentList @('/SP-', '/SILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
-    if ($proc.ExitCode -ne 0) {
-        Fail ('The installer exited with code ' + $proc.ExitCode + '.')
-    }
-
-    if (-not (Test-Path $ExePath)) {
-        Fail ('The updated meter was not found at ' + $ExePath + '.')
-    }
-    Say ('relaunching: ' + $ExePath)
-    Start-Process -FilePath $ExePath `
-        -WorkingDirectory (Split-Path -Parent $ExePath)
-    Remove-Item -Path $Installer -Force -ErrorAction SilentlyContinue
-    Say 'done'
-} catch {
-    Fail $_.Exception.Message
-}
-'''
+# Finishing the update is the INSTALLER's job, not a helper's.
+#
+# This used to hand off to a detached, hidden PowerShell script that polled
+# until this process died, ran the installer with /SILENT /SUPPRESSMSGBOXES,
+# and relaunched the replaced exe. Every one of those steps is a step malware
+# takes, and Windows Defender agreed: it quarantined FareverMeter.exe as
+# `Behavior:Win32/DefenseEvasion.A!ml` — a BEHAVIOURAL detection, on more than
+# one machine, each time right after an update.
+#
+# Hidden PowerShell with -ExecutionPolicy Bypass is the single most flagged
+# pattern in Windows telemetry (ATT&CK T1059.001, and "defense evasion" is
+# literally what the detection was named). Waiting for a parent to exit so you
+# can overwrite its binary, then silently running an installer and relaunching
+# it, is the rest of the same story.
+#
+# None of it was ever necessary. The helper existed only because a /SILENT run
+# REFUSES to proceed while the meter is running (see AskToStopMeter in
+# FareverMeter.iss — a silent run has nobody to answer its prompt, so it bails
+# rather than hang), so something had to wait for us to die first. Run the
+# installer the way a person would — visibly — and Inno asks politely on its
+# own, and its [Run] entry offers to start the meter again afterwards. That
+# entry is flagged `skipifsilent`, so under the old flow it never once ran.
+#
+# What is left is one ShellExecute of a file the user just agreed to install.
 
 
-def spawn_update_helper(installer: Path):
-    """Start the detached helper that finishes the update once we've exited.
+def open_installer(installer: Path):
+    """Open the downloaded installer the same way a double-click would.
 
-    Called with the installer already downloaded, immediately before the
-    meter quits. Detached (no console, its own process group) so it survives
-    the parent; hidden because the installer's own progress window is the
-    visible part. Raises on failure — the caller falls back to the browser."""
-    import subprocess
-    ps1 = UPDATE_DIR / "updater.ps1"
-    # utf-8-sig: without the BOM, PowerShell 5.1 reads a .ps1 as ANSI.
-    ps1.write_text(UPDATER_PS1, encoding="utf-8-sig")
-    powershell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / \
-        "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-    CREATE_NO_WINDOW, CREATE_NEW_PROCESS_GROUP = 0x08000000, 0x00000200
-    subprocess.Popen(
-        [str(powershell), "-NoProfile", "-ExecutionPolicy", "Bypass",
-         "-WindowStyle", "Hidden", "-File", str(ps1),
-         "-MeterPid", str(os.getpid()),
-         "-Installer", str(installer),
-         "-ExePath", sys.executable],
-        creationflags=CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL, close_fds=True, cwd=str(UPDATE_DIR))
+    os.startfile is ShellExecute: a normal, visible, user-facing launch with no
+    interpreter, no hidden window and no policy bypass in sight. Raises on
+    failure, and the caller falls back to the browser."""
+    os.startfile(str(installer))  # noqa: S606 - a file the user chose to run
 
 
 def _contrast_ink(bg, dark=MINIMAP_Z_MARK_DARK, light=MINIMAP_Z_MARK_LIGHT):
@@ -3270,10 +3187,12 @@ class Overlay:
         self._update_offer_done = False   # ...and has been answered, once ever
         self._updating = False         # self-update running: overlay hidden
         self._upd_checking = False     # manual check in flight (button armed)
+        self._upd_resolving = False    # re-asking GitHub for the installer
         self._upd_btn_after = None     # pending after() resetting the button
         self._dl = None                # download progress, written off-thread
         self._updwin = None            # the "Updating ..." progress window
         self._game_exit_win = None     # the "Farever has stopped" prompt
+        self._game_gone = False        # the game process died; hide everything
         self._whats_new_win = None     # the post-update release notes
         self._map_mode = MINIMAP_MODES[0]   # "Rotating" — you always face up
         self._transparency = 0              # percent, on top of OVERLAY_ALPHA
@@ -5603,6 +5522,11 @@ class Overlay:
         """
         if self._update_offer_done or self._update_offer_open:
             return
+        # With the game gone the exit prompt is the only thing that should be
+        # on screen, and an update offer would be a second dialog competing
+        # with it — the same reasoning that keeps it away mid self-update.
+        if self._game_gone:
+            return
         if not UPDATE["prompt"] or not UPDATE["latest"]:
             return
         if self._updating or self._prompt_open or not self._focused:
@@ -6513,6 +6437,12 @@ class Overlay:
                  f"{VERSION}.  {tail}",
             fg=FG_WARN, cursor="hand2")
         self.warn_lbl.bind("<Button-1>", lambda _e: self._on_update_click())
+        # The header button stops being a question at the same moment, however
+        # the version was found — the automatic check never touched it before,
+        # so it sat reading "Check updates" beside a notice line announcing the
+        # answer. Skipped while a flash or a check owns the label.
+        if self._upd_btn_after is None and not self._upd_checking:
+            self.m_update.config(text=self._update_btn_label())
 
     def _check_updates_clicked(self):
         """The header's manual check. The result lands on the button itself,
@@ -6527,8 +6457,11 @@ class Overlay:
             self._flash_update_btn("Checks disabled")
             return
         if UPDATE["latest"]:
-            # Already found — nothing left to ask GitHub; repeat the answer.
-            self._flash_update_btn(f"{UPDATE['latest']} available")
+            # Already found, so there is nothing left to ask GitHub — and the
+            # button has stopped being a question. It now reads "Update to
+            # X.Y.Z", so a click on it is the answer to that, not a request to
+            # re-run a check whose result is already on the button.
+            self._on_update_click()
             return
         self._upd_checking = True
         self._flash_update_btn("Checking ...", reset=False)
@@ -6566,9 +6499,25 @@ class Overlay:
                 UPDATE_BTN_FLASH_MS, self._reset_update_btn)
 
     def _reset_update_btn(self):
+        """Back to the resting label — which is not always "Check updates".
+
+        Once a version has been found the button stops being a question and
+        becomes the action, so it says so. Leaving it reading "Check updates"
+        meant the one control that already knew the answer still looked like
+        the way to ask, and clicking it did nothing but repeat itself."""
         self._upd_btn_after = None
-        if not self._upd_checking:
-            self.m_update.config(text="Check updates")
+        if self._upd_checking:
+            return
+        self.m_update.config(text=self._update_btn_label())
+
+    def _update_btn_label(self):
+        if not UPDATE["latest"]:
+            return "Check updates"
+        # "Get" rather than "Update to" when we can't install it ourselves —
+        # the click opens the download page, and the label should not promise
+        # an update that is going to be a browser tab.
+        verb = "Update to" if self._can_self_update() else "Get"
+        return f"{verb} {UPDATE['latest']}"
 
     def _can_self_update(self):
         return IS_FROZEN and bool(UPDATE["asset"])
@@ -6587,7 +6536,17 @@ class Overlay:
         self._open_url(UPDATE["url"])
 
     def _on_update_click(self):
-        if self._updating:
+        if self._updating or self._upd_resolving:
+            return
+        # A version found from the TAG list carries no installer, and that says
+        # nothing about whether one exists: /releases/latest 404s while a
+        # release is being published, and fails outright on GitHub's
+        # unauthenticated rate limit (~60/hour, and loading screens spend it).
+        # Both land on the tag fallback. Sending an installed build to a
+        # browser on that evidence is the wrong answer to "update me", so ask
+        # once more before believing it.
+        if IS_FROZEN and UPDATE["latest"] and not UPDATE["asset"]:
+            self._resolve_asset_then_update()
             return
         if not self._can_self_update():
             self._open_update()
@@ -6599,14 +6558,55 @@ class Overlay:
         # what stops a double-click starting two downloads.
         self._start_self_update()
 
-    def _start_self_update(self):
-        """Download the new installer behind a small progress window, then
-        hand off to the helper and exit.
+    def _resolve_asset_then_update(self):
+        """Look the release up BY TAG, then update — or fall back honestly.
 
-        The meter's own part deliberately ends at "downloaded": a running exe
-        can't be overwritten, so installing has to happen after this process
-        is gone. spawn_update_helper's script waits for exactly that, runs
-        the installer silently, and starts the new build."""
+        Off the Tk thread: a click must not stall the overlay for the length of
+        a network timeout. The button says what it is doing, because the gap
+        between the click and the download starting is otherwise a click that
+        appeared to do nothing.
+        """
+        self._upd_resolving = True
+        self._flash_update_btn("Checking ...", reset=False)
+        tag = UPDATE["latest"]
+
+        def work():
+            asset_url, size = None, 0
+            try:
+                rel = _fetch_json(UPDATE_API_RELEASE_TAG + str(tag))
+                asset_url, size = _release_installer_asset(rel)
+            except Exception as e:
+                print(f"[update] no installer resolved for {tag}: {e}",
+                      file=sys.stderr)
+
+            def finish():
+                self._upd_resolving = False
+                if asset_url:
+                    UPDATE["asset"], UPDATE["asset_size"] = asset_url, size
+                    print(f"[update] installer found for {tag} on retry.",
+                          file=sys.stderr)
+                    self._start_self_update()
+                    return
+                # Genuinely nothing to install — this release has no Setup.exe
+                # attached, or GitHub is still unreachable. The browser is the
+                # only remaining answer.
+                self._reset_update_btn()
+                self._open_update()
+
+            self._enqueue(finish)()
+
+        threading.Thread(target=work, daemon=True,
+                         name="update-asset-retry").start()
+
+    def _start_self_update(self):
+        """Download the new installer behind a small progress window, then ask
+        whether to run it.
+
+        The meter's own part deliberately ends at "downloaded and opened": a
+        running exe can't be overwritten, so the install itself happens after
+        this process is gone. Nothing waits around for that on our behalf —
+        the installer is opened normally, we close, and Inno does the rest
+        (including offering to start the meter again). See open_installer."""
         print(f"[update] self-update to {UPDATE['latest']} started.",
               file=sys.stderr)
         self._updating = True
@@ -6676,6 +6676,10 @@ class Overlay:
         self._upd_bar.pack(fill="x")
         self._upd_fill = self._upd_bar.create_rectangle(
             0, 0, 0, 12, fill=BG_HEADER, width=0)
+        # Kept so the download can turn this panel into the "ready to install?"
+        # question without building a second window on top of it.
+        self._upd_body = body
+        self._upd_btns = None
         win.update_idletasks()
         win.geometry(f"+{(win.winfo_screenwidth() - win.winfo_width()) // 2}"
                      f"+{(win.winfo_screenheight() - win.winfo_height()) // 3}")
@@ -6689,29 +6693,7 @@ class Overlay:
             self._update_failed(dl["err"])
             return
         if dl["complete"]:
-            self._upd_lbl.config(
-                text="Download complete — installing and restarting ...")
-            self.root.update_idletasks()
-            try:
-                spawn_update_helper(dl["path"])
-            except Exception as e:
-                self._update_failed(f"couldn't start the update helper: {e}")
-                return
-            # Breadcrumb for the build that replaces this one: it has no other
-            # way to know it arrived via the update button rather than a normal
-            # launch, and only the former earns a "what's new" window. Written
-            # after the helper is safely spawned — a marker for an update that
-            # never happened would greet the wrong version.
-            try:
-                UPDATED_MARKER.write_text(
-                    json.dumps({"version": UPDATE["latest"],
-                                "from": VERSION}), encoding="utf-8")
-            except OSError as e:
-                print(f"[update] couldn't leave the what's-new marker: {e}",
-                      file=sys.stderr)
-            print("[update] installer downloaded — handing off to the helper "
-                  "and exiting.", file=sys.stderr)
-            self._quit()
+            self._offer_installer(dl["path"])
             return
         done, total = dl["done"], dl["total"]
         if total:
@@ -6723,6 +6705,76 @@ class Overlay:
             self._upd_lbl.config(text=f"Downloading ... "
                                       f"{done / 1048576:.1f} MB")
         self.root.after(100, self._update_dl_tick)
+
+    def _offer_installer(self, installer):
+        """The download is done — ask before running it.
+
+        The old flow went straight from "downloaded" to a silent install with
+        nothing shown and nothing to agree to. Downloading is reversible;
+        executing an installer that replaces the program you are running is
+        not, so that is where the question belongs. Saying no keeps the file.
+        """
+        if self._upd_btns is not None:
+            return                      # already asked
+        self._upd_lbl.config(
+            text=f"Farever+ {UPDATE['latest']} is downloaded.\n"
+                 "The installer will open and the meter will close, so it can "
+                 "let go of Farever cleanly first.")
+        self._upd_bar.pack_forget()
+        row = self._upd_btns = tk.Frame(self._upd_body, bg=BG_BODY)
+        row.pack(fill="x", pady=(10, 0))
+
+        def go():
+            # Breadcrumb for the build that replaces this one: it has no other
+            # way to know it arrived via the update button rather than a normal
+            # launch, and only the former earns a "what's new" window. Written
+            # before the handoff, because after it this process is on its way
+            # out — but only once the user has actually said yes, or it would
+            # greet the wrong version after a decline.
+            try:
+                UPDATED_MARKER.write_text(
+                    json.dumps({"version": UPDATE["latest"],
+                                "from": VERSION}), encoding="utf-8")
+            except OSError as e:
+                print(f"[update] couldn't leave the what's-new marker: {e}",
+                      file=sys.stderr)
+            try:
+                open_installer(installer)
+            except Exception as e:
+                self._update_failed(f"couldn't open the installer: {e}")
+                return
+            # Quit AFTER launching: a process on its way out cannot reliably
+            # start another one. The installer sits on its first wizard page
+            # while we shut down, and if the user is quicker than we are, the
+            # installer's own check asks them to stop the meter.
+            print("[update] installer opened — closing the meter so it can "
+                  "install.", file=sys.stderr)
+            self._quit()
+
+        def later():
+            print(f"[update] install declined; installer kept at {installer}",
+                  file=sys.stderr)
+            if self._updwin is not None:
+                self._updwin.destroy()
+                self._updwin = None
+            self._dl = None
+            self._updating = False
+            self._refresh_visibility()
+            self.warn_lbl.config(
+                text=f"Farever+ {UPDATE['latest']} is downloaded and waiting "
+                     f"at {installer} — run it whenever you like.",
+                fg=FG_WARN)
+
+        tk.Button(row, text="Open the installer", command=go,
+                  bg=BTN_ON_BG, fg=FG_HEADER, activebackground=BTN_ON_BG_ACTIVE,
+                  activeforeground=FG_HEADER, relief="flat", bd=0,
+                  padx=14, pady=6, cursor="hand2",
+                  font=("Segoe UI", 9, "bold")).pack(side="left")
+        tk.Button(row, text="Not now", command=later,
+                  bg=BG_BODY_SOFT, fg=FG_TEXT, activebackground=BG_BAR_TRACK,
+                  activeforeground=FG_VALUE, relief="flat", bd=0,
+                  padx=14, pady=6, cursor="hand2",
+                  font=("Segoe UI", 9)).pack(side="left", padx=(8, 0))
 
     def _update_failed(self, why):
         """Put the overlay back and point the notice at the manual path. The
@@ -6742,11 +6794,31 @@ class Overlay:
 
     def on_game_exit(self, reason=""):
         """The game process went away. Safe from any thread — the frida
-        detached signal arrives on frida's own. The overlay has already
-        vanished on its own (a dead game can't hold the foreground, and the
-        focus rule hides everything), so the prompt is the one thing left on
-        screen to say what happened."""
-        self._enqueue(lambda: self._show_game_exit_prompt(reason))()
+        detached signal arrives on frida's own.
+
+        This used to assume the overlay would have vanished by itself, on the
+        grounds that a dead game can't hold the foreground. It doesn't: the
+        focus rule treats our own windows as the game's, so raising the prompt
+        below put the overlay straight back on screen, over the prompt. The
+        overlay is now stood down explicitly, before the prompt exists.
+        """
+        self._enqueue(lambda: self._on_game_exit(reason))()
+
+    def _on_game_exit(self, reason=""):
+        self._game_gone = True
+        # The hook died with the game, so the close events for whatever was
+        # open are never coming — ui_state would keep reporting the escape
+        # menu as open, and with it the control menu as unlocked, forever.
+        self.ui_state.clear()
+        self._menu_unlock = False
+        # A parse whose data source just died is not a sample of anything, and
+        # its banner maps itself directly rather than through the fade system —
+        # so it would climb back over the prompt on the next tick. Ending it is
+        # both the honest answer and the one that gets it off the screen.
+        if self._parse_state is not None:
+            self._stop_parse()
+        self._refresh_visibility()      # stand everything down FIRST
+        self._show_game_exit_prompt(reason)
 
     def _show_game_exit_prompt(self, reason=""):
         if self._game_exit_win is not None:
@@ -7324,6 +7396,33 @@ class Overlay:
         What the escape menu does NOT override is another game window on top of
         it. Options, feedback and the two confirmations are all reached through
         it, and while one of those is up the game has taken the screen back."""
+        # Once the game is gone, every window here is a readout of something
+        # that no longer exists, and the exit prompt is the only thing left
+        # with anything to say. Hide the lot — ahead of every other rule,
+        # because two of them actively argue for showing things:
+        #
+        #   * _game_has_focus() counts OUR OWN process as the game having
+        #     focus (Tk's dropdowns are separate windows and would otherwise
+        #     hide the menu you opened them from). The exit prompt is one of
+        #     our windows, so raising it made the overlay think the game was
+        #     back in the foreground and un-hid everything.
+        #   * ui_state never learns the game's windows closed — the hook died
+        #     with the process, so no close events arrive and the escape menu
+        #     stays "open" forever, holding the control menu unlocked.
+        #
+        # Both were reported as the menu rendering over the exit prompt.
+        if self._game_gone:
+            changed = False
+            for key in self._fade_win:
+                changed |= self._want_visible(key, False)
+            if changed:
+                self._start_fade()
+            # Not a faded window, so it has to be told separately.
+            try:
+                self.parsewin.withdraw()
+            except tk.TclError:
+                pass
+            return
         ooc_hidden = (self._hide_ooc and not self._menu_unlock and
                       (time.time() - self._combat_seen_at) >= HIDE_OOC_LINGER_SECS)
         # Any game window that isn't the escape menu (inventory, map, ...) owns
