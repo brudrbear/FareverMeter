@@ -1773,6 +1773,46 @@ function main() {
         } catch (e) { return ""; }
     }
 
+    // ---- damage from a status somebody else applied ----
+    // Swarmstrike Accord (`DS_Bladeleaf_Skill2`, off the Wingsabers dual blades
+    // `DS_Z1RBee_AssWiz`) blesses every ally in range, and the game credits the
+    // bonus damage to the CASTER no matter whose swing set it off. That put
+    // other people's damage on the wielder's row — a rift wielder topped the
+    // meter for work the group did.
+    //
+    // Measured 2026-08-04 (frida/boost_probe.js, 235 procs, 7 status
+    // instances, run from a BUFFED ALLY's client so caster and swinger were
+    // different objects): the blessing is a status skill instantiated PER
+    // ALLY, and `DamageResult.baseSkill.owner` is the ally carrying it — the
+    // one who actually swung. The dealer (rcx) was the caster on all 235.
+    // Cross-checked two ways that agree exactly: the instances owned by the
+    // local hero held 31 hits, and 31 procs were preceded by a local-hero
+    // swing. `ctx` and `serverSource` are null and `weakSource` is a constant
+    // across every instance, so none of those can carry it.
+    //
+    // A summon's hits proc it too (73 of the 235), and those still resolve to
+    // a hero owner, so pets land on their owner's row for free.
+    //
+    // The rule is general rather than a name match on that one skill: damage
+    // dealt by a status belongs to whoever is CARRYING the status. For an
+    // ordinary skill the owner IS the dealer and nothing moves. Only
+    // Swarmstrike Accord has been measured, so every distinct re-attribution
+    // is logged once — anything unexpected shows up in the log rather than
+    // quietly moving damage between players.
+    const reattrSeen = {};
+    function statusHolderOf(dr) {
+        try {
+            const bs = dr.add(DR.baseSkill).readPointer();
+            if (!bs || bs.isNull() || BS.owner == null) return null;
+            const owner = bs.add(BS.owner).readPointer();
+            if (!owner || owner.isNull()) return null;
+            // Type-checked for the same reason summonOwner is: this is a raw
+            // pointer, and a freed hero stops reading back as an ent.Hero.
+            if (typeName(owner) !== "ent.Hero") return null;
+            return owner;
+        } catch (e) { return null; }
+    }
+
     Interceptor.attach(daddr, {
         onEnter() {
             try {
@@ -1790,6 +1830,22 @@ function main() {
                 const r = readResult(dr);
                 if (!(r.amount > 0)) return;
                 if (pet) r.pet = pet;
+                // Only for hero-dealt hits: a summon's skill is owned by the
+                // summon, which summonOwnerOf has already resolved properly.
+                if (!pet) {
+                    const holder = statusHolderOf(dr);
+                    if (holder && !holder.equals(attributeTo)) {
+                        const sig = r.skill + "|" + (hlStr(attributeTo.add(
+                            OFF.Hero.name).readPointer()) || "?");
+                        if (!reattrSeen[sig]) {
+                            reattrSeen[sig] = 1;
+                            log("re-attributing " + r.skill + " off "
+                                + sig.split("|")[1] + " to the status holder "
+                                + "(measured: Swarmstrike Accord)");
+                        }
+                        attributeTo = holder;
+                    }
+                }
                 const who = heroIdent(attributeTo);
                 send(Object.assign({ kind: "hit" }, who, r));
             } catch (e) {}

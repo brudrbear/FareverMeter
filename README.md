@@ -197,15 +197,13 @@ Two overlay windows appear top-right:
   split — **green-teal = healing put on themselves**, always the left segment,
   the muted green for everything else — so a self-healer and a party healer read
   apart at a glance.
-  A `BOOST` column appears between `%` and `HEAL` when — and only when —
-  somebody on screen is being credited with damage they didn't deal; see
-  **Boosted damage** below.
 * **Breakdown** — the inspected player's (default: you) per-skill damage and
   per-skill healing side by side, each ordered greatest → least with a bar
   under every row (blue for damage, green for healing, green-teal for the
   self-healed share of each skill — a heal cast only on yourself is a fully
-  green-teal bar), plus
-  per-element totals.
+  green-teal bar), plus per-element totals. The run's headline numbers — damage,
+  DPS, hits, crit rate, healing, overheal and kills — sit in a tinted **summary
+  sidebar** down the left, one labelled figure each.
 
 ### Only one at a time
 
@@ -666,21 +664,18 @@ live. Solo (no group) shows just you in party mode.
   counting.
 - `Shift+\` is the last keybind. It survives because a reset is wanted *mid-fight*,
   which is exactly when the escape menu isn't an option.
-- Summon/pet damage (non-`ent.Hero` dealers) is not yet attributed to its owner.
-- **Boosted damage** (a patch quirk, live as of the July 2026 patch). *Swarmstrike
-  Accord* — the proc on **Beefury, Blessed Blade of the Farseeker**
-  (`Sword_Swarm`) — buffs everyone around the wielder so their hits deal bonus
-  damage, and the game credits that bonus to the **wielder**, not to whoever
-  swung. In a rift that is a dozen people's damage arriving under one name, and
-  it made the wielder's row meaningless. So it is counted in a `BOOST` column of
-  its own and kept out of `DMG`, `DPS`, `%`, the element split and the skill
-  breakdown — every one of which is a claim about what that player did. It is
-  *not* discarded: the damage is real and it lands, it just belongs to nobody in
-  particular, and the rift report prints it per phase and per player. The column
-  has no setting; it appears when there is boosted damage on screen and goes
-  away with it. When a patch fixes the credit, delete the `BOOST_SKILL_*` entries
-  in the **Patch quirks** block of `meter/farever_meter.py` — nothing else in the
-  file knows the skill's name.
+- **Summon and pet damage counts as yours.** Pets, imps, bees and totems deal
+  damage the meter used to watch go past and discard — about 13% of a summon
+  build's output. A summon's hits are credited to whoever summoned it, and the
+  skill breakdown names the pet by its in-game name (`Nightling Terror: Attack`).
+- **Swarmstrike Accord is credited to whoever swung.** The proc on **Wingsabers**
+  (`DS_Z1RBee_AssWiz`) blesses every ally in range, and the game credits the
+  bonus damage to the *caster* rather than to the player whose attack set it
+  off — in a rift, a dozen people's damage arriving under one name. The blessing
+  turns out to be a status instantiated per ally, so the hook credits the hit to
+  the ally carrying it and the damage lands on the right row as ordinary damage.
+  The `BOOST` column that 3.3.3 used to quarantine it is gone. Measured — see
+  TESTING.md "Patch quirks, and Swarmstrike Accord".
 - Healing is *raw* healing — every heal counts at its full size whether or not
   the target had health to restore, and `OVER` says how much of it was wasted.
   No client is ever told how much a heal healed for (measured — see
