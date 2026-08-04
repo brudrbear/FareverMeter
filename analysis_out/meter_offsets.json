@@ -21,14 +21,25 @@
     "kind": 184,
     "inf": 176,
     "owner": 328,
-    "ownerPlayer": 16
+    "ownerPlayer": 16,
+    "dynVal1": 216,
+    "dynVal2": 224,
+    "dynVal3": 232
   },
   "HitData": {
-    "baseSkill": 8
+    "baseSkill": 8,
+    "step": 160
+  },
+  "SkillStep": {
+    "index": 8
   },
   "UnitAttributes": {
     "unit": 8,
-    "health": 240
+    "health": 240,
+    "faith": 72,
+    "intellect": 80,
+    "strength": 56,
+    "dexterity": 64
   },
   "Hero": {
     "name": 1280,

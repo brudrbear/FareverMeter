@@ -19,6 +19,11 @@ datas = [
     (str(ROOT / "analysis_out" / "resolver_data.json"), "res/analysis_out"),
     (str(ROOT / "analysis_out" / "meter_offsets.json"), "res/analysis_out"),
     (str(ROOT / "analysis_out" / "item_names.json"), "res/analysis_out"),
+    (str(ROOT / "analysis_out" / "unit_names.json"), "res/analysis_out"),
+    # Without this the installed build cannot size a heal that restored
+    # nothing, and healing silently means "health actually restored" again —
+    # the bug the OVER column exists to fix.
+    (str(ROOT / "analysis_out" / "heal_specs.json"), "res/analysis_out"),
     (str(ROOT / "assets" / "farevermeter.ico"), "res/assets"),
     # Boss-fight cues. Played through Windows' own MCI, so they add two files
     # rather than an audio dependency.

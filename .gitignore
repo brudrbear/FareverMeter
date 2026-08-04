@@ -11,6 +11,9 @@ __pycache__/
 .meter_position.json
 .meter_settings.json
 
+# Your fastest boss kills. Records, not configuration — and personal either way.
+.meter_besttimes.json
+
 # Release build output from packaging/build.ps1 — a few hundred megabytes of
 # regenerated bundle. The installer it produces belongs on a GitHub release,
 # not in the repo. (assets/farevermeter.ico IS tracked: a from-source run wants

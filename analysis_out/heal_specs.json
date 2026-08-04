@@ -1,0 +1,500 @@
+{
+"Axe_Boomerang_Skill_Passive": {
+"0": [
+{
+"dyn": 1
+}
+]
+},
+"Axe_Boomerang_Skill_Passive_Status": {
+"0": [
+{
+"dyn": 1
+}
+]
+},
+"Mace_Benediction_Status": {
+"0": [
+{
+"scale": [
+[
+0.2,
+"Faith"
+]
+]
+}
+]
+},
+"Sword_Craft_Passive_Status": {
+"0": [
+{
+"scale": [
+[
+0.1,
+"Faith"
+]
+]
+}
+],
+"1": [
+{
+"scale": [
+[
+0.1,
+"Faith"
+]
+]
+}
+]
+},
+"Sword_Swarm_Combo": {
+"5": [
+{
+"scale": [
+[
+0.15,
+"Faith"
+],
+[
+0.1725,
+"Faith"
+]
+]
+}
+],
+"6": [
+{
+"base": 1,
+"dyn": 1
+}
+]
+},
+"Shield_OrbitWater_S1_OrbStatus": {
+"2": [
+{
+"base": 0,
+"scale": [
+[
+0.3,
+"Faith"
+]
+]
+}
+],
+"3": [
+{
+"base": 0,
+"scale": [
+[
+0.3,
+"Faith"
+]
+]
+}
+]
+},
+"GA_Demon_Combo": {
+"4": [
+{
+"dyn": 1
+}
+]
+},
+"GA_Demon_Passive": {
+"0": [
+{
+"dyn": 1
+}
+]
+},
+"GM_MassGrab_Skill2": {
+"11": [
+{
+"scale": [
+[
+0.4,
+"Faith"
+]
+]
+}
+]
+},
+"Book_WaterOrbs_Passive_Status": {
+"0": [
+{
+"scale": [
+[
+0.3,
+"Faith"
+]
+]
+}
+]
+},
+"Scepter_Start_Skill2": {
+"3": [
+{
+"scale": [
+[
+1,
+"Faith"
+]
+]
+}
+]
+},
+"Scepter_Flamie_Flamie": {
+"1": [
+{
+"scale": [
+[
+0.1,
+"Faith"
+]
+]
+}
+]
+},
+"Halos_Totem_SummonPassive": {
+"0": [
+{
+"scale": [
+[
+0.06,
+"Intellect"
+],
+[
+0.06,
+"Faith"
+]
+]
+}
+]
+},
+"Halos_Demon_Passive_Status": {
+"1": [
+{
+"scale": [
+[
+0.7,
+"Intellect"
+],
+[
+0.875,
+"Intellect"
+]
+]
+}
+]
+},
+"Crescent_FlowerSpiral_Skill_2_Status": {
+"0": [
+{
+"base": 1,
+"dyn": 1
+}
+]
+},
+"Fists_LightMonk_Combo": {
+"6": [
+{
+"base": 0,
+"dyn": 1
+}
+]
+},
+"Staff_SummonDemon_Skill1": {
+"4": [
+{
+"scale": [
+[
+0.2,
+"Intellect"
+]
+]
+}
+]
+},
+"Staff_Censer_Skill1": {
+"5": [
+{
+"scale": [
+[
+0.4,
+"Faith"
+]
+]
+}
+]
+},
+"Staff_Censer_Ultimate": {
+"7": [
+{
+"scale": [
+[
+5,
+"Faith"
+]
+]
+}
+]
+},
+"Warrior_IgnorePain": {
+"3": [
+{
+"dyn": 1
+}
+]
+},
+"Warrior_BerserkStatus": {
+"0": [
+{
+"dyn": 1
+}
+]
+},
+"Warrior_Talent_Bloodfeast": {
+"0": [
+{
+"dyn": 1
+}
+]
+},
+"Rogue_Talent_LeechingPoison": {
+"0": [
+{
+"dyn": 1
+}
+]
+},
+"Rogue_Talent_RegeneratingMiasmas": {
+"0": [
+{
+"dyn": 1
+}
+]
+},
+"Priest_Prayer_Life": {
+"1": [
+{
+"scale": [
+[
+1,
+"Faith"
+]
+]
+}
+]
+},
+"Priest_FaithfulWinds": {
+"3": [
+{
+"scale": [
+[
+1.2,
+"Faith"
+]
+]
+}
+]
+},
+"Priest_RadiantVerdict": {
+"2": [
+{
+"dyn": 1
+}
+]
+},
+"Priest_BeaconOfHope_Status": {
+"1": [
+{
+"dyn": 2
+}
+]
+},
+"Priest_Talent_SoothingRays": {
+"0": [
+{
+"dyn": 1
+}
+]
+},
+"Mage_RayOfSpark": {
+"8": [
+{
+"base": 0,
+"dyn": 2
+}
+]
+},
+"Mage_ChronoReset": {
+"2": [
+{
+"scale": [
+[
+1,
+"MaxHealth"
+]
+]
+}
+]
+},
+"Mage_Talent_ConduitLifebolt_Conduit": {
+"1": [
+{
+"scale": [
+[
+0.25,
+"Intellect"
+]
+]
+}
+]
+},
+"ManfishCaster_HealBeam": {
+"1": [
+{
+"scale": [
+[
+1.2,
+"FoePower"
+]
+]
+}
+]
+},
+"Crimson_Book_Skill": {
+"1": [
+{
+"scale": [
+[
+1.5,
+"FoePower"
+]
+]
+}
+]
+},
+"BeeWatcher_RevitalizingHoney": {
+"4": [
+{
+"scale": [
+[
+1,
+"FoePower"
+]
+]
+}
+]
+},
+"MChuck_IsolatedHeal": {
+"0": [
+{
+"scale": [
+[
+0.00125,
+"MaxHealth"
+]
+]
+}
+]
+},
+"CleodoraFeeder_Beam": {
+"2": [
+{
+"scale": [
+[
+0.1,
+"FoePower"
+]
+]
+}
+]
+},
+"Phrixes_Phase2Entry": {
+"4": [
+{
+"scale": [
+[
+1,
+"MaxHealth"
+]
+]
+}
+]
+},
+"Cannon_HoneyShot_Liquid": {
+"1": [
+{
+"scale": [
+[
+0.5,
+"Strength"
+]
+]
+}
+]
+},
+"Enchant_SparkHarvesting": {
+"0": [
+{
+"base": 5
+}
+]
+},
+"Enchant_Lifestealing": {
+"1": [
+{
+"base": 10
+}
+]
+},
+"Trinket_Manfish_Status": {
+"0": [
+{
+"scale": [
+[
+0.1,
+"MaxHealth"
+]
+]
+}
+]
+},
+"Trinket_Demon": {
+"0": [
+{
+"scale": [
+[
+0.05,
+"Strength"
+],
+[
+0.05,
+"Dexterity"
+],
+[
+0.05,
+"Intellect"
+],
+[
+0.05,
+"Faith"
+]
+]
+}
+]
+},
+"OreAffix_Nature_Status": {
+"0": [
+{
+"scale": [
+[
+0.1,
+"MaxHealth"
+]
+]
+}
+]
+}
+}

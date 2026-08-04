@@ -1725,16 +1725,30 @@ function main() {
     });
 
     // ---- healing ----
-    // Heals are computed server-side only (ent.Unit.receiveHeal, computeHeal
-    // and the *HealEval callbacks never run on clients), and the display RPC
-    // is rare — so healing is captured from what IS replicated:
+    // A client is never told how much a heal healed for. Measured 2026-08-03
+    // (frida/run_heal.py, 40 heal events across 6 healers and 4 skills): of the
+    // fifteen heal entry points in this build, ONLY ent.Unit.playHitHealFX runs
+    // on a client, and its HitData.amount reads 0.000. receiveHeal, computeHeal,
+    // evalHeal, the four *HealEval callbacks, applyHeal, rpcDisplayHeal(__impl)
+    // and ui.hud.EffectsFeed.displayHeal never fire here at all.
+    //
+    // So healing is captured from the two things that ARE replicated:
     //   * ent.Unit.playHitHealFX(target=rcx, hitData=rdx): fires on every
-    //     healed unit; HitData.baseSkill names the healing skill and its
-    //     owner (the healer). No amount (HitData.amount reads 0 on clients).
+    //     healed unit; HitData.baseSkill names the healing skill and its owner
+    //     (the healer). This is the heal EVENT — it happens whether or not the
+    //     target had any health to restore.
     //   * ent.UnitAttributes.set_health(attrs=rcx, v): the replicated health
-    //     value. A RISE in a hero's health is the effective heal amount.
-    // Each health rise is attributed to the most recent heal FX seen on that
-    // unit; FX-less rises while in combat are natural regen (self-heal), and
+    //     value. A RISE in a hero's health is how much of that heal LANDED.
+    //
+    // Every FX is emitted exactly once, with `landed` = the health rise it
+    // produced or 0 if it produced none — a heal on a full-health target is a
+    // real heal and the meter has to see it. (Before this, only rises were
+    // sent, so a healer topping people off scored nothing and the parse
+    // measured who healed FASTEST rather than who healed HARDEST.) The host
+    // turns `landed` into a raw amount and an overheal share; the agent stays
+    // out of that so the estimator can change without a re-inject.
+    //
+    // FX-less rises while in combat are natural regen (self-heal), and
     // out-of-combat regen / spawn replication (old health 0) is dropped.
     function skillOwnerIdent(bs) {
         const owner = bs.add(OFF.BaseSkill.owner).readPointer();
@@ -1761,12 +1775,97 @@ function main() {
             + "healing capture disabled — re-run hltools/build_targets.py "
             + "and hltools/emit_offsets.py");
     } else {
-        const pendingHealFx = {};   // target unit ptr -> {t, who, skill, name}
-        setInterval(function () {   // prune stale FX (overheal never lands)
+        // target unit ptr -> queue of heal FX awaiting a health rise. A QUEUE,
+        // not a slot: two healers can land on the same target inside the match
+        // window, and the old single-slot map dropped the first one outright.
+        const pendingHealFx = {};
+        const HEAL_MATCH_MS = 1500;   // how long an FX waits for its rise
+        const HEAL_QUEUE_MAX = 32;    // a HoT storm must not grow without bound
+
+        // `est` marks an event whose size the host is allowed to estimate —
+        // i.e. one that came from a heal FX, where `landed` may be a capped
+        // view of a bigger heal. Natural regen is NOT estimable: it has no FX,
+        // it is only ever observed AS the health rise, and running it through
+        // the estimator would credit every small tick at the largest tick's
+        // size.
+        function emitHeal(fx, landed, estimable) {
+            send(Object.assign({ kind: "heal", skill: fx.skill, name: fx.name,
+                                 element: "Heal", amount: landed,
+                                 landed: landed, est: estimable ? 1 : 0,
+                                 self: fx.slf ? 1 : 0,
+                                 step: fx.step, dyn: fx.dyn, atb: fx.atb,
+                                 crit: 0, kill: 0 }, fx.who));
+        }
+
+        // What a heal was WORTH, as far as a client can see it. The amount is
+        // never sent (measured — see the note above), but the cdb says how the
+        // game computes each skill's heal, and both of its ingredients ARE
+        // here: BaseSkill.dynVal1-3 are replicated, and a scaling heal is a
+        // ratio on one of the caster's attributes. So the raw numbers ride
+        // along with every heal event and the host does the arithmetic against
+        // analysis_out/heal_specs.json.
+        function healInputs(bs, hitData, fx) {
+            try {
+                const B2 = OFF.BaseSkill;
+                if (B2.dynVal1 != null) {
+                    fx.dyn = [bs.add(B2.dynVal1).readDouble(),
+                              bs.add(B2.dynVal2).readDouble(),
+                              bs.add(B2.dynVal3).readDouble()];
+                }
+                // Which step fired: a skill can heal from more than one step
+                // at different rates (Sword_Swarm_Combo does), and the spec is
+                // per step index.
+                if (HD.step != null && OFF.SkillStep) {
+                    const st = hitData.add(HD.step).readPointer();
+                    if (st && !st.isNull())
+                        fx.step = st.add(OFF.SkillStep.index).readS32();
+                }
+                // The caster's attributes. `owner` is the healing unit, which
+                // for a totem or a summon is the totem — its stats, not the
+                // summoner's. Accepted: those skills are a small minority and
+                // the landed-heal fallback still covers them.
+                const owner = bs.add(OFF.BaseSkill.owner).readPointer();
+                if (owner && !owner.isNull() && OFF.Unit.attr != null) {
+                    const at = owner.add(OFF.Unit.attr).readPointer();
+                    if (at && !at.isNull() && at.compare(ptr("0x10000")) > 0) {
+                        fx.atb = {
+                            Faith: at.add(UA.faith).readDouble(),
+                            Intellect: at.add(UA.intellect).readDouble(),
+                            Strength: at.add(UA.strength).readDouble(),
+                            Dexterity: at.add(UA.dexterity).readDouble(),
+                        };
+                    }
+                }
+            } catch (e) {}
+        }
+
+        // Did the healer heal THEMSELVES? Pointer identity settles it when the
+        // skill's owner is the healed hero. The name fallback exists for the
+        // skills a player owns but does not personally cast — a totem or a
+        // summon healing the player who put it down is still that player
+        // healing themselves, and there the owner pointer is the totem.
+        function isSelfHeal(bs, target, who) {
+            try {
+                const owner = bs.add(OFF.BaseSkill.owner).readPointer();
+                if (owner && !owner.isNull() && owner.equals(target)) return 1;
+                const tn = hlStr(target.add(OFF.Hero.name).readPointer());
+                return (tn && who.player === tn) ? 1 : 0;
+            } catch (e) { return 0; }
+        }
+
+        function flushExpired(q, now) {
+            // Nothing rose within the window, so this heal restored nothing.
+            // It still happened — emit it with landed 0 rather than drop it.
+            while (q.length && now - q[0].t > HEAL_MATCH_MS) emitHeal(q.shift(), 0, true);
+        }
+
+        setInterval(function () {
             const now = Date.now();
-            for (const k in pendingHealFx)
-                if (now - pendingHealFx[k].t > 5000) delete pendingHealFx[k];
-        }, 2000);
+            for (const k in pendingHealFx) {
+                flushExpired(pendingHealFx[k], now);
+                if (!pendingHealFx[k].length) delete pendingHealFx[k];
+            }
+        }, 250);
 
         Interceptor.attach(base.add(fxFi * 8).readPointer(), {
             onEnter() {
@@ -1780,10 +1879,17 @@ function main() {
                     const who = skillOwnerIdent(bs);
                     if (!who) return;
                     const skill = hlStr(bs.add(BS.kind).readPointer()) || "?";
-                    pendingHealFx[target.toString()] = {
-                        t: Date.now(), who: who, skill: skill,
-                        name: skill !== "?" ? skillDisplayName(bs, skill) : "",
-                    };
+                    const key = target.toString();
+                    const q = pendingHealFx[key] || (pendingHealFx[key] = []);
+                    if (q.length >= HEAL_QUEUE_MAX) emitHeal(q.shift(), 0, true);
+                    const fx = { t: Date.now(), who: who, skill: skill,
+                                 slf: isSelfHeal(bs, target, who),
+                                 name: skill !== "?" ? skillDisplayName(bs, skill) : "" };
+                    // Read NOW, not when the event is emitted: an FX that never
+                    // lands is flushed up to 1.5 s later, by which time the
+                    // skill may have been re-cast (dynVal1 rewritten) or freed.
+                    healInputs(bs, c.rdx, fx);
+                    q.push(fx);
                 } catch (e) {}
             }
         });
@@ -1804,22 +1910,24 @@ function main() {
                     const unit = this.attrs.add(UA.unit).readPointer();
                     if (typeName(unit) !== "ent.Hero") return;
                     const key = unit.toString();
-                    const fx = pendingHealFx[key];
-                    let who, skill, sname;
-                    if (fx && Date.now() - fx.t < 1500) {
-                        who = fx.who; skill = fx.skill; sname = fx.name;
-                        delete pendingHealFx[key];
-                    } else {
-                        // FX-less rise: natural regen. Only meaningful in
-                        // combat — out-of-combat regen is constant noise.
-                        if (!unit.add(OFF.Hero.isInCombat).readU8()) return;
-                        who = heroIdent(unit);
-                        skill = "Regen"; sname = "Regen";
+                    const q = pendingHealFx[key];
+                    let fx = null;
+                    if (q) {
+                        // Anything past the window can't own this rise; emit
+                        // those as the zero-landing heals they are, then take
+                        // the oldest survivor.
+                        flushExpired(q, Date.now());
+                        if (q.length) fx = q.shift();
+                        if (!q.length) delete pendingHealFx[key];
                     }
-                    send(Object.assign({ kind: "heal", skill: skill,
-                                         name: sname, element: "Heal",
-                                         amount: delta, crit: 0, kill: 0 },
-                                       who));
+                    if (fx) { emitHeal(fx, delta, true); return; }
+                    // FX-less rise: natural regen. Only meaningful in
+                    // combat — out-of-combat regen is constant noise.
+                    if (!unit.add(OFF.Hero.isInCombat).readU8()) return;
+                    // Regen is self-healing by definition: the unit whose
+                    // health rose is both the healer and the healed.
+                    emitHeal({ who: heroIdent(unit), skill: "Regen",
+                               name: "Regen", slf: 1 }, delta, false);
                 } catch (e) {}
             }
         });

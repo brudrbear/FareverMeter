@@ -2,11 +2,12 @@
 farever_meter.py — Farever+ party damage meter (memory-reading edition).
 
 Attaches to Farever via Frida, injects meter_hook.js (which hooks the game's
-own ent.Unit.onInflictDamage / ent.Unit.receiveHeal and streams every player's
-damage and healing with real spell IDs), and renders two overlay windows:
+own ent.Unit.onInflictDamage and ent.Unit.playHitHealFX and streams every
+player's damage and healing with real spell IDs), and renders two overlay
+windows:
 
-  * the METER: every player sorted by damage done, with damage/DPS/% and
-    healing-done columns, and
+  * the METER: every player sorted by damage done, with damage/DPS/%, healing
+    done and the share of it that was overheal, and
   * the BREAKDOWN: the inspected player's per-skill damage and per-skill
     healing side by side, plus per-element totals.
 
@@ -94,6 +95,11 @@ POSITION_CACHE = _WRITABLE / ".meter_position.json"
 # positions" clears that file, and it has no business resetting your theme and
 # your Show/hide ticks along with it.
 SETTINGS_CACHE = _WRITABLE / ".meter_settings.json"
+# Your fastest kill of each boss. Beside the two caches above rather than
+# inside either: "Reset window positions" must not erase records, and the
+# settings file is rewritten on every toggled checkbox — a record only needs
+# writing when it's beaten. Same home as the positions, so it survives updates.
+BEST_TIMES_CACHE = _WRITABLE / ".meter_besttimes.json"
 PARSES_DIR = _WRITABLE / "parses"   # finished-parse images land here (gitignored)
 LOG_FILE = DATA_HOME / "meter.log"
 TARGET_PROCESS = "Farever.exe"
@@ -198,6 +204,12 @@ HIDE_OOC_LINGER_SECS = 5.0
 TOP_STRIP_HINT = 96
 TOP_STRIP_PARSE = 140
 TOP_STRIP_RIFT = 190
+# The boss kill-time toast, below all three: the hint and the parse banner
+# share the strips above, and the rift panel's default sits at 190. A kill can
+# coincide with any of them (a parsed boss, a world boss with a countdown up),
+# so it gets its own line rather than a timeshare.
+TOP_STRIP_KILL = 240
+KILL_TOAST_SECS = 8.0       # how long the time stays on screen
 
 OVERLAY_ALPHA = 0.94
 # Extra see-through on top of that, from the Transparency slider. 0 leaves the
@@ -602,12 +614,18 @@ COMPASS_DIST_GAP = 30
 # nearly black, and nearly black on black is not a badge.
 COMPASS_DIST_BOX = "#000000"
 COMPASS_DIST_BOX_INK = "#EDEFF5"
-# Tk canvas items have no alpha, so the badge is knocked back with a stipple
-# instead: a bitmap pattern that leaves a quarter of its pixels unpainted, and
-# unpainted here means the transparency key, which means the game. Dithered
-# rather than blended — at "gray75" it reads as a slightly softened black, and
-# anything sparser starts to look like a screen door.
-COMPASS_DIST_STIPPLE = "gray75"
+# Tk canvas items have no alpha, so the badge can't be knocked back where it's
+# drawn: on the colorkey window a pixel is either a solid colour or a hole to
+# the game, nothing between. It spent two versions faking it with a "gray75"
+# stipple — three-quarters of the pixels painted, a quarter left as holes —
+# which averages to the right darkness and reads as dither the moment you look
+# at it. The boxes now live on their own layered window glued under the
+# compass (see _build_compass), because whole-window opacity is the one kind
+# of blending Windows does give us. This is that window's opacity, multiplied
+# by whatever the compass itself is currently faded to (_sync_badgewin), so
+# the badges keep exactly the knocked-back-relative-to-the-numbers look the
+# stipple was approximating.
+COMPASS_DIST_BOX_ALPHA = 0.75
 COMPASS_DIST_PAD_X = 3.0        # px at 100%, around the text
 COMPASS_DIST_PAD_Y = 0.5
 # Square corners, and not for want of trying. The badge is 13px tall — a 12px
@@ -802,6 +820,24 @@ REPORT_HEAL = "#8AE28A"         # the healer's colour, distinct from any medal
 ACCENT = "#3D7C7C"
 DMG_BAR = "#5279B5"       # blue — damage bars
 HEAL_BAR = "#5E9C4A"      # green — healing bars
+# Healing done to yourself, drawn as the LEFT segment of every healing bar so
+# the split reads at a glance down a column. A washed-out green — the same
+# family as HEAL_BAR, because healing yourself is still healing. It was teal
+# first (read as a shield), then off-white (too stark next to the green).
+#
+# The shade is measured, not picked, and it is pinned between two limits:
+#   * 2.60:1 luminance against HEAL_BAR. The segments sit edge to edge with no
+#     gap, so this separation is the whole thing that has to hold at four
+#     pixels tall.
+#   * the FAREVER theme's bar track (#D9C09A) is the binding constraint — a
+#     light tan, and going greener collapses onto it fast (#B4D2A6 lands at
+#     1.06:1 and is invisible).
+# On that track the greyscale ratio is only 1.28:1, which reads as marginal and
+# isn't: the two differ in HUE more than in lightness, and measured as colour
+# rather than as brightness the gap is deltaE 17.3 — seven times the
+# just-noticeable step. A contrast ratio cannot see that, which is why
+# heal_color_check.py screenshots each theme and compares in Lab.
+SELF_HEAL_BAR = "#D8E9D0"
 TRANSPARENT_KEY = "#010101"
 
 # The countdown box escalates as the rift approaches: ordinary Farever colours
@@ -895,7 +931,11 @@ MOUNT_MODES = ("Random", "Cycle")
 # comfortable page. It also has to fit the Social tab's widest row — a name, a
 # class, a level and two buttons — without that row deciding the window size on
 # its own.
-MIN_W = {"meter": 360, "detail": 320, "menu": 620, "prompt": 320,
+# The meter grew by one 6-cell column (OVER%) when healing stopped meaning
+# "health restored" and started meaning "healing done", and the floor had to
+# grow with it or the new column would be drawn off the right edge of every
+# window narrow enough to be at the old minimum.
+MIN_W = {"meter": 404, "detail": 320, "menu": 620, "prompt": 320,
          "update": 380}
 # The update offer's body text wrap. Wider than the rift prompt's because it
 # explains what pressing the button will do, which is two sentences rather than
@@ -955,6 +995,7 @@ THEME_DEFAULT = {
     "fg_header": FG_HEADER, "fg_header_dim": FG_HEADER_DIM,
     "fg_text": FG_TEXT, "fg_value": FG_VALUE, "fg_dim": FG_DIM,
     "accent": ACCENT, "dmg": DMG_BAR, "heal": HEAL_BAR,
+    "heal_self": SELF_HEAL_BAR,
     "header_off": "#4A4441",
     # The map matches the meter on this theme. The panel used to be dark on
     # every theme, on the reasoning that a map is not a damage table — still
@@ -995,6 +1036,7 @@ THEME_RIFT = {
     "fg_header": RIFT_TIME, "fg_header_dim": "#F0A8CC",
     "fg_text": "#FFC9E4", "fg_value": "#FFFFFF", "fg_dim": "#C77AA0",
     "accent": RIFT_TITLE, "dmg": DMG_BAR, "heal": HEAL_BAR,
+    "heal_self": SELF_HEAL_BAR,
     "header_off": "#3B3036",
     "map_body": RIFT_BODY,
 }
@@ -1445,6 +1487,205 @@ def _pretty_id(sid: str) -> str:
 # ---------------------------------------------------------------------------
 # Aggregation
 # ---------------------------------------------------------------------------
+def _stamp_report_classes(report, world):
+    """Freeze each player's class acronym into a finished rift report.
+
+    Done once, at the kill, because the report is saved to disk and re-opened
+    later — by then the world sweep has long forgotten a stranger who was in
+    the rift, and the card would show a row of blanks. A player the sweep never
+    saw gets "" and simply has no acronym."""
+    for ph in report.get("phases", ()):
+        for p in ph.get("players", ()):
+            p["cls"] = _class_tag(world.class_of(p.get("name")))
+
+
+def _report_name(p):
+    """`Brudr (War)` for the report — the acronym only when one is known."""
+    name = p.get("name") or "?"
+    return f"{name} ({p['cls']})" if p.get("cls") else name
+
+
+def _overheal_note(d, fmt=" ({:.0f}% over)"):
+    """The overheal clause for a report dict, or "" when there is none to give.
+
+    Rift reports are reloaded from JSON on disk, and a file written before
+    healing meant RAW healing carries `heal` but no `heal_landed`. Treating
+    that absence as zero would stamp every archived report 100% overheal, so
+    an old report simply says nothing about overhealing — which is the truth
+    about what it recorded."""
+    landed = d.get("heal_landed")
+    heal = d.get("heal") or 0.0
+    if landed is None or heal <= 0.5:
+        return ""
+    return fmt.format(_overheal_pct(heal, landed))
+
+
+def _overheal_pct(total, landed):
+    """Share of `total` healing that restored no health, as a percentage.
+
+    Clamped at 0 because the two figures come from different observations —
+    a health rise can be attributed to a heal whose estimated size is smaller
+    than the rise itself (a regen tick landing inside a heal's match window,
+    say), and "-3% overheal" is not a thing to show anyone."""
+    if not total or total <= 0.0:
+        return 0.0
+    return max(0.0, (total - landed) / total * 100.0)
+
+
+class HealSizeEstimator:
+    """How big was that heal? The client is never told, so this estimates it.
+
+    Measured 2026-08-03 (`frida/run_heal.py`, 40 heal events across 6 healers
+    and 4 skills): of the fifteen heal entry points in the build, ONLY
+    `ent.Unit.playHitHealFX` runs client-side, and its `HitData.amount` reads
+    0.000. `receiveHeal`, `computeHeal`, `evalHeal`, the four `*HealEval`
+    callbacks, `applyHeal`, `rpcDisplayHeal(__impl)` and
+    `ui.hud.EffectsFeed.displayHeal` never fire on a client at all. The only
+    heal quantity observable here is the RISE in the target's replicated
+    health — which is zero when the target is already full.
+
+    A heal's size is therefore estimated as the HIGH-WATER MARK of what that
+    player's casts of that skill have been seen to restore. A cast on a target
+    missing more health than the heal restores lands in full, so the largest
+    observation converges on the true per-cast value from below; every smaller
+    one is a cast that was capped by the target's missing health, and every
+    zero is a cast that was capped completely.
+
+    Deliberately the maximum, not a mean or a quantile. Capping biases
+    observations DOWN and there is no way to tell a capped observation from an
+    uncapped one — `ent.UnitAttributes.maxHealth` reads 0 for heroes (measured
+    in the same session), so "how hurt was the target" isn't available either.
+    Averaging would report a healer as weaker the healthier their party was,
+    which is the exact bug this replaces. The known cost is crits: once a skill
+    has been seen to crit it is credited its crit value on every cast, so a
+    crit-heavy healing build reads somewhat high.
+
+    The window bounds that across a session — levels, gear and talent changes
+    all move a skill's real value, and a lifetime maximum would pin the
+    estimate to the best it ever was.
+
+    Called only from the hook's message thread (the same thread that feeds
+    PartySession), so it needs no lock of its own.
+    """
+
+    WINDOW = 64          # observations kept per (player, skill)
+
+    def __init__(self, specs=None):
+        self._obs: dict[tuple, deque] = defaultdict(
+            lambda: deque(maxlen=self.WINDOW))
+        # skill id -> {step index: [effect spec, ...]} out of the game's own
+        # data.cdb (analysis_out/heal_specs.json). This is what makes a heal
+        # on a full-health target countable at all, so its absence is worth
+        # saying out loud rather than quietly falling back.
+        self._specs = specs or {}
+        self._computed = 0      # heals sized from the game's own numbers
+        self._guessed = 0       # ...and heals that fell back to observation
+        self._unsized = 0       # ...and heals nothing could size
+        # skill -> (landed/computed, landed, computed) for the worst case seen
+        self._audit: dict[str, tuple] = {}
+
+    def size_from_spec(self, ev):
+        """The heal's real size, computed the way the game computes it.
+
+        `dyn` heals carry their amount in BaseSkill.dynVal1-3, which the server
+        replicates; `scale` heals are a ratio on one of the caster's
+        attributes. Both arrive on the event from the hook. Returns None when
+        this skill isn't in the table, or when the inputs it needs are missing
+        — a summon's attributes, say, or a step index that didn't match."""
+        steps = self._specs.get(ev.get("skill"))
+        if not steps:
+            return None
+        specs = steps.get(str(ev.get("step")))
+        if specs is None:
+            # One heal step is the common case (39 of 44 skills). When there is
+            # exactly one, a step index that didn't line up doesn't matter.
+            if len(steps) != 1:
+                return None
+            specs = next(iter(steps.values()))
+        dyn, atb = ev.get("dyn") or [], ev.get("atb") or {}
+        total = 0.0
+        for spec in specs:
+            amount = 0.0
+            # A spec carrying both is a dyn with a floor: the dyn is the real
+            # value and the base is what it falls back to.
+            n = spec.get("dyn")
+            if n and len(dyn) >= n and dyn[n - 1]:
+                amount = float(dyn[n - 1])
+            elif spec.get("scale"):
+                for ratio, name in spec["scale"]:
+                    if name not in atb:
+                        return None      # MaxHealth/FoePower — not readable
+                    amount += float(ratio) * float(atb[name])
+            if not amount:
+                amount = float(spec.get("base") or 0.0)
+            total += amount
+        return total if total > 0 else None
+
+    def stamp(self, ev: dict) -> None:
+        """Fold one heal event in and fill in its raw size.
+
+        `landed` (what the health bar actually moved) arrives from the hook;
+        `amount` leaves as the estimated size of the heal itself. Every
+        downstream consumer already reads `amount`, so healing totals become
+        raw healing without any of them knowing about the estimate."""
+        landed = float(ev.get("landed", ev.get("amount", 0.0)) or 0.0)
+        ev["landed"] = landed
+        if not ev.get("est"):
+            ev["amount"] = landed          # regen: observed AS the rise
+            return
+        obs = self._obs[(ev.get("player") or "?", ev.get("skill") or "?")]
+        if landed > 0:
+            obs.append(landed)
+        # The game's own numbers first — they are right on the very first cast
+        # and don't care whether the target had room for the heal. Observation
+        # is only the fallback for the skills the table can't size.
+        spec = self.size_from_spec(ev)
+        if spec is not None:
+            self._computed += 1
+            ev["sized"] = "spec"
+        else:
+            spec = max(obs) if obs else 0.0
+            if spec > 0:
+                self._guessed += 1
+                ev["sized"] = "seen"
+            else:
+                self._unsized += 1
+                ev["sized"] = "none"
+        # A size can never make a measured heal smaller than it actually was.
+        ev["amount"] = max(landed, spec)
+        # Ground truth, collected from ordinary play rather than a probe: a
+        # heal that LANDED in full is a direct measurement of what that heal
+        # was worth, so a computed size below it means the formula is wrong.
+        # (Above it is expected and means nothing — the target was topped off.)
+        if ev.get("sized") == "spec" and landed > 0:
+            key = ev.get("skill") or "?"
+            worst = self._audit.get(key)
+            ratio = landed / spec if spec > 0 else 0.0
+            if worst is None or ratio > worst[0]:
+                self._audit[key] = (ratio, landed, spec)
+
+    def drain_report(self):
+        """A one-line summary for the log, or None when nothing has healed.
+
+        The `under` entries are the ones worth reading: a skill whose computed
+        size came out BELOW what it was measured to restore is a formula that
+        needs fixing, not a rounding artifact."""
+        computed, guessed, unsized = (self._computed, self._guessed,
+                                      self._unsized)
+        if not (computed or guessed or unsized):
+            return None
+        under = sorted((k, v) for k, v in self._audit.items() if v[0] > 1.02)
+        self._computed = self._guessed = self._unsized = 0
+        self._audit = {}
+        line = (f"[meter] heal sizing: {computed} computed, "
+                f"{guessed} from observation, {unsized} unsized")
+        if under:
+            line += "   UNDER-COMPUTED: " + ", ".join(
+                f"{k} landed={v[1]:.0f} vs computed={v[2]:.0f}"
+                for k, v in under[:4])
+        return line
+
+
 @dataclass
 class PlayerAgg:
     name: str
@@ -1454,12 +1695,16 @@ class PlayerAgg:
     hits: int = 0
     crits: int = 0
     kills: int = 0
-    heal_total: float = 0.0
+    heal_total: float = 0.0     # raw healing (see HealSizeEstimator)
+    heal_landed: float = 0.0    # ...of which actually restored health
+    heal_self: float = 0.0      # ...and of which the healer was the target
     heal_hits: int = 0
     # skill -> [hits, total, crits]  (damage)
     skills: dict[str, list] = field(default_factory=lambda: defaultdict(lambda: [0, 0.0, 0]))
-    # skill -> [hits, total, crits]  (healing)
-    heals: dict[str, list] = field(default_factory=lambda: defaultdict(lambda: [0, 0.0, 0]))
+    # skill -> [hits, total, crits, self_total]  (healing). The fourth column
+    # is what makes a healing bar splittable: how much of that skill's healing
+    # the caster put on themselves.
+    heals: dict[str, list] = field(default_factory=lambda: defaultdict(lambda: [0, 0.0, 0, 0.0]))
     # element -> [hits, total]
     elements: dict[str, list] = field(default_factory=lambda: defaultdict(lambda: [0, 0.0]))
     first_time: float = 0.0
@@ -1480,11 +1725,23 @@ class PlayerAgg:
         e = self.elements[element]
         e[0] += 1; e[1] += amount
 
-    def record_heal(self, skill, amount, crit):
+    def record_heal(self, skill, amount, crit, landed=0.0, is_self=False):
         self.heal_total += amount
+        self.heal_landed += landed
         self.heal_hits += 1
+        if is_self:
+            self.heal_self += amount
         s = self.heals[skill]
         s[0] += 1; s[1] += amount; s[2] += crit
+        s[3] += amount if is_self else 0.0
+
+    @property
+    def overheal_pct(self):
+        """Share of this player's healing that restored no health.
+
+        Zero — not "unknown" — when they have not healed at all: a row with no
+        healing has nothing to have wasted."""
+        return _overheal_pct(self.heal_total, self.heal_landed)
 
 
 class PartySession:
@@ -1599,7 +1856,9 @@ class PartySession:
             self._recent.append((now, "heal", ev))
             p = self._player_for(ev)
             p.record_heal(self._skill_of(ev),
-                          float(ev.get("amount", 0.0)), int(ev.get("crit", 0)))
+                          float(ev.get("amount", 0.0)), int(ev.get("crit", 0)),
+                          float(ev.get("landed", 0.0)),
+                          bool(ev.get("self")))
 
     def set_combat(self, state: dict):
         with self.lock:
@@ -1665,7 +1924,9 @@ class PartySession:
                 else:
                     p.record_heal(self._skill_of(ev),
                                   float(ev.get("amount", 0.0)),
-                                  int(ev.get("crit", 0)))
+                                  int(ev.get("crit", 0)),
+                                  float(ev.get("landed", 0.0)),
+                                  bool(ev.get("self")))
             # Damage was landing, so the player was in combat for the whole
             # replayed stretch. Without this the duration clock would only start
             # at the next UI tick and those seconds would be missing from the
@@ -1739,7 +2000,7 @@ class RiftRecorder:
         p = ph["players"].get(name)
         if p is None:
             p = {"name": name, "total": 0.0, "hits": 0, "crits": 0,
-                 "kills": 0, "heal": 0.0, "heal_hits": 0}
+                 "kills": 0, "heal": 0.0, "heal_landed": 0.0, "heal_hits": 0}
             ph["players"][name] = p
         return p
 
@@ -1756,6 +2017,7 @@ class RiftRecorder:
             ph["elements"][ev.get("element") or "?"] += amount
         else:
             p["heal"] += amount
+            p["heal_landed"] += sign * float(ev.get("landed", 0.0))
             p["heal_hits"] += sign
 
     def set_rift(self, state: bool):
@@ -1832,6 +2094,7 @@ class RiftRecorder:
                            if p["total"] > 0.5 or p["heal"] > 0.5]
                 total = sum(p["total"] for p in players)
                 heal = sum(p["heal"] for p in players)
+                heal_landed = sum(p["heal_landed"] for p in players)
                 elements = sorted(((el, amt) for el, amt
                                    in ph["elements"].items() if amt > 0.5),
                                   key=lambda kv: -kv[1])
@@ -1839,7 +2102,8 @@ class RiftRecorder:
                 phases.append({"label": label,
                                "duration": max(0.0, end - start),
                                "players": players, "total": total,
-                               "heal": heal, "elements": elements})
+                               "heal": heal, "heal_landed": heal_landed,
+                               "elements": elements})
             return {"at": now, "phases": phases}
 
 
@@ -3157,6 +3421,7 @@ class Overlay:
         self._menu_unlock = False
         self._hide_ooc = False         # "hide out of combat" setting
         self._social_sort = "name"     # Social roster order; see SOCIAL_SORTS
+        self._best_times = self._load_best_times()   # fastest boss kills, secs by kind
         self._session_sort = "recent"  # session log order; see SESSION_SORTS
         # _show is what the player asked for, _shown is what's actually mapped
         # (they differ while out-of-combat hiding is in effect).
@@ -3310,10 +3575,16 @@ class Overlay:
         self.mapwin.title("Farever+ Minimap")
         self.compasswin = tk.Toplevel(self.root)
         self.compasswin.title("Farever+ Compass")
+        # The compass's badge underlay — the translucent boxes behind the
+        # distance numbers live here, one window down. See _build_compass.
+        self.badgewin = tk.Toplevel(self.root)
+        self.badgewin.title("Farever+ Compass Badges")
+        self.killwin = tk.Toplevel(self.root)
+        self.killwin.title("Farever+ Kill Time")
         for win in (self.root, self.detail, self.menu, self.hintwin,
                     self.parsewin, self.promptwin, self.reportwin,
                     self.updatewin, self.riftwin, self.mapwin,
-                    self.compasswin):
+                    self.compasswin, self.badgewin, self.killwin):
             win.overrideredirect(True)
             win.attributes("-topmost", True)
             win.configure(bg=TRANSPARENT_KEY)
@@ -3328,6 +3599,10 @@ class Overlay:
         for win in (self.root, self.detail, self.menu, self.riftwin,
                     self.mapwin, self.compasswin):
             win.attributes("-alpha", OVERLAY_ALPHA)
+        # Not the badge underlay: its opacity is never its own — always the
+        # compass's times COMPASS_DIST_BOX_ALPHA, applied by _sync_badgewin.
+        # Invisible until the first sync so it can't flash solid black.
+        self.badgewin.attributes("-alpha", 0.0)
         # Keys must match TOGGLEABLE_ELEMENTS.
         self._element_win = {"meter": self.root, "detail": self.detail,
                              "rift": self.riftwin, "minimap": self.mapwin,
@@ -3365,6 +3640,7 @@ class Overlay:
         self._build_menu()
         self._build_hint()
         self._build_parse()
+        self._build_kill_toast()
         self._build_prompt()
         self._build_report()
         self._build_update_offer()
@@ -3399,6 +3675,8 @@ class Overlay:
         # you can't see is worse than useless.
         # Not a faded window — parse mode maps and unmaps it itself.
         self.parsewin.withdraw()
+        # Nor this one: the kill-time toast maps itself when a boss dies.
+        self.killwin.withdraw()
         # DERIVED from _shown rather than hand-listed, because the hand-listed
         # version had exactly one failure mode and it happened: add a faded
         # window, forget to add it here, and it starts MAPPED. A Toplevel left
@@ -3412,6 +3690,9 @@ class Overlay:
         for key, win in self._fade_win.items():
             if not self._shown[key]:
                 win.withdraw()
+        # The badge underlay isn't a faded window — it shadows the compass,
+        # and this first sync is where it picks up the compass's real state.
+        self._sync_badgewin()
         self.root.after(60, self._apply_clickthrough)
         self._install_hotkeys()
 
@@ -3797,7 +4078,10 @@ class Overlay:
     def _meter_cols_text(self):
         head = (f"  #  {'NAME':<{METER_NAME_CELLS}}{'CLS':<{METER_CLASS_CELLS}}"
                 f"{'DMG':>9} {'DPS':>6} {'%':>4}")
-        return head + (f"{'HEAL':>9}" if self._show_heal else "")
+        # OVER% rides with the healing columns because it is a share OF them:
+        # on its own, next to a damage table, it would be a percentage of a
+        # number that isn't on screen.
+        return head + (f"{'HEAL':>9}{'OVER':>6}" if self._show_heal else "")
 
     def _build_detail(self):
         self.d_border = border = tk.Frame(self.detail, bg=BG_BORDER, padx=2, pady=2)
@@ -4070,6 +4354,17 @@ class Overlay:
             f = tk.Frame(sub_holder, bg=BG_BODY)
             f.grid(row=0, column=0, sticky="nsew")
             self._social_page_frames[key] = f
+        # Top right, on the sub-tab row so it reads as belonging to the whole
+        # tab: it reloads BOTH pages. The button exists because the pages
+        # don't poll — see _reload_social.
+        self.btn_social_refresh = tk.Button(
+            subbar, text="Refresh",
+            command=self._enqueue(self._refresh_social_clicked),
+            font=self.fonts_m["ui"], bg=BG_BODY_SOFT, fg=FG_TEXT,
+            activebackground=BG_BAR_TRACK, activeforeground=FG_VALUE,
+            relief="flat", bd=0, padx=10, pady=2, highlightthickness=1,
+            highlightbackground=BG_BAR_TRACK, cursor="hand2")
+        self.btn_social_refresh.pack(side="right")
 
         def search_row(parent, var):
             """The search line shared by both pages. Returns the row (so a
@@ -4448,6 +4743,10 @@ class Overlay:
         self._menu_tab_frames[name].tkraise()
         for n, b in self._menu_tab_btns.items():
             self._paint_tab_btn(b, n == name)
+        # Raising Social is one of its load moments — the pages don't poll,
+        # so arriving at the tab is what fetches the current picture.
+        if name == "Social":
+            self._reload_social()
         # A dropdown posted from the page on the way out would float over the
         # one arriving.
         self._unpost_menus()
@@ -5094,13 +5393,64 @@ class Overlay:
         something: `_map_ink` for the text and lines, `_marker_fill` for the
         glyphs, exactly as on the minimap. Those two are what keep the strip
         legible on the parchment theme, where a panel-blind colour scheme puts
-        cream text on a cream background."""
+        cream text on a cream background.
+
+        The distance badges are the one part that isn't on this canvas. They
+        want to be translucent — a box that softens the scenery without
+        blacking it out — and a colorkey window can't blend: every pixel is
+        solid or a hole. So the boxes are drawn on `badgewin`, a second
+        colorkey window glued directly under this one at a lower whole-window
+        opacity (the one kind of blending Windows does provide), and the
+        numbers stay up here, crisp, on top of them. _glue_badgewin keeps the
+        two windows coincident; _sync_badgewin keeps their opacities and
+        mapped states married."""
         self.compass_canvas = tk.Canvas(
             self.compasswin, bg=TRANSPARENT_KEY,
             highlightthickness=0, bd=0, width=COMPASS_W, height=COMPASS_H)
         self.compass_canvas.pack()
-        self._bind_drag(self.compasswin, (self.compass_canvas,),
+        self.badge_canvas = tk.Canvas(
+            self.badgewin, bg=TRANSPARENT_KEY,
+            highlightthickness=0, bd=0, width=COMPASS_W, height=COMPASS_H)
+        self.badge_canvas.pack()
+        # A badge box is part of the compass as far as the hand cares, so
+        # grabbing one drags the compass; the underlay follows via the glue.
+        self._bind_drag(self.compasswin,
+                        (self.compass_canvas, self.badge_canvas),
                         unlocked=self._mouse_available)
+        self.compasswin.bind("<Configure>", self._glue_badgewin, add="+")
+
+    def _glue_badgewin(self, _event=None):
+        """Pin the badge underlay exactly under the compass window."""
+        self.badgewin.geometry(
+            f"+{self.compasswin.winfo_x()}+{self.compasswin.winfo_y()}")
+
+    def _sync_badgewin(self):
+        """Mirror the compass's opacity and mapped state onto the badge
+        underlay.
+
+        The underlay is deliberately NOT in _fade_win — it has no state of its
+        own. Its opacity is always the compass's times COMPASS_DIST_BOX_ALPHA,
+        which is what makes the boxes read as knocked-back while following
+        every fade, the transparency slider and the boss-bar auto-hide with no
+        handling of their own. Called from wherever the compass's alpha or
+        mapped state changes: _step_fade, _want_visible, _set_transparency and
+        once at startup."""
+        try:
+            self.badgewin.attributes(
+                "-alpha", self._alpha["compass"] * COMPASS_DIST_BOX_ALPHA)
+            if self.compasswin.state() == "normal":
+                self._glue_badgewin()
+                if self.badgewin.state() != "normal":
+                    self.badgewin.deiconify()
+                # Under the numbers, over the game — reasserted every sync,
+                # because deiconify and the compass's own -topmost re-assert
+                # both shuffle sibling order, and a badge that wins that race
+                # is a black box sitting ON the numbers it exists to sit under.
+                self.badgewin.lower(self.compasswin)
+            else:
+                self.badgewin.withdraw()
+        except tk.TclError:
+            pass
 
     def _compass_x(self, dx, dy, rot, half_w, centre=None):
         """Screen x for a world offset, or None if it's outside the arc.
@@ -5125,12 +5475,16 @@ class Overlay:
         if not self._shown.get("compass"):
             return
         c = self.compass_canvas
+        cb = self.badge_canvas
         me, ents, _stamp = self.world.read()
         c.delete("all")
+        cb.delete("all")
         scale = self._scales["compass"]
         w, h = int(COMPASS_W * scale), int(COMPASS_H * scale)
         if int(c["width"]) != w or int(c["height"]) != h:
             c.config(width=w, height=h)
+        if int(cb["width"]) != w or int(cb["height"]) != h:
+            cb.config(width=w, height=h)
         theme = self._theme
         body = theme.get("map_body", BG_BODY)
         c.configure(bg=TRANSPARENT_KEY)
@@ -5249,9 +5603,12 @@ class Overlay:
         caret. The caret hangs below the glyph, which is where the number now
         is, and a strip this short has no row of pixels to spare for both."""
         # Brighter than the cardinals: the numbers are the part you actually
-        # read. They also hang off the pill's lower edge onto the game, so they
-        # get an outline — the only text on the overlay that sits on scenery
-        # rather than on a panel, and the scenery is any colour it likes.
+        # read. They also hang off the pill's lower edge onto the game — the
+        # only text on the overlay that sits on scenery rather than on a
+        # panel, and the scenery is any colour it likes — so each one gets a
+        # box behind it. The box goes on the badge underlay window and the
+        # text stays on this canvas above it; see _build_compass for why the
+        # translucency needs a second window at all.
         y = h * COMPASS_DIST_Y
         font = self.fonts_compass["ui_tiny_i"]
         line_h = font.metrics("linespace")
@@ -5270,10 +5627,10 @@ class Overlay:
             # are very different strings, and a badge wide enough for the
             # second is a slab under the first.
             half_tw = font.measure(label) / 2.0
-            c.create_rectangle(x - half_tw - pad_x, y - line_h / 2.0 - pad_y,
-                               x + half_tw + pad_x, y + line_h / 2.0 + pad_y,
-                               fill=COMPASS_DIST_BOX, outline="",
-                               stipple=COMPASS_DIST_STIPPLE)
+            self.badge_canvas.create_rectangle(
+                x - half_tw - pad_x, y - line_h / 2.0 - pad_y,
+                x + half_tw + pad_x, y + line_h / 2.0 + pad_y,
+                fill=COMPASS_DIST_BOX, outline="")
             c.create_text(x, y, text=label, fill=COMPASS_DIST_BOX_INK,
                           font=font)
 
@@ -5734,9 +6091,13 @@ class Overlay:
             tk.Frame(row, bg=RIFT_GLOW, height=1).pack(
                 side="left", fill="x", expand=True, padx=(8, 0))
 
-        def rank_row(i, name, amount, pct, medal=True):
+        def rank_row(i, p, amount, pct, medal=True):
             """One leaderboard entry. Ranks 1-3 wear medal colours and the
-            bigger font; 4-5 are body text — the tiering IS the design."""
+            bigger font; 4-5 are body text — the tiering IS the design.
+
+            The class acronym is a label of its own in the dim colour, not part
+            of the name string: it must not be eaten by the name's elision, and
+            it is not part of who anyone is."""
             row = tk.Frame(col, bg=RIFT_BODY)
             row.pack(fill="x", pady=1)
             top3 = medal and i <= 3
@@ -5744,9 +6105,13 @@ class Overlay:
             name_font = self.fonts["ui_rank_b" if top3 else "ui_10"]
             tk.Label(row, text=str(i), bg=RIFT_BODY, fg=rank_fg,
                      font=name_font, width=2, anchor="w").pack(side="left")
-            tk.Label(row, text=self._elide_name(name),
+            tk.Label(row, text=self._elide_name(p.get("name") or "?"),
                      bg=RIFT_BODY, fg=RIFT_TIME if top3 else RIFT_TITLE,
                      font=name_font, anchor="w").pack(side="left")
+            if p.get("cls"):
+                tk.Label(row, text=p["cls"], bg=RIFT_BODY, fg=RIFT_TITLE,
+                         font=self.fonts["ui_sm_b"], anchor="w").pack(
+                    side="left", padx=(4, 0))
             tk.Label(row, text=f"{pct:4.0f}%", bg=RIFT_BODY, fg=RIFT_TITLE,
                      font=self.fonts["mono_sm"], anchor="e",
                      width=5).pack(side="right")
@@ -5757,7 +6122,8 @@ class Overlay:
         # The phase title is the column's headline; the totals sit under it.
         line(ph["label"].upper(), font="ui_b", fg=RIFT_PEAK)
         line(f"{self._mmss(ph['duration'])}   ·   "
-             f"{int(ph['total']):,} dmg   ·   {int(ph['heal']):,} heal",
+             f"{int(ph['total']):,} dmg   ·   {int(ph['heal']):,} heal"
+             + _overheal_note(ph),
              fg=RIFT_TITLE)
 
         players = ph["players"]
@@ -5771,14 +6137,22 @@ class Overlay:
         # own colour; sorted by damage already, so [0] is the damage MVP.
         heading("MVP")
         mvp = players[0]
-        tk.Label(col, text=f"★ {self._elide_name(mvp['name'])}",
+        mvp_row = tk.Frame(col, bg=RIFT_BODY)
+        mvp_row.pack(fill="x")
+        tk.Label(mvp_row, text=f"★ {self._elide_name(mvp['name'])}",
                  bg=RIFT_BODY, fg=REPORT_MEDALS[0],
-                 font=self.fonts["ui_mvp_b"], anchor="w").pack(fill="x")
+                 font=self.fonts["ui_mvp_b"], anchor="w").pack(side="left")
+        if mvp.get("cls"):
+            tk.Label(mvp_row, text=mvp["cls"], bg=RIFT_BODY, fg=RIFT_TITLE,
+                     font=self.fonts["ui_sm_b"], anchor="s").pack(
+                side="left", padx=(5, 0), pady=(0, 4))
         line(f"{int(mvp['total']):,} damage", fg=RIFT_TIME)
         healer = max(players, key=lambda p: p["heal"])
         if healer["heal"] > 0.5:
-            tk.Label(col, text=f"✚ {self._elide_name(healer['name'])}   "
-                     f"{int(healer['heal']):,} heal",
+            tk.Label(col, text=f"✚ {self._elide_name(healer['name'])}"
+                     + (f" ({healer['cls']})" if healer.get("cls") else "")
+                     + f"   {int(healer['heal']):,} heal"
+                     + _overheal_note(healer, "   {:.0f}% over"),
                      bg=RIFT_BODY, fg=REPORT_HEAL,
                      font=self.fonts["ui_rank_b"], anchor="w").pack(
                 fill="x", pady=(2, 0))
@@ -5786,7 +6160,7 @@ class Overlay:
         heading("DAMAGE — TOP 5")
         for i, p in enumerate(players[:5], 1):
             pct = p["total"] / ph["total"] * 100 if ph["total"] else 0.0
-            rank_row(i, p["name"], p["total"], pct)
+            rank_row(i, p, p["total"], pct)
 
         healers = sorted((p for p in players if p["heal"] > 0.5),
                          key=lambda p: -p["heal"])
@@ -5795,7 +6169,7 @@ class Overlay:
             line("no healing recorded", font="ui_idle_i", fg=RIFT_TITLE)
         for i, p in enumerate(healers[:5], 1):
             pct = p["heal"] / ph["heal"] * 100 if ph["heal"] else 0.0
-            rank_row(i, p["name"], p["heal"], pct)
+            rank_row(i, p, p["heal"], pct)
 
         # Every type in its own colour — the bar and the name wear it, the
         # percentage stays quiet. Unknown affinities get a stable hash tint
@@ -5961,21 +6335,23 @@ class Overlay:
         out = ["Farever+ Rift Report"]
         for ph in data["phases"]:
             out.append(f"== {ph['label']} — {self._mmss(ph['duration'])}, "
-                       f"{int(ph['total']):,} dmg, {int(ph['heal']):,} heal ==")
+                       f"{int(ph['total']):,} dmg, {int(ph['heal']):,} heal"
+                       + _overheal_note(ph, " ({:.0f}% overheal)") + " ==")
             players = ph["players"]
             if not players:
                 out.append("  (nothing recorded)")
                 continue
             for i, p in enumerate(players[:5], 1):
                 pct = p["total"] / ph["total"] * 100 if ph["total"] else 0.0
-                out.append(f"  dmg {i}. {p['name']} "
+                out.append(f"  dmg {i}. {_report_name(p)} "
                            f"{int(p['total']):,} ({pct:.1f}%)")
             healers = sorted((p for p in players if p["heal"] > 0.5),
                              key=lambda p: -p["heal"])
             for i, p in enumerate(healers[:5], 1):
                 pct = p["heal"] / ph["heal"] * 100 if ph["heal"] else 0.0
-                out.append(f"  heal {i}. {p['name']} "
-                           f"{int(p['heal']):,} ({pct:.1f}%)")
+                out.append(f"  heal {i}. {_report_name(p)} "
+                           f"{int(p['heal']):,} ({pct:.1f}%"
+                           + _overheal_note(p, ", {:.0f}% over") + ")")
             if ph["elements"]:
                 out.append("  types: " + " · ".join(
                     f"{'Other' if el == '?' else el} "
@@ -6018,6 +6394,49 @@ class Overlay:
     def _hide_parse_banner(self):
         self._parse_text = None
         self.parsewin.withdraw()
+
+    def _build_kill_toast(self):
+        """The boss kill time — the same drop-shadowed floating text as the
+        parse banner, on its own window because the two can be up at once
+        (a parsed boss dying is the ordinary way a parse ends well)."""
+        self._kill_font = self.fonts["ui_parse_b"]
+        self._kill_canvas = tk.Canvas(self.killwin, bg=TRANSPARENT_KEY,
+                                      highlightthickness=0, bd=0)
+        self._kill_canvas.pack()
+        self._kill_toast_job = None    # pending hide timer
+
+    def _show_kill_toast(self, text, best):
+        """Put the time on screen for KILL_TOAST_SECS. Gold when it set a
+        record — the one moment the colour means something — body-coloured
+        like the parse banner otherwise."""
+        f, c = self._kill_font, self._kill_canvas
+        pad, off = 8, 2
+        w = f.measure(text) + pad * 2 + off
+        h = f.metrics("linespace") + pad * 2 + off
+        c.config(width=w, height=h)
+        c.delete("all")
+        c.create_text(pad + off, pad + off, text=text, font=f, fill=BG_BORDER,
+                      anchor="nw")
+        c.create_text(pad, pad, text=text, font=f,
+                      fill=REPORT_MEDALS[0] if best else BG_BODY, anchor="nw")
+        self.killwin.update_idletasks()
+        l, t, r, _b = self._game_rect()
+        self.killwin.geometry(f"+{l + ((r - l) - w) // 2}+{t + TOP_STRIP_KILL}")
+        self.killwin.deiconify()
+        self.killwin.attributes("-topmost", True)
+        # A second kill inside the window restarts the clock rather than
+        # letting the first one's timer take the new text down early.
+        if self._kill_toast_job is not None:
+            try:
+                self.root.after_cancel(self._kill_toast_job)
+            except Exception:
+                pass
+        self._kill_toast_job = self.root.after(int(KILL_TOAST_SECS * 1000),
+                                               self._hide_kill_toast)
+
+    def _hide_kill_toast(self):
+        self._kill_toast_job = None
+        self.killwin.withdraw()
 
     def _toggle_parse(self):
         if self._parse_state is None:
@@ -6067,6 +6486,8 @@ class Overlay:
             stats = [f"{int(fp.total)} dmg", f"{fdps:.0f} dps",
                      f"{fp.hits} hits", f"{crit_pct:.0f}% crit",
                      f"{int(fp.heal_total)} heal"]
+            if fp.heal_total > 0.5:
+                stats.append(f"{fp.overheal_pct:.0f}% overheal")
             if fp.kills:
                 stats.append(f"{fp.kills} kills")
             el = sorted(fp.elements.items(), key=lambda kv: -kv[1][1])
@@ -6086,6 +6507,7 @@ class Overlay:
             "mode": "PARTY" if self.mode == "party" else "ALL PLAYERS",
             "rows": [{
                 "name": p.name, "total": p.total, "heal": p.heal_total,
+                "heal_self": p.heal_self, "overheal": p.overheal_pct,
                 "dps": p.total / duration if duration > 0 else 0.0,
                 "pct": (p.total / party_total * 100) if party_total else 0.0,
                 "is_me": p.is_me,
@@ -6302,8 +6724,9 @@ class Overlay:
         # draws its own edges.
         # Not the compass either, for the same reason and one more: it is
         # transparent all the way to its edges, and rounding a window is also
-        # what asks DWM for the drop shadow that goes with it.
-        if win in (self.riftwin, self.compasswin):
+        # what asks DWM for the drop shadow that goes with it. Its badge
+        # underlay is the same shape of window, so it sits this out too.
+        if win in (self.riftwin, self.compasswin, self.badgewin):
             return
         self._round_win_corners(win)
 
@@ -6326,6 +6749,9 @@ class Overlay:
         # numbers are real pixels sitting over the middle of the screen, and a
         # click landing on one of those was a click the game never saw.
         self._set_win_clickthrough(self.compasswin, pointable)
+        # The badge underlay carries the boxes' pixels, and a box is part of
+        # the compass as far as the cursor cares — same signal, same answer.
+        self._set_win_clickthrough(self.badgewin, pointable)
         # The hover box comes and goes with the same signal: it is only ever
         # useful when there's a cursor, and this is the one place both halves of
         # that answer (the escape menu and the freed mouse) are already known.
@@ -6336,6 +6762,7 @@ class Overlay:
         self._set_win_clickthrough(self.menu, False)
         self._set_win_clickthrough(self.hintwin, True)
         self._set_win_clickthrough(self.parsewin, True)
+        self._set_win_clickthrough(self.killwin, True)
         # The prompt must take clicks whenever it's up, regardless of lock
         # state — it's the one overlay window that has to be answered.
         self._set_win_clickthrough(self.promptwin, False)
@@ -6380,14 +6807,11 @@ class Overlay:
         # to ride the 250 ms loop, which was invisible while the menu also
         # appeared on that loop — now that it opens promptly, a stale label
         # would be on screen for a moment and then change under the eye.
-        # The rebuilds are called directly rather than through
-        # _refresh_social(), which self-gates on the menu already being mapped
-        # — and it is not, yet. That gate exists to stop the roster churning
-        # for a window nobody is looking at; here we know it is about to be one.
+        # For the Social pages this is also one of only three load moments —
+        # they don't poll; see _reload_social.
         if want:
             self._refresh_menu()
-            self._rebuild_social()
-            self._rebuild_session()
+            self._reload_social()
         self._refresh_visibility()   # owns every window's target, menu included
         if want and not self._prompt_open:
             self._place_hint()       # after the map: it measures the window
@@ -7302,6 +7726,70 @@ class Overlay:
         """A boss died: its bar went down with its last health reading at 0."""
         self._enqueue(lambda: self.sounds.play("victory"))()
 
+    def on_boss_timed_kill(self, kinds, secs):
+        """The LAST boss bar went down killed — the fight is formally over and
+        its clock has a reading. Called from the hook thread alongside the
+        victory cue; the record and the toast belong to the Tk one.
+
+        Not opt-in, deliberately: a record you had to switch on beforehand is
+        a record you don't have when you finally want it."""
+        self._enqueue(lambda: self._record_boss_kill(tuple(kinds), secs))()
+
+    def _record_boss_kill(self, kinds, secs):
+        """Compare the kill against the stored best and say so on screen.
+
+        The key is the PULL's boss kinds, sorted and joined — stable for a
+        council pulled together (whichever member dies last), and for the
+        Nightqueen it is her alone, because her copies never fire a second
+        pull edge. The killed bar's kind would be neither."""
+        if not kinds:
+            # A bar with no kind can't key a record, but the time is still
+            # worth saying — it just can't be compared to anything.
+            self._show_kill_toast(f"BOSS DOWN  {self._mmss(secs)}", best=False)
+            return
+        # The record keys on the internal kind — stable across localization
+        # and any rename the cdb ships — but the toast speaks the game's
+        # language: the kind is routinely not the name on the bar (the first
+        # live kill said "CLEODORA" for a boss the game calls Honeyzabeth).
+        key = "+".join(kinds)
+        name = " + ".join(_boss_label(k) for k in kinds).upper()
+        prev = self._best_times.get(key)
+        if prev is None:
+            self._best_times[key] = secs
+            self._save_best_times()
+            text = f"{name} DOWN  {self._mmss(secs)} — FIRST RECORDED KILL"
+            best = True
+        elif secs < prev:
+            self._best_times[key] = secs
+            self._save_best_times()
+            text = (f"{name} DOWN  {self._mmss(secs)} — NEW BEST "
+                    f"(was {self._mmss(prev)})")
+            best = True
+        else:
+            text = f"{name} DOWN  {self._mmss(secs)} — BEST {self._mmss(prev)}"
+            best = False
+        print(f"[meter] boss kill timed: {key} {secs:.1f}s"
+              + (f" (best {self._best_times[key]:.1f}s)"), file=sys.stderr)
+        self._show_kill_toast(text, best)
+
+    @staticmethod
+    def _load_best_times():
+        """The record book, tolerantly: a missing file is an empty one, and a
+        hand-edited or corrupt entry drops rather than crashing the launch."""
+        try:
+            d = json.loads(BEST_TIMES_CACHE.read_text())
+            return {str(k): float(v) for k, v in d.items()
+                    if isinstance(v, (int, float)) and v > 0}
+        except Exception:
+            return {}
+
+    def _save_best_times(self):
+        try:
+            BEST_TIMES_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            BEST_TIMES_CACHE.write_text(json.dumps(self._best_times, indent=1))
+        except OSError as e:
+            print(f"[meter] couldn't save best times: {e}", file=sys.stderr)
+
     def on_legendary_pickup(self):
         """A legendary weapon appeared in the loadout that wasn't there before.
         Called from the hook thread — the cue belongs to the Tk one."""
@@ -7615,11 +8103,15 @@ class Overlay:
                 win.attributes("-topmost", True)
             else:
                 win.withdraw()
+            if key == "compass":
+                self._sync_badgewin()
             return True
         if visible:
             win.attributes("-alpha", self._alpha[key])
             win.deiconify()
             win.attributes("-topmost", True)   # re-assert over the game's UI
+        if key == "compass":
+            self._sync_badgewin()
         return True
 
     def _start_fade(self):
@@ -7791,6 +8283,7 @@ class Overlay:
                 win.attributes("-alpha", self._alpha[key])
             except tk.TclError:
                 pass
+        self._sync_badgewin()
         self._save_settings()
         print(f"[meter] transparency {percent}%", file=sys.stderr)
 
@@ -7826,6 +8319,8 @@ class Overlay:
                 win.withdraw()
             else:
                 fading = True
+            if key == "compass":
+                self._sync_badgewin()
         if fading:
             self._fade_job = self.root.after(FADE_STEP_MS, self._step_fade)
 
@@ -7855,15 +8350,21 @@ class Overlay:
         return rows
 
     def _merge_named(self, table):
-        """Merge a skill-id table (id -> [hits, total, crits]) by display name
-        (e.g. all weapons' base "Attack" share one row) and return
-        [(label, total, hits, crits)] sorted by total desc."""
-        merged: dict[str, list] = defaultdict(lambda: [0, 0.0, 0])
-        for sid, (h, tot, cr) in table.items():
+        """Merge a skill-id table by display name (e.g. all weapons' base
+        "Attack" share one row) and return [(label, total, hits, crits, self)]
+        sorted by total desc.
+
+        Damage rows carry [hits, total, crits] and healing rows carry a fourth
+        column (the self-healed share). Both go through here, so the fourth is
+        read optionally and damage simply reports 0 — a damage bar has nothing
+        to split."""
+        merged: dict[str, list] = defaultdict(lambda: [0, 0.0, 0, 0.0])
+        for sid, vals in table.items():
             label = self.session.skill_names.get(sid) or _pretty_id(sid)
             m = merged[label]
-            m[0] += h; m[1] += tot; m[2] += cr
-        out = [(label, v[1], v[0], v[2]) for label, v in merged.items()]
+            m[0] += vals[0]; m[1] += vals[1]; m[2] += vals[2]
+            m[3] += vals[3] if len(vals) > 3 else 0.0
+        out = [(label, v[1], v[0], v[2], v[3]) for label, v in merged.items()]
         out.sort(key=lambda t: -t[1])
         return out[:MAX_SKILL_ROWS]
 
@@ -7885,26 +8386,35 @@ class Overlay:
             self.heal_col.f.pack_forget()
 
     # ---- Social tab ----------------------------------------------------
-    def _refresh_social(self):
-        """Poll the roster from the refresh tick.
+    def _reload_social(self):
+        """Load both Social pages, now, once.
 
-        Gated on the menu being on screen: rebuilding thirty rows several times
-        a second for a window nobody is looking at is pure waste, and the
-        roster is only interesting while the escape menu is up anyway. The real
-        guard against churn is the signature check in _rebuild_social — this
-        method runs often and usually does nothing.
+        This used to ride the refresh tick, gated on the menu being mapped,
+        with the signature checks as the churn guard. The guard was the wrong
+        one: on a busy shard the roster genuinely changes every few seconds
+        and the session page's "seen" column ticks over on its own, so the
+        signatures kept missing and the menu spent its time destroying and
+        rebuilding row widgets — reported as the whole window going slow
+        whenever the Social tab was open. The roster is a page you READ, not
+        a feed. It now loads at the three moments a page should: the menu
+        opening, the Social tab being raised, and the Refresh button. The
+        world data underneath accumulates regardless — a reload is a read of
+        what's already there, not a query.
+
+        Both pages, not just the visible one: the session log grows whether
+        or not you are looking at it, and reloading only on page switch would
+        show a stale count the moment you arrived. Both stay signature-gated,
+        so a reload that changes nothing redraws nothing.
         """
-        try:
-            if not self.menu.winfo_ismapped():
-                return
-        except tk.TclError:            # menu destroyed mid-shutdown
-            return
-        # Both pages, not just the visible one: the session log grows whether
-        # or not you are looking at it, and rebuilding only on switch would
-        # show a stale count the moment you arrived. Both are signature-gated,
-        # so the idle cost is two tuple comparisons.
         self._rebuild_social()
         self._rebuild_session()
+
+    def _refresh_social_clicked(self):
+        """The Refresh button. The reload is silent when nothing changed —
+        which after a click reads as a dead button — so the note answers
+        every press, whether or not the list moved."""
+        self._reload_social()
+        self._social_note("Refreshed.", transient=True)
 
     def _set_social_page(self, key):
         """Raise one of the Social sub-pages and paint its tab."""
@@ -8309,9 +8819,9 @@ class Overlay:
         # _pump_input. It stays idempotent, so nothing here depends on which
         # loop got to it first.
         self._refresh_menu()
-        # After _refresh_menu, and self-gating on the menu being mapped — the
-        # roster only matters while the escape menu is up.
-        self._refresh_social()
+        # The Social pages are deliberately NOT refreshed here: they load on
+        # the menu opening, the tab being raised, and the Refresh button, and
+        # hold still in between — see _reload_social for what polling cost.
         self._apply_heal_columns()
         _, _, rows = self.session.snapshot()
         rows = self._apply_mode(rows)
@@ -8379,6 +8889,7 @@ class Overlay:
                 row.show(i + 1, p, dps, pct, focused=(focus == p.name),
                          dmg_frac=p.total / top_dmg,
                          heal_frac=p.heal_total / top_heal,
+                         heal_self_frac=p.heal_self / top_heal,
                          show_heal=self._show_heal,
                          cls_tag=_class_tag(self.world.class_of(p.name)))
             else:
@@ -8400,6 +8911,8 @@ class Overlay:
                      f"{fp.hits} hits", f"{crit_pct:.0f}% crit"]
             if self._show_heal:
                 stats.append(f"{int(fp.heal_total)} heal")
+                if fp.heal_total > 0.5:
+                    stats.append(f"{fp.overheal_pct:.0f}% overheal")
             if fp.kills:
                 stats.append(f"{fp.kills} kills")
             self.stats_lbl.config(text=" · ".join(stats))
@@ -8481,6 +8994,53 @@ def _item_names():
     return _ITEM_NAMES
 
 
+_UNIT_NAMES = None
+
+
+def _unit_names():
+    """Same as _item_names, for the cdb's unit sheet. Names the boss kill
+    toast: a bar's unit kind is routinely NOT the name the game shows on it
+    (measured: 'Cleodora' displays as 'Queen Honeyzabeth', 'Phrixes' as
+    'High Inquisitor Chakram' — the kind often names the LAIR, not the boss)."""
+    global _UNIT_NAMES
+    if _UNIT_NAMES is None:
+        try:
+            _UNIT_NAMES = json.loads(
+                (ANALYSIS / "unit_names.json").read_text(encoding="utf-8"))
+        except Exception:
+            _UNIT_NAMES = {}
+    return _UNIT_NAMES
+
+
+_HEAL_SPECS = None
+
+
+def _heal_specs():
+    """skill id -> {step: [heal effect spec]}, from analysis_out/heal_specs.json.
+
+    The game's own cdb, extracted on the same self-heal cycle as the offsets.
+    Without it every heal on a full-health target is unsizeable and healing
+    collapses back to "health actually restored" — so its absence is logged
+    rather than swallowed."""
+    global _HEAL_SPECS
+    if _HEAL_SPECS is None:
+        try:
+            _HEAL_SPECS = json.loads(
+                (ANALYSIS / "heal_specs.json").read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"[meter] heal_specs.json unavailable ({e}) — healing falls "
+                  "back to what each skill has been seen to restore",
+                  file=sys.stderr)
+            _HEAL_SPECS = {}
+    return _HEAL_SPECS
+
+
+def _boss_label(kind):
+    """The boss's real display name, falling back to the prettified kind for
+    anything the unit sheet doesn't carry."""
+    return _unit_names().get(kind) or _pretty_id(kind)
+
+
 def _mount_label(kind):
     """The item's real display name ('Mount_Aries_05' -> 'Aegis'), falling
     back to the prettified id for anything the name table doesn't carry —
@@ -8549,6 +9109,14 @@ class PlayerRow:
         self.heal_track.pack(fill="x", pady=(1, 2))
         self.heal_bar = tk.Frame(self.heal_track, bg=HEAL_BAR, height=5)
         self.heal_bar.place(relwidth=0.0, relheight=1.0)
+        # Self-healing, parchment, always from the left edge — so the split sits at
+        # the same place on every row and the column can be read down. Placed
+        # after (and therefore over) the green bar, which draws the full
+        # amount: only one of the two widths has to be exactly right, and no
+        # rounding gap can open between them.
+        self.heal_self_bar = tk.Frame(self.heal_track, bg=SELF_HEAL_BAR,
+                                      height=5)
+        self.heal_self_bar.place(relwidth=0.0, relheight=1.0)
         self._packed = False
         self._heal_packed = True
         self._name = None
@@ -8562,7 +9130,7 @@ class PlayerRow:
         # own widgets never flickers the lift.
         for w in (self.f, self.top, self.line, self.cls, self.nums,
                   self.dmg_track, self.dmg_bar,
-                  self.heal_track, self.heal_bar):
+                  self.heal_track, self.heal_bar, self.heal_self_bar):
             w.bind("<Button-1>", lambda e: on_click(self._name))
             w.bind("<Enter>", lambda e: self._set_hover(True))
             w.bind("<Leave>", lambda e: self._set_hover(False))
@@ -8588,6 +9156,7 @@ class PlayerRow:
         self.dmg_bar.config(bg=t["dmg"])
         self.heal_track.config(bg=t["track"])
         self.heal_bar.config(bg=t["heal"])
+        self.heal_self_bar.config(bg=t["heal_self"])
 
     def _trim(self, text, cells):
         """`text` cut down until it fits `cells` monospace cells.
@@ -8604,7 +9173,7 @@ class PlayerRow:
         return text
 
     def show(self, rank, p, dps, pct, focused, dmg_frac, heal_frac,
-             show_heal=True, cls_tag=""):
+             heal_self_frac=0.0, show_heal=True, cls_tag=""):
         if not self._packed:
             self.f.pack(fill="x", pady=1)
             self._packed = True
@@ -8628,6 +9197,11 @@ class PlayerRow:
         nums = f"{int(p.total):>9} {dps:>6.0f} {pct:>3.0f}%"
         if show_heal:
             nums += f"{int(p.heal_total):>9}"
+            # A row that never healed has no overheal share to report, and a
+            # column of "0%" down every damage dealer is noise rather than
+            # information — so those cells stay blank.
+            nums += (f"{p.overheal_pct:>5.0f}%" if p.heal_total > 0.5
+                     else " " * 6)
         self._is_me = p.is_me
         ink = (self.theme["fg_value"] if p.is_me else self.theme["fg_text"])
         self.line.config(text=line, fg=ink)
@@ -8645,6 +9219,8 @@ class PlayerRow:
             self.dmg_track.pack_configure(pady=(0, 0 if show_heal else 2))
         if show_heal:
             self.heal_bar.place_configure(relwidth=_clamp01(heal_frac))
+            self.heal_self_bar.place_configure(
+                relwidth=_clamp01(min(heal_self_frac, heal_frac)))
 
     def hide(self):
         if self._packed:
@@ -8677,21 +9253,29 @@ class SkillColumn:
             track.pack(fill="x", pady=(0, 1))
             bar = tk.Frame(track, bg=bar_color, height=4)
             bar.place(relwidth=0.0, relheight=1.0)
-            self.rows.append((rf, lbl, bar, track))
+            # The self-healed segment, always drawn from the left edge so the
+            # split lines up down the column. Placed AFTER the main bar so it
+            # sits on top of it, which means only one width has to be right:
+            # the main bar draws the whole amount and this covers the self
+            # share of it, and no rounding gap can open between the two.
+            self_bar = tk.Frame(track, bg=SELF_HEAL_BAR, height=4)
+            self_bar.place(relwidth=0.0, relheight=1.0)
+            self.rows.append((rf, lbl, bar, track, self_bar))
         self._shown = 0
 
     def set_theme(self, t):
         self.f.config(bg=t["body"])
         self.title_lbl.config(bg=t["body"], fg=t["accent"])
-        for rf, lbl, bar, track in self.rows:
+        for rf, lbl, bar, track, self_bar in self.rows:
             rf.config(bg=t["body"])
             lbl.config(bg=t["body"], fg=t["fg_text"])
             track.config(bg=t["track"])
             bar.config(bg=t[self.bar_key])
+            self_bar.config(bg=t["heal_self"])
 
     def show(self, entries, denom):
-        """entries: [(label, total, hits, crits)] sorted desc; denom is the
-        player's overall total for the % column."""
+        """entries: [(label, total, hits, crits, self_total)] sorted desc;
+        denom is the player's overall total for the % column."""
         n = min(len(entries), len(self.rows))
         if n > self._shown:
             for i in range(self._shown, n):
@@ -8702,11 +9286,17 @@ class SkillColumn:
         self._shown = n
         top = (entries[0][1] if entries else 0.0) or 1.0
         for i in range(n):
-            label, tot, hits, _crits = entries[i]
+            label, tot, hits, _crits, slf = entries[i]
             pct = (tot / denom * 100) if denom else 0.0
-            _rf, lbl, bar, _track = self.rows[i]
+            _rf, lbl, bar, _track, self_bar = self.rows[i]
             lbl.config(text=f"{label[:16]:<16}{int(tot):>8} {pct:>3.0f}% {hits:>3}h")
-            bar.place_configure(relwidth=_clamp01(tot / top))
+            frac = _clamp01(tot / top)
+            bar.place_configure(relwidth=frac)
+            # The self share of THIS row, in the same scale as the row's bar —
+            # so a skill cast only on yourself reads as a bar that is entirely
+            # parchment, however small the skill is next to the column's biggest.
+            self_bar.place_configure(
+                relwidth=frac * _clamp01(slf / tot) if tot > 0 else 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -8752,6 +9342,11 @@ REQUIRED_OFFSET_KEYS = ("Activity", "ArrayObj", "BossInfo", "BossesInfo",
                         "Camera", "DamageResult.blocker", "DamageResult.effect",
                         "Element", "Entity", "Foe", "GameLayer", "Hero",
                         "Interactible", "State", "String", "Unit", "Unit.attr",
+                        # Healing on a full-health target. Without these the
+                        # hook sends no dynVal/attributes and every overheal is
+                        # sized 0 — the exact bug the feature exists to fix.
+                        "BaseSkill.dynVal1", "HitData.step", "SkillStep",
+                        "UnitAttributes.faith",
                         # The legendary pickup cue. Hero has existed forever,
                         # so its presence proves nothing — the subkeys are what
                         # a pre-3.1 file is missing, and sweepInventory() bails
@@ -8829,6 +9424,19 @@ def _data_is_current():
     if not (ANALYSIS / "item_names.json").exists():
         print("[meter] item_names.json absent — regenerating for the mount "
               "labels.", file=sys.stderr)
+        return False
+    # unit_names.json arrived with the boss kill timer (3.4) — same upgrade
+    # trap, same fix.
+    if not (ANALYSIS / "unit_names.json").exists():
+        print("[meter] unit_names.json absent — regenerating for the boss "
+              "names.", file=sys.stderr)
+        return False
+    # heal_specs.json arrived when healing started counting overheal — without
+    # it a heal that restores nothing cannot be sized, which is the whole
+    # feature. Same upgrade trap as the two above.
+    if not (ANALYSIS / "heal_specs.json").exists():
+        print("[meter] heal_specs.json absent — regenerating so healing can "
+              "be counted on full-health targets.", file=sys.stderr)
         return False
     return True
 
@@ -9046,15 +9654,25 @@ def render_parse_image(data, path):
            font=mono_small, fill=FG_HEADER)
     y = 36 + pad
 
-    def bar(x, y, w, frac, colour, thick):
+    def bar(x, y, w, frac, colour, thick, self_frac=0.0):
+        """One bar, optionally split: `self_frac` of the SAME scale as `frac`
+        is drawn from the left edge in the self-heal parchment, over the top of
+        full-length bar — same trick as the live overlay, so the two can't
+        disagree about where the join is."""
         d.rectangle((x, y, x + w, y + thick - 1), fill=BG_BAR_TRACK)
         filled = int(w * min(1.0, max(0.0, frac)))
         if filled > 0:
             d.rectangle((x, y, x + filled, y + thick - 1), fill=colour)
+        selfw = int(w * min(min(1.0, max(0.0, self_frac)),
+                            min(1.0, max(0.0, frac))))
+        if selfw > 0:
+            d.rectangle((x, y, x + selfw, y + thick - 1), fill=SELF_HEAL_BAR)
 
     d.text((x0, y), f"{data['mode']}   ({len(rows)})", font=ui_small, fill=ACCENT)
     y += 18
-    d.text((x0, y), f"  #  {'NAME':<12}{'DMG':>9} {'DPS':>6} {'%':>4}{'HEAL':>9}",
+    d.text((x0, y),
+           f"  #  {'NAME':<12}{'DMG':>9} {'DPS':>6} {'%':>4}"
+           f"{'HEAL':>9}{'OVER':>6}",
            font=mono, fill=FG_DIM)
     y += line_h
 
@@ -9062,13 +9680,17 @@ def render_parse_image(data, path):
     top_heal = max((r["heal"] for r in rows), default=0.0) or 1.0
     for i, r in enumerate(rows, 1):
         me = "*" if r["is_me"] else " "
+        over = (f"{r.get('overheal', 0.0):>5.0f}%" if r["heal"] > 0.5
+                else " " * 6)
         d.text((x0, y), f"  {i}.{me}{r['name'][:12]:<12}{int(r['total']):>9} "
-                        f"{r['dps']:>6.0f} {r['pct']:>3.0f}%{int(r['heal']):>9}",
+                        f"{r['dps']:>6.0f} {r['pct']:>3.0f}%"
+                        f"{int(r['heal']):>9}{over}",
                font=mono, fill=FG_VALUE if r["is_me"] else FG_TEXT)
         y += line_h
         bar(x0, y, x1 - x0, r["total"] / top_dmg, DMG_BAR, bar_h)
         y += bar_h
-        bar(x0, y, x1 - x0, r["heal"] / top_heal, HEAL_BAR, bar_h)
+        bar(x0, y, x1 - x0, r["heal"] / top_heal, HEAL_BAR, bar_h,
+            self_frac=r.get("heal_self", 0.0) / top_heal)
         y += bar_h + row_gap
 
     if focus:
@@ -9095,13 +9717,15 @@ def render_parse_image(data, path):
             # is of the player's overall total, not of the listed rows.
             scale = max((e[1] for e in entries), default=0.0) or 1.0
             cy = y
-            for label, amount, hits, _crits in entries:
+            for label, amount, hits, _crits, slf in entries:
                 pct = (amount / denom * 100) if denom else 0.0
                 d.text((cx, cy),
                        f"{label[:16]:<16}{int(amount):>8} {pct:>3.0f}% {hits:>3}h",
                        font=mono_small, fill=FG_TEXT)
                 cy += line_h
-                bar(cx, cy, colw, amount / scale, colour, 4)
+                frac = amount / scale
+                bar(cx, cy, colw, frac, colour, 4,
+                    self_frac=frac * (slf / amount) if amount > 0 else 0.0)
                 cy += 4 + 3
             col_bottom = max(col_bottom, cy)
         y = col_bottom
@@ -9178,7 +9802,8 @@ def render_rift_report_image(data, path=None):
         d.text((cx, y), ph["label"].upper(), font=ui, fill=RIFT_PEAK)
         y += 24
         d.text((cx, y), f"{Overlay._mmss(ph['duration'])}  ·  "
-               f"{int(ph['total']):,} dmg  ·  {int(ph['heal']):,} heal",
+               f"{int(ph['total']):,} dmg  ·  {int(ph['heal']):,} heal"
+               + _overheal_note(ph),
                font=ui_small, fill=RIFT_TITLE)
         y += 24
         players = ph["players"]
@@ -9192,6 +9817,10 @@ def render_rift_report_image(data, path=None):
         star(cx + 11, y + 14, 11, REPORT_MEDALS[0])
         d.text((cx + 28, y), Overlay._elide_name(mvp["name"]),
                font=ui_mvp, fill=REPORT_MEDALS[0])
+        if mvp.get("cls"):
+            d.text((cx + 32 + d.textlength(Overlay._elide_name(mvp["name"]),
+                                           font=ui_mvp), y + 12),
+                   mvp["cls"], font=ui_small, fill=RIFT_TITLE)
         y += 30
         d.text((cx + 28, y), f"{int(mvp['total']):,} damage",
                font=ui_small, fill=RIFT_TIME)
@@ -9199,8 +9828,10 @@ def render_rift_report_image(data, path=None):
         healer = max(players, key=lambda p: p["heal"])
         if healer["heal"] > 0.5:
             plus(cx + 8, y + 9, 7, REPORT_HEAL)
-            d.text((cx + 22, y), f"{Overlay._elide_name(healer['name'])}   "
-                   f"{int(healer['heal']):,} heal",
+            d.text((cx + 22, y), f"{Overlay._elide_name(healer['name'])}"
+                   + (f" ({healer['cls']})" if healer.get("cls") else "")
+                   + f"   {int(healer['heal']):,} heal"
+                   + _overheal_note(healer, "   {:.0f}% over"),
                    font=ui_rank, fill=REPORT_HEAL)
             y += 22
 
@@ -9210,8 +9841,18 @@ def render_rift_report_image(data, path=None):
                 fg = REPORT_MEDALS[i - 1] if top3 else RIFT_TITLE
                 nfont = ui_rank if top3 else ui_small
                 d.text((cx, y), str(i), font=nfont, fill=fg)
-                d.text((cx + 18, y), Overlay._elide_name(p["name"]),
+                nm = Overlay._elide_name(p["name"])
+                d.text((cx + 18, y), nm,
                        font=nfont, fill=RIFT_TIME if top3 else RIFT_TITLE)
+                # Drawn separately, in the dim colour, so a long name's
+                # elision can never eat the acronym.
+                if p.get("cls"):
+                    # Sat on the name's baseline, not its top: the acronym is
+                    # 11px against a 14px (or 11px) name, and hanging it from
+                    # the same y reads as a superscript.
+                    d.text((cx + 22 + d.textlength(nm, font=nfont),
+                            y + (5 if top3 else 2)),
+                           p["cls"], font=mono_small, fill=RIFT_TITLE)
                 amt = f"{int(p[key]):,}"
                 pct = p[key] / total * 100 if total else 0.0
                 d.text((cx + RIFT_IMG_COL_W - 44
@@ -9613,6 +10254,11 @@ def main():
     ui_state = GameUIState()
     world = WorldSnapshot()
     rift_rec = RiftRecorder()
+    # Outlives every encounter on purpose: a skill's heal size is a property of
+    # the build, not of the pull, and resetting it each fight would throw away
+    # exactly the observations that make the first heals of the next one
+    # countable.
+    heal_sizer = HealSizeEstimator(_heal_specs())
 
     # Up before anything that can block. Attaching waits for the game to launch
     # and the hook's memory scan can run for minutes on a slow machine — with no
@@ -9622,7 +10268,7 @@ def main():
     tray = TrayIcon(request_stop)
     tray.start()
     try:
-        return _run(tray, session, ui_state, world, rift_rec)
+        return _run(tray, session, ui_state, world, rift_rec, heal_sizer)
     finally:
         tray.stop()
         # Here as well as on the paths inside _run, which miss the early
@@ -9631,7 +10277,7 @@ def main():
         release_instance_lock()
 
 
-def _run(tray, session, ui_state, world, rift_rec):
+def _run(tray, session, ui_state, world, rift_rec, heal_sizer):
     device = frida.get_local_device()
     proc = find_game_process(device)
     if proc is None:
@@ -9681,6 +10327,14 @@ def _run(tray, session, ui_state, world, rift_rec):
     nullified: dict = {}               # mitigated-hit shapes seen, see below
     nullified_at = [0.0]               # last time they were reported
     boss_fight_on = [False]            # a boss fight is under way, see below
+    # The fight clock: armed on the pull edge, read when the last bar goes
+    # down killed. It inherits the pull edge's known cost — walk away and
+    # re-pull without a loading screen and the clock keeps the first pull's
+    # start — because a fight that never formally ended was never re-timed
+    # either. `kinds` is what keys the record; see _record_boss_kill.
+    boss_clock = {"t0": None, "kinds": ()}
+
+    heal_log_at = [0.0]
 
     def on_message(message, data):
         liveness["t"] = time.monotonic()   # any agent traffic counts as alive
@@ -9722,8 +10376,21 @@ def _run(tray, session, ui_state, world, rift_rec):
                 session.record(p)
                 rift_rec.record("hit", p)
         elif k == "heal":
+            # The hook reports what LANDED (0 for a heal on a full-health
+            # target); this fills in how big the heal itself was, before both
+            # aggregators see it, so the two can never disagree.
+            heal_sizer.stamp(p)
             session.record_heal(p)
             rift_rec.record("heal", p)
+            # The formula is checked against ordinary play, not asserted: this
+            # says how many heals the cdb table could size and names any skill
+            # whose computed size came out below what it measurably restored.
+            now_h = time.monotonic()
+            if now_h - heal_log_at[0] > 30.0:
+                heal_log_at[0] = now_h
+                line = heal_sizer.drain_report()
+                if line:
+                    print(line, file=sys.stderr)
         elif k == "combat":
             session.set_combat(p.get("state") or {})
         elif k == "mounts":
@@ -9783,6 +10450,8 @@ def _run(tray, session, ui_state, world, rift_rec):
                 boss_fight_on[0] = True
                 kinds = [b.get("kind") for b in (p.get("up") or [])
                          if b.get("boss")]
+                boss_clock["t0"] = time.monotonic()
+                boss_clock["kinds"] = tuple(sorted(k for k in kinds if k))
                 print(f"[meter] boss fight started: "
                       f"{', '.join(k for k in kinds if k) or '?'}",
                       file=sys.stderr)
@@ -9825,11 +10494,29 @@ def _run(tray, session, ui_state, world, rift_rec):
                         boss_fight_on[0] = False
                         print("[meter] last boss bar down — pull reset "
                               "re-armed", file=sys.stderr)
+                        # ...and the fight clock has its reading. Keyed by the
+                        # pull's kinds; the killed bar's kind is the fallback
+                        # for a pull whose bars arrived nameless.
+                        t0 = boss_clock["t0"]
+                        boss_clock["t0"] = None
+                        if t0 is not None and ov is not None:
+                            fkinds = boss_clock["kinds"] or (
+                                (b.get("kind"),) if b.get("kind") else ())
+                            ov.on_boss_timed_kill(fkinds,
+                                                  time.monotonic() - t0)
                         # The fight is formally over — if a rift was recording,
                         # this is its ending, and the report goes up on the
                         # same signal the victory cue rides. Guarded by the
                         # recorder itself: None outside a rift.
                         report = rift_rec.on_boss_kill()
+                        # Classes are stamped in HERE rather than looked up
+                        # when the card draws: a report outlives its session
+                        # (it is saved to disk and re-opened days later, when
+                        # the world sweep no longer knows who these people
+                        # were), so the acronym has to be frozen with the rest
+                        # of the numbers.
+                        if report is not None:
+                            _stamp_report_classes(report, world)
                         if report is not None and ov is not None:
                             print("[meter] rift complete — showing the "
                                   "end-of-rift report", file=sys.stderr)
@@ -9880,6 +10567,7 @@ def _run(tray, session, ui_state, world, rift_rec):
             # mid-fight has to — otherwise a fight abandoned rather than won
             # would suppress the reset for the rest of the session.
             boss_fight_on[0] = False
+            boss_clock["t0"] = None    # an abandoned fight is not a time
             print(f"[meter] zone change ({p.get('sig')!r}"
                   + (f"; {extra}" if extra else "") + ") — meter reset",
                   file=sys.stderr)

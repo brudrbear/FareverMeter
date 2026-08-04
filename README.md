@@ -188,15 +188,21 @@ meter still works fine.
 Two overlay windows appear top-right:
 
 * **Meter** — one line per player, with columns for name, class (`War`, `Mag`,
-  `Pst`, `Rog`), damage, DPS, % and healing done, sorted by damage; your row is
+  `Pst`, `Rog`), damage, DPS, %, healing done and `OVER` (the share of that
+  healing that restored no health), sorted by damage; your row is
   marked `*`. The columns hold their positions whatever a name is written in —
   a player called 双子星 doesn't shove the numbers along. Under each line sit two
   bars: **blue = damage**, **green = healing**, each scaled against the
-  biggest damage/healing number currently on the meter.
+  biggest damage/healing number currently on the meter. The healing bar is
+  split — **parchment = healing put on themselves**, always the left segment, green
+  for everything else — so a self-healer and a party healer read apart at a
+  glance.
 * **Breakdown** — the inspected player's (default: you) per-skill damage and
   per-skill healing side by side, each ordered greatest → least with a bar
-  under every row (blue for damage, green for healing), plus per-element
-  totals.
+  under every row (blue for damage, green for healing, parchment for the
+  self-healed share of each skill — a heal cast only on yourself is a fully
+  parchment bar), plus
+  per-element totals.
 
 ### Only one at a time
 
@@ -647,11 +653,20 @@ live. Solo (no group) shows just you in party mode.
 - `Shift+\` is the last keybind. It survives because a reset is wanted *mid-fight*,
   which is exactly when the escape menu isn't an option.
 - Summon/pet damage (non-`ent.Hero` dealers) is not yet attributed to its owner.
-- Healing is *effective* healing (health actually restored) — overhealing is
-  invisible to clients and therefore not counted.
-- Heal attribution matches each health rise to the latest heal FX on that
-  target within 1.5s; two HoTs landing the same tick merge into whichever FX
-  came last.
+- Healing is *raw* healing — every heal counts at its full size whether or not
+  the target had health to restore, and `OVER` says how much of it was wasted.
+  No client is ever told how much a heal healed for (measured — see
+  TESTING.md), so the size is computed the way the game computes it, from
+  `data.cdb`: most heal skills carry their amount in `BaseSkill.dynVal1-3`
+  (which the server replicates) and the rest are a ratio on the caster's Faith,
+  Intellect, Strength or Dexterity. That covers 39 of the game's 44 heal
+  skills exactly, from the first cast, with nothing landing. The other five
+  scale on values a client can't read (`maxHealth` reads 0) and fall back to
+  the largest amount that skill has been seen to restore.
+- Natural regen is exempt from that estimate: it has no heal FX and is only
+  ever observed as the health rise itself.
+- Heal attribution matches each health rise to the oldest unmatched heal FX on
+  that target within 1.5s.
 - Party matching is by player name (fine unless two nearby players share a name).
 - Skills the CDB has no display name for fall back to the prettified id
   (underscores → spaces). All base attacks share the CDB name "Attack".
@@ -679,13 +694,18 @@ Farever is a **HashLink JIT** game: `Farever.exe` runs `hlboot.dat` (bytecode,
    argument: `_amount`, `affinity` (element), `_critical`, `_kill`, and
    `baseSkill.kind` (the spell ID). Filter dealers to `ent.Hero` (players) and
    tag each hit with the player's name; the local player is found via
-   `ui.Console.getMyHero()`. **Healing** works differently: heals are computed
-   server-side only (`receiveHeal`/`computeHeal` never run on clients), so the
-   meter reads what *is* replicated — a rise in a unit's health attribute
-   (`ent.UnitAttributes.set_health`) is the effective heal amount, and the heal
-   FX played on the target (`ent.Unit.playHitHealFX`) names the healing skill
-   and its owner. Each health rise is attributed to the most recent heal FX on
-   that unit; FX-less in-combat rises count as "Regen" (self), and
+   `ui.Console.getMyHero()`. **Healing** works differently: no heal amount is
+   ever sent to a client. All fifteen heal entry points were hooked at once and
+   only `ent.Unit.playHitHealFX` fires; its `HitData.amount` reads 0. So the
+   meter reads what *is* replicated — the heal FX played on the target
+   (`ent.Unit.playHitHealFX`) names the healing skill and its owner and is the
+   heal EVENT, and a rise in the unit's health attribute
+   (`ent.UnitAttributes.set_health`) is how much of it LANDED. Each rise is
+   matched to the oldest unmatched FX on that unit within 1.5s; an FX that
+   never gets one landed on a full-health target and is reported with
+   `landed: 0`. The host estimates the heal's real size from the high-water
+   mark of what that player's casts of that skill have restored. FX-less
+   in-combat rises count as "Regen" (self) and are never estimated;
    out-of-combat regen / spawn replication is dropped.
 4. **Follow the game's own UI.** `ui.BaseUI.displayWindow(ui, win)` and
    `removeWindow(ui, win)` are the game's window manager — every window (escape

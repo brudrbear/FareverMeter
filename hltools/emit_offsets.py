@@ -43,6 +43,7 @@ def main():
     player = offs("st.Player")
     group = offs("st.Group")
     base = offs("st.skill.BaseSkill")
+    step = offs("st.skill.SkillStep")
     string = offs("String")
     entity = offs("ent.Entity")
     state = offs("st.State")
@@ -94,11 +95,28 @@ def main():
             ["_amount", "affinity", "_critical", "_kill", "_hitCount",
              "_block", "blocker", "effect", "target", "serverSource", "ctx",
              "baseSkill"]},
+        # dynVal1-3 are how MOST player heal skills carry their amount: the
+        # cdb's skill@steps@effects rows name `dynVal` rather than a baseVal or
+        # a scaling ratio, and these three f64s are hxbit-replicated, so the
+        # number the server computed is sitting here on the client. That is the
+        # only reason healing can be counted at all — nothing else on a client
+        # knows what a heal was worth (TESTING.md, "Healing is estimated").
         "BaseSkill": {"kind": base["kind"][0], "inf": base["inf"][0],
                       "owner": base["owner"][0],
-                      "ownerPlayer": base["ownerPlayer"][0]},
-        "HitData": {"baseSkill": hd["baseSkill"][0]},
-        "UnitAttributes": {"unit": ua["unit"][0], "health": ua["health"][0]},
+                      "ownerPlayer": base["ownerPlayer"][0],
+                      "dynVal1": base["dynVal1"][0],
+                      "dynVal2": base["dynVal2"][0],
+                      "dynVal3": base["dynVal3"][0]},
+        "HitData": {"baseSkill": hd["baseSkill"][0],
+                    "step": hd["step"][0]},
+        "SkillStep": {"index": step["index"][0]},
+        # The rest of the heal skills scale off one of the caster's primary
+        # attributes (Faith on 17 of them, then Intellect/Strength/Dexterity).
+        "UnitAttributes": {"unit": ua["unit"][0], "health": ua["health"][0],
+                           "faith": ua["faith"][0],
+                           "intellect": ua["intellect"][0],
+                           "strength": ua["strength"][0],
+                           "dexterity": ua["dexterity"][0]},
         # Hero.layer is st.State.layer, inherited — it points at the GameLayer
         # the hero is in, which is how the hook reaches the rift flag without
         # calling anything (a plain pointer walk is safe off the game thread).
@@ -267,37 +285,126 @@ def main():
     OUT.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     print(f"[written] {OUT}")
 
-    # Item display names, from the game's own data.cdb (res.light.pak, found
+    # Display names, from the game's own data.cdb (res.light.pak, found
     # 2026-08-01 — NOT res.pak, which only carries assets and the non-English
-    # lang exports). The Mounts tab shows these instead of backend kinds.
+    # lang exports). Items name the Mounts/Gliders tabs; units name the boss
+    # kill toast — a bar's unit kind is routinely NOT the name on the bar
+    # (measured 2026-08-02: unit 'Cleodora' displays 'Queen Honeyzabeth',
+    # 'Phrixes' displays 'High Inquisitor Chakram').
     # Cosmetic, so a failure costs the labels and nothing else — but it is
     # still reported, because "the tab shows ids again" should be explainable
     # from the log.
     try:
-        names = extract_item_names(Path(hlboot).parent)
+        item_names, unit_names = extract_display_names(Path(hlboot).parent)
         out_names = _OUT_DIR / "item_names.json"
-        out_names.write_text(json.dumps(names, ensure_ascii=False, indent=0),
-                             encoding="utf-8")
-        print(f"[written] {out_names} ({len(names)} items)")
+        out_names.write_text(json.dumps(item_names, ensure_ascii=False,
+                                        indent=0), encoding="utf-8")
+        print(f"[written] {out_names} ({len(item_names)} items)")
+        out_units = _OUT_DIR / "unit_names.json"
+        out_units.write_text(json.dumps(unit_names, ensure_ascii=False,
+                                        indent=0), encoding="utf-8")
+        print(f"[written] {out_units} ({len(unit_names)} units)")
+        specs = extract_heal_specs(Path(hlboot).parent)
+        out_heal = _OUT_DIR / "heal_specs.json"
+        out_heal.write_text(json.dumps(specs, indent=0), encoding="utf-8")
+        print(f"[written] {out_heal} ({len(specs)} heal skills)")
     except Exception as e:
-        print(f"[!] item names skipped ({e}) — mount labels fall back to ids")
+        print(f"[!] display names skipped ({e}) — mount labels and boss "
+              f"toasts fall back to ids")
 
     print(json.dumps(meta, indent=2))
 
 
-def extract_item_names(game_dir):
-    """id -> texts.name for every row of the item sheet in data.cdb."""
+# skill@steps@effects.effect is an enum; "5:Damage,Heal,Shield,GainAtb,Status"
+# makes Heal index 1. Read off the column's own typeStr rather than hardcoded,
+# because a patch that inserts an effect kind would silently re-point it.
+HEAL_EFFECT_NAME = "Heal"
+
+
+def extract_heal_specs(game_dir):
+    """skill id -> {step index: how that step's heal amount is computed}.
+
+    This is what lets a client know what a heal was WORTH. Measured
+    2026-08-03: no heal amount is ever sent to a client (fifteen entry points
+    hooked, only playHitHealFX fires and its HitData.amount reads 0), so the
+    only way to count a heal that restored nothing is to compute it the way the
+    game does. The cdb says how, per skill:
+
+      dyn  -> the amount is in BaseSkill.dynVal1/2/3, which ARE replicated
+      scale-> ratio x one of the caster's attributes (Faith on most of them)
+      base -> a flat number
+
+    Shapes seen in this build (44 heal skills): dyn only (12), scale only (27),
+    base+dyn (4), base+scale (2), base only (2). Where both a base and a dyn
+    are given the dyn is the real value and the base is its floor, so the host
+    prefers dyn when it is non-zero.
+    """
     import pak_extract
     data, entries, data_off = pak_extract.load(Path(game_dir) / "res.light.pak")
     e = next(x for x in entries if x.path.endswith("data.cdb"))
     cdb = json.loads(data[data_off + e.pos: data_off + e.pos + e.size])
-    sheet = next(s for s in cdb["sheets"] if s["name"] == "item")
+    sheets = {sh["name"]: sh for sh in cdb["sheets"]}
+
+    # Which enum index means Heal, from the column definition itself.
+    heal_idx = 1
+    for c in sheets.get("skill@steps@effects", {}).get("columns", []):
+        if c.get("name") == "effect" and isinstance(c.get("typeStr"), str):
+            parts = c["typeStr"].split(":", 1)
+            if len(parts) == 2:
+                names = parts[1].split(",")
+                if HEAL_EFFECT_NAME in names:
+                    heal_idx = names.index(HEAL_EFFECT_NAME)
+            break
+
     out = {}
-    for ln in sheet["lines"]:
-        iid, nm = ln.get("id"), (ln.get("texts") or {}).get("name")
-        if isinstance(iid, str) and isinstance(nm, str) and nm:
-            out[iid] = nm
+    for ln in sheets["skill"]["lines"]:
+        sid = ln.get("id")
+        if not isinstance(sid, str):
+            continue
+        steps = {}
+        for i, st in enumerate(ln.get("steps") or []):
+            specs = []
+            for ef in (st.get("effects") or []):
+                if ef.get("effect") != heal_idx:
+                    continue
+                scale = [[sc.get("ratio"), sc.get("atb")]
+                         for sc in (ef.get("scaling") or [])
+                         if isinstance(sc.get("ratio"), (int, float))
+                         and isinstance(sc.get("atb"), str)]
+                spec = {}
+                if isinstance(ef.get("baseVal"), (int, float)):
+                    spec["base"] = ef["baseVal"]
+                if scale:
+                    spec["scale"] = scale
+                if isinstance(ef.get("dynVal"), int) and ef["dynVal"] > 0:
+                    spec["dyn"] = ef["dynVal"]
+                if spec:
+                    specs.append(spec)
+            if specs:
+                steps[str(i)] = specs
+        if steps:
+            out[sid] = steps
     return out
+
+
+def extract_display_names(game_dir):
+    """(items, units): id -> texts.name for the two sheets the meter labels
+    things from, in one read of the pak."""
+    import pak_extract
+    data, entries, data_off = pak_extract.load(Path(game_dir) / "res.light.pak")
+    e = next(x for x in entries if x.path.endswith("data.cdb"))
+    cdb = json.loads(data[data_off + e.pos: data_off + e.pos + e.size])
+
+    def sheet_names(name):
+        sheet = next(s for s in cdb["sheets"] if s["name"] == name)
+        out = {}
+        for ln in sheet["lines"]:
+            iid, nm = ln.get("id"), (ln.get("texts") or {}).get("name")
+            if isinstance(iid, str) and isinstance(nm, str) and nm:
+                out[iid] = nm
+        return out
+
+    return sheet_names("item"), sheet_names("unit")
 
 
 if __name__ == "__main__":
