@@ -175,6 +175,15 @@
     "active": 1096,
     "unit": 1120
   },
+  "foeClasses": [
+    "ent.Foe",
+    "ent.boss.Cleodora",
+    "ent.boss.Crabgantua",
+    "ent.boss.Mokshi",
+    "ent.boss.MunsterChuck",
+    "ent.boss.Phrixes",
+    "ent.boss.Ratsar"
+  ],
   "SkillRow": {
     "id_vidx": 7,
     "texts_vidx": 16

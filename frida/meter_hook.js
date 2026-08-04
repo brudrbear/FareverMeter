@@ -1709,16 +1709,88 @@ function main() {
         return { player: name || "?", is_me: is_me, in_party: in_party };
     }
 
+    // ---- summons and pets ----
+    // A summon's damage is a player's damage. It arrives on this same hook
+    // with an ent.Foe dealer, and until 3.3.4 it was dropped on the floor —
+    // worth ~13% of a bee build's total (measured 2026-07-30, 10,204 of
+    // 80,299 damage in one session; see TESTING.md "Summon and pet damage").
+    //
+    // `ent.Foe.summonOwner`, type-checked to ent.Hero, is the attribution.
+    // Two things that look like they'd work and don't:
+    //   * `isSummon()` / `get_summonHero()` — YES for a MOB's pet too
+    //     (RobinHoofDog01, owned by the RobinHoof mob), so a rule built on it
+    //     credits a player with a monster's wolf.
+    //   * the hit skill's `.owner` — that's the summon itself. A summon owns
+    //     its own skill, which is precisely why nothing attributed before.
+    // The type check on the OWNER is what covers both: a mob's pet has a
+    // summonOwner, it just isn't an ent.Hero. It also double-duties as the
+    // dangling-pointer guard — summonOwner is a raw pointer, so a summon that
+    // outlives its owner would otherwise read a name out of recycled memory.
+    // A freed hero stops reading back as ent.Hero and the hit is dropped.
+    const FOE_CLASS = {};
+    (OFF.foeClasses || []).forEach(function (c) { FOE_CLASS[c] = 1; });
+    const canAttributeSummons =
+        Object.keys(FOE_CLASS).length > 0 && OFF.Foe
+        && OFF.Foe.summonOwner != null;
+    if (!canAttributeSummons)
+        log("!! summon damage will not be attributed (offsets file predates "
+            + "foeClasses) — pet and totem damage is missing from the parse. "
+            + "Delete analysis_out and restart to regenerate it.");
+
+    // The owner's name is resolved HERE, at damage time, never cached at
+    // summon-birth. Measured twice independently: at set_summonOwner the
+    // owner is a valid ent.Hero whose `name` still reads null, and fills in
+    // later — caching there yields a nameless row.
+    function summonOwnerOf(dealer) {
+        if (!canAttributeSummons) return null;
+        try {
+            if (!FOE_CLASS[typeName(dealer)]) return null;
+            const owner = dealer.add(OFF.Foe.summonOwner).readPointer();
+            if (!owner || owner.isNull()) return null;   // an ordinary mob
+            if (typeName(owner) !== "ent.Hero") return null;
+            return owner;
+        } catch (e) { return null; }
+    }
+
+    // Which summon dealt it, as its RAW `Unit.kind` ("Summon_Imp"). The damage
+    // merges into the owner's row, so the skill breakdown is the only place
+    // that can say a chunk of that row came from a pet, and the host both
+    // resolves the kind to a display name and does the prefixing — see
+    // `_skill_of` / `_summon_label`.
+    //
+    // The kind is sent raw rather than prettied up here, for three reasons:
+    // the boosted-damage rule matches on the raw display name and a baked-in
+    // prefix would defeat it; the presentation can then change without a
+    // re-inject; and the kind is NOT the name the game shows — `Summon_Imp`
+    // displays as "Nightling Terror". Only the cdb unit sheet knows that, and
+    // it lives host-side.
+    //
+    // The summon's own skill is what gets recorded, not the skill that spawned
+    // it: it's what actually hit the target.
+    function petKind(dealer) {
+        try {
+            return hlStr(dealer.add(OFF.Unit.kind).readPointer()) || "";
+        } catch (e) { return ""; }
+    }
+
     Interceptor.attach(daddr, {
         onEnter() {
             try {
                 const dealer = this.context.rcx;
-                // Only players (ent.Hero) — excludes monster/boss/summon dealers.
-                if (typeName(dealer) !== "ent.Hero") return;
+                // Players (ent.Hero) and their summons. Everything else — mobs,
+                // bosses, and a MOB's pet — is somebody else's damage.
+                let attributeTo = dealer, pet = "";
+                if (typeName(dealer) !== "ent.Hero") {
+                    const owner = summonOwnerOf(dealer);
+                    if (!owner) return;
+                    attributeTo = owner;
+                    pet = petKind(dealer);
+                }
                 const dr = this.context.rdx;
                 const r = readResult(dr);
                 if (!(r.amount > 0)) return;
-                const who = heroIdent(dealer);
+                if (pet) r.pet = pet;
+                const who = heroIdent(attributeTo);
                 send(Object.assign({ kind: "hit" }, who, r));
             } catch (e) {}
         }

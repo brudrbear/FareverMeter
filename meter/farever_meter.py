@@ -1898,6 +1898,19 @@ class PartySession:
     def _skill_of(self, ev):
         sid = ev.get("skill", "?")
         nm = ev.get("name")
+        # A summon's hit carries `pet` — its raw Unit.kind. The damage already
+        # merged into the owner's row upstream, so the breakdown is the only
+        # place left that can show a pet was responsible for part of it.
+        #
+        # The KEY is prefixed with the raw kind (stable, and the same on a
+        # non-English client), which also keeps a pet's ability separate from
+        # an identically named one of the player's own. The NAME gets the
+        # sheet's display name — "Nightling Terror: Attack".
+        pet = ev.get("pet")
+        if pet:
+            sid = f"{pet}:{sid}"
+            label = _summon_label(pet)
+            nm = f"{label}: {nm}" if nm else label
         if nm and sid not in self.skill_names:
             self.skill_names[sid] = nm
         return sid
@@ -9346,6 +9359,19 @@ def _boss_label(kind):
     return _unit_names().get(kind) or _pretty_id(kind)
 
 
+def _summon_label(kind):
+    """A summon's real display name ('Summon_Imp' -> 'Nightling Terror',
+    'Rabbit_EarlyAccess_Spark' -> 'Sparktail'), falling back to the prettified
+    kind for anything the unit sheet doesn't carry.
+
+    Same sheet and the same reason as _boss_label: a unit's kind is a backend
+    id, not what the game puts on its nameplate. Stripping the `Summon_`/
+    `Totem_` prefix off the kind instead looks like it works — `Summon_Imp`
+    reduces to a plausible "Imp" — but it is a guess that happens to read well,
+    and it degenerates to a raw id on every summon not named that way."""
+    return _unit_names().get(kind) or _pretty_id(kind)
+
+
 def _mount_label(kind):
     """The item's real display name ('Mount_Aries_05' -> 'Aegis'), falling
     back to the prettified id for anything the name table doesn't carry —
@@ -9681,6 +9707,12 @@ REQUIRED_OFFSET_KEYS = ("Activity", "ArrayObj", "BossInfo", "BossesInfo",
                         # Ore/herb nodes. A pre-3.2.1 file lacks the group and
                         # sweepArray quietly draws no nodes at all.
                         "Gatherable",
+                        # Summon and pet damage. A pre-3.3.4 file has no foe
+                        # class list, and without it the hook cannot safely
+                        # read summonOwner off a dealer — so it doesn't, and
+                        # every pet's damage silently vanishes from the parse
+                        # exactly as it did before the feature existed.
+                        "foeClasses",
                         # The random-favorite glider. Collection has existed
                         # since 3.2; the gliders list is what a pre-3.2.2 file
                         # is missing, and hookGliderEquip refuses to arm
@@ -10658,6 +10690,12 @@ def _run(tray, session, ui_state, world, rift_rec, heal_sizer):
     # this is what measures it, once per id, so BOOST_SKILL_IDS can be filled
     # in from a log rather than from a guess. See "Patch quirks".
     boost_seen: set = set()
+    # (pet, owner) pairs already reported. Summon damage merges silently into
+    # the owner's row, which means a regression here is invisible — the number
+    # is just quietly ~13% low, exactly as it was before 3.3.4. This is the
+    # only place that says out loud that pet attribution is working, and on
+    # which summons. See "Summon and pet damage".
+    pet_seen: set = set()
 
     heal_log_at = [0.0]
 
@@ -10708,6 +10746,12 @@ def _run(tray, session, ui_state, world, rift_rec, heal_sizer):
                     print(f"[meter] boosted damage: skill={sig[0]!r} "
                           f"name={sig[1]!r} — counted as Boost, not damage",
                           file=sys.stderr)
+            if p.get("pet"):
+                sig = (p["pet"], p.get("player") or "?")
+                if sig not in pet_seen:
+                    pet_seen.add(sig)
+                    print(f"[meter] summon damage: pet={sig[0]!r} "
+                          f"credited to {sig[1]!r}", file=sys.stderr)
             if not dropped:
                 session.record(p)
                 rift_rec.record("hit", p)

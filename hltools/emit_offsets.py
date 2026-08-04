@@ -32,6 +32,27 @@ def main():
     def offs(name):
         return code.field_offsets(byname[name].index)
 
+    def descendants(root):
+        """Every class that inherits from `root`, itself included.
+
+        Needed because a summon's runtime class is not always the literal
+        `ent.Foe` — the hook has to recognise the whole family before it dares
+        read `summonOwner` off a dealer, since that offset means something
+        entirely different on a class that hasn't got the field."""
+        ti = byname[root].index
+        out = []
+        for t in code.types:
+            if t.kind not in (HOBJ, HSTRUCT) or not t.name:
+                continue
+            i, seen = t.index, set()
+            while 0 <= i < len(code.types) and i not in seen:
+                seen.add(i)
+                if i == ti:
+                    out.append(t.name)
+                    break
+                i = code.types[i].super_index
+        return out
+
     dr = offs("st.skill.DamageResult")
     hd = offs("st.skill.HitData")
     ua = offs("ent.UnitAttributes")
@@ -278,6 +299,11 @@ def main():
         "BossesInfo": {"bossInfos": bosses["bossInfos"][0]},
         "BossInfo": {"active": bossinfo["active"][0],
                      "unit": bossinfo["unit"][0]},
+        # Which runtime classes are foes — the set a dealer must belong to
+        # before `Foe.summonOwner` may be read off it. Measured 2026-07-30:
+        # only 7 classes descend from ent.Foe, so this is a small closed set,
+        # and a summon's class is not reliably the literal "ent.Foe".
+        "foeClasses": descendants("ent.Foe"),
         # HL virtual field indices for the skill display name
         "SkillRow": {"id_vidx": vidx(row, "id"), "texts_vidx": vidx(row, "texts")},
         "Texts": {"name_vidx": vidx(texts, "name"), "desc_vidx": vidx(texts, "desc")},
