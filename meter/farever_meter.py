@@ -3508,6 +3508,12 @@ class Overlay:
         # up. _rift_seen is the edge detector — one prompt per rift entry.
         self._prompt_open = False
         self._prompt_kind = "enter"
+        # Standing answer to both halves of that prompt: switch to all-players
+        # on the way into a rift and back to party-only on the way out, without
+        # being asked. One setting rather than two, because the pair only makes
+        # sense together — auto-switching in and then leaving you on all-players
+        # in the open world is the state the leave prompt exists to prevent.
+        self._rift_auto_view = False
         self._rift_pulse = False
         self._pulse_job = None
         self._rift_box = None      # which palette the box is wearing
@@ -3890,6 +3896,8 @@ class Overlay:
             self._sounds_on = data["sounds_on"]
         if isinstance(data.get("auto_reset_boss"), bool):
             self._auto_reset_boss = data["auto_reset_boss"]
+        if isinstance(data.get("rift_auto_view"), bool):
+            self._rift_auto_view = data["rift_auto_view"]
         if data.get("social_sort") in SOCIAL_SORTS:
             self._social_sort = data["social_sort"]
         if data.get("session_sort") in SESSION_SORTS:
@@ -3978,6 +3986,7 @@ class Overlay:
                 "sounds_on": bool(self._sounds_on),
                 "sound_volume": int(self._sound_volume),
                 "auto_reset_boss": bool(self._auto_reset_boss),
+                "rift_auto_view": bool(self._rift_auto_view),
                 "scales": {g: round(self._scales[g], 3)
                            for g, _label in SCALE_GROUPS},
                 "show": {k: self._show.get(k, ELEMENT_SHOW)
@@ -4480,6 +4489,18 @@ class Overlay:
         # the refresh loop also touches, and _drain runs them on the Tk thread.
         section(gen, "METER", first=True)
         self.btn_mode = button(gen, self._enqueue(self._toggle_mode))
+        # Directly under the mode button, because it is that button on a timer:
+        # the rift decides when it gets pressed instead of you.
+        self.btn_rift_auto_view = button(
+            gen, self._enqueue(self._toggle_rift_auto_view))
+        tk.Label(gen,
+                 text=("Presses the button above for you at both rift "
+                       "boundaries — all-players going in, party-only coming "
+                       "out — instead of asking. Each switch resets the "
+                       "encounter, as it does above."),
+                 bg=BG_BODY, fg=FG_DIM, font=self.fonts_m["ui_tiny_i"],
+                 anchor="w", justify="left",
+                 wraplength=WARN_WRAP).pack(fill="x", pady=(0, 2))
         self.btn_auto_reset = button(gen,
                                      self._enqueue(self._toggle_auto_reset_boss))
         row = field(gen, "Reset data")
@@ -5796,6 +5817,18 @@ class Overlay:
                                         anchor="w", pady=8)
         self.prompt_question.pack(fill="x")
 
+        # "Do this every time" IS the General tab's setting, offered where the
+        # question is being asked. Ticking it here and turning it on there are
+        # the same act, so the two can't disagree — see _answer_rift for why it
+        # only commits on Yes.
+        self._prompt_every_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            body, text="Do this every time", variable=self._prompt_every_var,
+            bg=RIFT_BODY, fg=RIFT_TITLE, activebackground=RIFT_BODY,
+            activeforeground=RIFT_TIME, selectcolor=RIFT_GLOW,
+            font=self.fonts["ui_10"], anchor="w",
+            highlightthickness=0, bd=0, cursor="hand2").pack(fill="x")
+
         btns = tk.Frame(body, bg=RIFT_BODY)
         btns.pack(fill="x", pady=(10, 0))
 
@@ -5929,6 +5962,9 @@ class Overlay:
 
     def _open_rift_prompt(self, kind):
         self._prompt_kind = kind
+        # Opens unticked every time. The prompt only exists while the setting
+        # is off, so a ticked box would be claiming a state that isn't real.
+        self._prompt_every_var.set(False)
         if kind == "enter":
             self.prompt_title.config(text="You have entered a rift")
             self.prompt_question.config(text="Enable 'View All Players'?")
@@ -5950,33 +5986,75 @@ class Overlay:
         self._prompt_open = False
         self._refresh_visibility()
 
+    def _apply_rift_view(self, kind):
+        """Switch the view the way the rift wants it — to all-players on the
+        way in, back to party-only on the way out.
+
+        That resets the encounter, the same as the mode button: the two views
+        can't share one encounter without the percentages lying. Saved too, so
+        a restart comes back on the view you're actually looking at."""
+        want = "all" if kind == "enter" else "party"
+        if self.mode == want:
+            return False
+        self.mode = want
+        self.focus_player = None
+        self.session.reset()
+        self._save_settings()
+        return True
+
     def _answer_rift(self, yes):
-        """Yes switches the view — to all-players on entering a rift, back to
-        party-only on leaving. Either way that resets the encounter, the same
-        as the mode button: the two views can't share one encounter without the
-        percentages lying."""
-        want = "all" if self._prompt_kind == "enter" else "party"
-        if yes and self.mode != want:
-            self.mode = want
-            self.focus_player = None
-            self.session.reset()
+        """Yes switches the view; No leaves it alone.
+
+        "Do this every time" only commits on Yes, because it is shorthand for
+        "that answer, standing" — and No is the answer that says the meter
+        shouldn't be touching the view. Ticking it and then pressing No is a
+        contradiction, so No wins and the box is discarded."""
+        if yes:
+            self._apply_rift_view(self._prompt_kind)
+            if self._prompt_every_var.get() and not self._rift_auto_view:
+                self._rift_auto_view = True
+                self._save_settings()
+                print("[meter] rift view switching is now automatic.",
+                      file=sys.stderr)
         self._close_rift_prompt()
         print(f"[meter] rift prompt answered: {'yes' if yes else 'no'}",
               file=sys.stderr)
 
+    def _toggle_rift_auto_view(self):
+        """The General tab's half of the same setting. Turning it ON mid-rift
+        doesn't retroactively switch the view — it's a rule for the next
+        crossing, and silently binning the encounter you're in the middle of
+        is not what pressing a settings toggle should do."""
+        self._rift_auto_view = not self._rift_auto_view
+        self._save_settings()
+        # An open prompt is now answering a question that has a standing
+        # answer. Honour it rather than leaving a stale box on screen.
+        if self._rift_auto_view and self._prompt_open:
+            self._apply_rift_view(self._prompt_kind)
+            self._close_rift_prompt()
+
     def _tick_rift(self):
         """One prompt per rift entry, and it goes away by itself if the rift
-        does — an unanswered box shouldn't outlive what it was asking about."""
+        does — an unanswered box shouldn't outlive what it was asking about.
+
+        With the standing answer on there is no box at all: the crossing is
+        acted on directly, in both directions."""
         in_rift = self.ui_state.in_rift()
-        if in_rift and not self._rift_seen:
-            self._rift_seen = True
-            self._open_rift_prompt("enter")
-        elif not in_rift and self._rift_seen:
-            # Leaving replaces the question rather than just dismissing it: the
-            # all-players view you switched on for the rift is the wrong one to
-            # be left holding once you're back outside.
-            self._rift_seen = False
-            self._open_rift_prompt("leave")
+        if in_rift == self._rift_seen:
+            return
+        self._rift_seen = in_rift
+        # Leaving is a question in its own right rather than a dismissal: the
+        # all-players view you switched on for the rift is the wrong one to be
+        # left holding once you're back outside.
+        kind = "enter" if in_rift else "leave"
+        if self._rift_auto_view:
+            switched = self._apply_rift_view(kind)
+            print(f"[meter] {'entered' if in_rift else 'left'} a rift — "
+                  + ("switched the player view automatically." if switched
+                     else "the player view was already right."),
+                  file=sys.stderr)
+            return
+        self._open_rift_prompt(kind)
 
     # ---- end-of-rift report ----
     def _build_report(self):
@@ -8729,6 +8807,12 @@ class Overlay:
         self.btn_auto_reset.config(
             text=("☑  Auto reset on boss pull" if self._auto_reset_boss
                   else "☐  Auto reset on boss pull"))
+        # Reads state, not action — and it's the same setting the rift prompt's
+        # "Do this every time" ticks, so a player who opted in from the prompt
+        # finds it already on here.
+        self.btn_rift_auto_view.config(
+            text=("☑  Auto 'View All Players' in rifts" if self._rift_auto_view
+                  else "☐  Auto 'View All Players' in rifts"))
         # Labelled with the action, but tinted by the *state*: green while
         # all-players is the live mode, so it's obvious at a glance that the
         # meter is showing more than the group. Switching either way calls

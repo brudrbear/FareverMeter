@@ -241,6 +241,7 @@ again.
 | Section | Button | Does |
 |---|---|---|
 | Options | Show all players / Show party only | switches between your group and everyone nearby; resets the encounter |
+| Options | Auto 'View All Players' in rifts | presses the button above for you at both rift boundaries — all-players going in, party-only coming out — and retires the [rift prompt](#rifts) that would otherwise ask. Same setting as that prompt's **Do this every time** tick. Off by default. Applies from your next crossing, not the rift you're already in |
 | Options | Theme | Five choices — see [Themes](#themes). `Dark Dynamic` is the default. |
 | Options | Transparency | how see-through the overlay is, 0-80%. It covers the meter, breakdown, minimap, compass and rift timer — panel, header bar and text together, since window opacity is the only kind Windows offers. The control menu and the rift prompt are exempt: one is what you're reading while you drag the slider, the other is a question that has to be answered |
 | Options | Minimap | `Rotating` (default) turns the map with the camera, so the top of the map is whatever you're looking at. `Fixed` keeps north up and turns the arrow instead. |
@@ -481,6 +482,16 @@ all-players and resets the encounter (the mode button does the same; party-only
 and all-players numbers can't share one encounter without the percentages
 lying). **No** just dismisses it. It re-arms when you leave the rift, and closes
 itself if the rift ends before you answer.
+
+If your answer is always the same, tick **Do this every time** before pressing
+Yes — or turn on **Auto 'View All Players' in rifts** under Options. They are one
+setting reached two ways, so opting in from the prompt shows up ticked in the
+menu. With it on the prompt stops appearing and the meter switches for you in
+both directions: all-players on the way in, party-only on the way out. The box
+only counts alongside **Yes** — pressing No is the answer that says the meter
+shouldn't be touching the view, so ticking it and then declining discards the
+tick. Turning the setting on from the menu applies to your next crossing rather
+than the rift you're standing in, since each switch resets the encounter.
 
 A **rift countdown** floats separately, styled after the rifts rather than the
 meter — drag it anywhere, its position is remembered, and it's toggled under
