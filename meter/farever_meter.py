@@ -147,6 +147,61 @@ COMBAT_TIMEOUT_SECS = 25.0
 # listed is still reported by the mitigated-hit log, so adding one later is a
 # one-line change backed by the same evidence this one was.
 NULLIFIED_BLOCKERS = frozenset({"InvulnerableHit"})
+
+# ---------------------------------------------------------------------------
+# Patch quirks
+# ---------------------------------------------------------------------------
+# Things this build of Farever does that the meter has to work around, kept in
+# one block so they can be removed in one edit when a patch fixes them. Nothing
+# else in the file should grow a special case for a single skill: it goes here,
+# or it doesn't go in.
+#
+# --- boosted damage (patch 2026-07, still live) ---
+# "Swarmstrike Accord" (the Sword_Swarm weapon, "Beefury, Blessed Blade of the
+# Farseeker") buffs every player in range so their hits deal bonus damage — and
+# the game credits that bonus to the BUFF'S CASTER, not to whoever swung. In a
+# rift, where the buff is landing on a dozen people who are all attacking, the
+# wielder's row stops being a measurement of what they did: it is mostly other
+# people's damage wearing their name.
+#
+# So hits from a boosted skill are pulled out of the damage total and counted
+# in a column of their own. They are NOT dropped: the damage is real and it
+# lands on the target, it just belongs to nobody in particular, and hiding it
+# would leave a rift's numbers quietly short. Boost keeps the encounter alive
+# (it is damage happening in a fight) but stays out of DMG, DPS, %, the element
+# split and the skill breakdown, all of which are per-player claims.
+#
+# Matched by DISPLAY NAME, because that is what can be checked. The skill ids
+# for this weapon are Sword_Swarm_{Combo,Skill1,Skill1_SelfBuff,Skill1_Status,
+# Passive,Passive_Swarm,Passive_Poison} — and most of those are the wielder's
+# own attacks, which must keep counting, so a Sword_Swarm_* prefix would throw
+# away real damage. Which id carries the boost is not in hlboot.dat (display
+# names live in the cdb, resolved live by the hook), so it has not been
+# measured, and a guess here would be an invisible one. The host logs the id
+# the first time a boosted hit arrives — see `boost_seen` in the message pump —
+# and once that name is in the log it can be pinned in BOOST_SKILL_IDS below,
+# which then also survives a non-English client.
+#
+# If the cdb name never resolves the match silently misses and the damage counts
+# as damage again — i.e. what the meter did before this. The tell is a breakdown
+# row reading "Sword Swarm ..." (the prettified id fallback): that id goes in
+# BOOST_SKILL_IDS and the match is exact from then on.
+#
+# Lower-cased on both sides; the display name is whatever the cdb says.
+BOOST_SKILL_NAMES = frozenset({"swarmstrike accord"})
+BOOST_SKILL_IDS = frozenset()       # e.g. {"sword_swarm_passive_swarm"}
+
+
+def is_boost_hit(ev) -> bool:
+    """Is this hit damage the game credited to a player who didn't deal it?
+
+    Reads the event the hook sends, so both aggregators and the ingest logging
+    ask exactly the same question of exactly the same fields."""
+    if (ev.get("name") or "").strip().lower() in BOOST_SKILL_NAMES:
+        return True
+    return (ev.get("skill") or "").strip().lower() in BOOST_SKILL_IDS
+
+
 # How much damage a boss-pull reset keeps rather than wiping.
 #
 # The reset is driven by the game's boss healthbar, and that bar is refreshed on
@@ -1703,6 +1758,13 @@ class PlayerAgg:
     heal_landed: float = 0.0    # ...of which actually restored health
     heal_self: float = 0.0      # ...and of which the healer was the target
     heal_hits: int = 0
+    # Damage the game credited to this player but somebody else swung for —
+    # see "Patch quirks" at the top. Deliberately parallel to `total`/`hits`
+    # rather than mixed into them: every other number on the row is a claim
+    # about what this player did, and this one isn't.
+    boost_total: float = 0.0
+    boost_hits: int = 0
+    boost_crits: int = 0
     # skill -> [hits, total, crits]  (damage)
     skills: dict[str, list] = field(default_factory=lambda: defaultdict(lambda: [0, 0.0, 0]))
     # skill -> [hits, total, crits, self_total]  (healing). The fourth column
@@ -1728,6 +1790,17 @@ class PlayerAgg:
         s[0] += 1; s[1] += amount; s[2] += crit
         e = self.elements[element]
         e[0] += 1; e[1] += amount
+
+    def record_boost(self, amount, crit, now):
+        """A boosted hit: counted, timestamped, and kept out of everything
+        else. It touches last_time because it IS this player being active in
+        the fight — it just isn't their damage."""
+        if self.first_time == 0.0:
+            self.first_time = now
+        self.last_time = now
+        self.boost_total += amount
+        self.boost_hits += 1
+        self.boost_crits += crit
 
     def record_heal(self, skill, amount, crit, landed=0.0, is_self=False):
         self.heal_total += amount
@@ -1844,10 +1917,19 @@ class PartySession:
                 self.enc_start = now
             self.last_hit = now
             self._recent.append((now, "hit", ev))
-            p = self._player_for(ev)
+            self._apply_hit(self._player_for(ev), ev, now)
+
+    def _apply_hit(self, p, ev, ts):
+        """Route one hit into the right bucket. Shared with the boss-pull
+        rewind, so a replayed hit lands exactly where the live one did —
+        including a boosted one, which must not reappear as damage."""
+        if ev.get("boost"):
+            p.record_boost(float(ev.get("amount", 0.0)),
+                           int(ev.get("crit", 0)), ts)
+        else:
             p.record(self._skill_of(ev), ev.get("element", "?"),
                      float(ev.get("amount", 0.0)), int(ev.get("crit", 0)),
-                     int(ev.get("kill", 0)), now)
+                     int(ev.get("kill", 0)), ts)
 
     def record_heal(self, ev: dict):
         # Heals are recorded but never drive encounter boundaries: an
@@ -1922,9 +2004,7 @@ class PartySession:
                     if self.enc_start == 0.0:
                         self.enc_start = ts
                     self.last_hit = ts
-                    p.record(self._skill_of(ev), ev.get("element", "?"),
-                             float(ev.get("amount", 0.0)),
-                             int(ev.get("crit", 0)), int(ev.get("kill", 0)), ts)
+                    self._apply_hit(p, ev, ts)
                 else:
                     p.record_heal(self._skill_of(ev),
                                   float(ev.get("amount", 0.0)),
@@ -2004,7 +2084,8 @@ class RiftRecorder:
         p = ph["players"].get(name)
         if p is None:
             p = {"name": name, "total": 0.0, "hits": 0, "crits": 0,
-                 "kills": 0, "heal": 0.0, "heal_landed": 0.0, "heal_hits": 0}
+                 "kills": 0, "heal": 0.0, "heal_landed": 0.0, "heal_hits": 0,
+                 "boost": 0.0, "boost_hits": 0}
             ph["players"][name] = p
         return p
 
@@ -2013,7 +2094,13 @@ class RiftRecorder:
         stat is a plain sum, which is what makes the rewind exact."""
         p = self._player_of(ph, ev.get("player") or "?")
         amount = sign * float(ev.get("amount", 0.0))
-        if kind == "hit":
+        if kind == "hit" and ev.get("boost"):
+            # Same split as the live meter, and for the same reason: this is
+            # the one number on the row that isn't a claim about the player.
+            # See "Patch quirks".
+            p["boost"] += amount
+            p["boost_hits"] += sign
+        elif kind == "hit":
             p["total"] += amount
             p["hits"] += sign
             p["crits"] += sign * int(ev.get("crit", 0))
@@ -2095,10 +2182,12 @@ class RiftRecorder:
                 # the moved window ends up all-zero) — drop empty rows rather
                 # than showing "0" lines.
                 players = [p for p in players
-                           if p["total"] > 0.5 or p["heal"] > 0.5]
+                           if p["total"] > 0.5 or p["heal"] > 0.5
+                           or p["boost"] > 0.5]
                 total = sum(p["total"] for p in players)
                 heal = sum(p["heal"] for p in players)
                 heal_landed = sum(p["heal_landed"] for p in players)
+                boost = sum(p["boost"] for p in players)
                 elements = sorted(((el, amt) for el, amt
                                    in ph["elements"].items() if amt > 0.5),
                                   key=lambda kv: -kv[1])
@@ -2107,7 +2196,7 @@ class RiftRecorder:
                                "duration": max(0.0, end - start),
                                "players": players, "total": total,
                                "heal": heal, "heal_landed": heal_landed,
-                               "elements": elements})
+                               "boost": boost, "elements": elements})
             return {"at": now, "phases": phases}
 
 
@@ -3449,6 +3538,12 @@ class Overlay:
         # stays a plain on/off rather than gaining a mode it can't honour.
         self._show_heal = True
         self._sort_heal = False        # rows ordered by healing, not damage
+        # The BOOST column has no setting: it appears when the encounter
+        # actually contains boosted damage and goes away again on reset. It is
+        # a patch quirk, not a feature — nobody should have to know a toggle
+        # exists to understand a number that only one weapon in the game can
+        # produce, and nobody else should be looking at an empty column.
+        self._show_boost = False
         self._mount_random = False     # random favorite mount on each summon
         self._mount_mode = "Random"    # how the pick is made (MOUNT_MODES)
         self._mount_favs: set[str] = set()   # mount kinds the swap may pick
@@ -3458,7 +3553,8 @@ class Overlay:
         self._glider_favs: set[str] = set()  # glider kinds the equip may pick
         self._gliders_shown = None     # unlock list the checkboxes were built from
         self._shown = {k: True for k, _ in TOGGLEABLE_ELEMENTS}
-        self._heal_cols_shown = True   # last healing layout pushed to the widgets
+        # (healing, boost) as last pushed to the widgets — see _apply_heal_columns
+        self._cols_shown = (True, False)
         self._combat_seen_at = 0.0     # last moment a tracked player was fighting
         self._header_bg = BG_HEADER    # last tint pushed to the header bars
         self._theme = THEME_DEFAULT    # what's painted right now
@@ -4106,6 +4202,10 @@ class Overlay:
     def _meter_cols_text(self):
         head = (f"  #  {'NAME':<{METER_NAME_CELLS}}{'CLS':<{METER_CLASS_CELLS}}"
                 f"{'DMG':>9} {'DPS':>6} {'%':>4}")
+        # BOOST sits next to the damage numbers it was taken out of, so the
+        # two read together — and only while something is producing it.
+        if self._show_boost:
+            head += f"{'BOOST':>9}"
         # OVER% rides with the healing columns because it is a share OF them:
         # on its own, next to a damage table, it would be a percentage of a
         # number that isn't on screen.
@@ -6237,9 +6337,13 @@ class Overlay:
 
         # The phase title is the column's headline; the totals sit under it.
         line(ph["label"].upper(), font="ui_b", fg=RIFT_PEAK)
+        # Boost joins the totals line only when the run contained any — and
+        # `.get`, because reports saved before the split have no such key.
+        boost = ph.get("boost", 0.0)
         line(f"{self._mmss(ph['duration'])}   ·   "
              f"{int(ph['total']):,} dmg   ·   {int(ph['heal']):,} heal"
-             + _overheal_note(ph),
+             + _overheal_note(ph)
+             + (f"   ·   {int(boost):,} boost" if boost > 0.5 else ""),
              fg=RIFT_TITLE)
 
         players = ph["players"]
@@ -6452,7 +6556,10 @@ class Overlay:
         for ph in data["phases"]:
             out.append(f"== {ph['label']} — {self._mmss(ph['duration'])}, "
                        f"{int(ph['total']):,} dmg, {int(ph['heal']):,} heal"
-                       + _overheal_note(ph, " ({:.0f}% overheal)") + " ==")
+                       + _overheal_note(ph, " ({:.0f}% overheal)")
+                       + (f", {int(ph['boost']):,} boost"
+                          if ph.get("boost", 0.0) > 0.5 else "")
+                       + " ==")
             players = ph["players"]
             if not players:
                 out.append("  (nothing recorded)")
@@ -6468,6 +6575,14 @@ class Overlay:
                 out.append(f"  heal {i}. {_report_name(p)} "
                            f"{int(p['heal']):,} ({pct:.1f}%"
                            + _overheal_note(p, ", {:.0f}% over") + ")")
+            # Who the game credited the buff damage to, by name: the number in
+            # the header line is meaningless without knowing whose row it came
+            # off. Usually exactly one player — see "Patch quirks".
+            boosted = sorted((p for p in players if p.get("boost", 0.0) > 0.5),
+                             key=lambda p: -p["boost"])
+            for i, p in enumerate(boosted[:5], 1):
+                out.append(f"  boost {i}. {_report_name(p)} "
+                           f"{int(p['boost']):,}")
             if ph["elements"]:
                 out.append("  types: " + " · ".join(
                     f"{'Other' if el == '?' else el} "
@@ -6602,6 +6717,8 @@ class Overlay:
             stats = [f"{int(fp.total)} dmg", f"{fdps:.0f} dps",
                      f"{fp.hits} hits", f"{crit_pct:.0f}% crit",
                      f"{int(fp.heal_total)} heal"]
+            if fp.boost_total > 0.5:
+                stats.append(f"{int(fp.boost_total)} boost")
             if fp.heal_total > 0.5:
                 stats.append(f"{fp.overheal_pct:.0f}% overheal")
             if fp.kills:
@@ -6621,9 +6738,12 @@ class Overlay:
             "when": time.strftime("%Y-%m-%d %H:%M"),
             "duration": duration,
             "mode": "PARTY" if self.mode == "party" else "ALL PLAYERS",
+            # `boost` rides on every row and the renderer draws the column only
+            # if some row has one — the image says what the overlay said.
             "rows": [{
                 "name": p.name, "total": p.total, "heal": p.heal_total,
                 "heal_self": p.heal_self, "overheal": p.overheal_pct,
+                "boost": p.boost_total,
                 "dps": p.total / duration if duration > 0 else 0.0,
                 "pct": (p.total / party_total * 100) if party_total else 0.0,
                 "is_me": p.is_me,
@@ -8528,16 +8648,22 @@ class Overlay:
         return out[:MAX_SKILL_ROWS]
 
     def _apply_heal_columns(self):
-        """Show/hide every healing-specific piece of chrome in one go: the
-        meter's HEAL column header, and the breakdown's HEALING list with its
-        divider. Guarded on the last applied state — re-packing widgets on every
-        250 ms tick would flicker."""
-        show = self._show_heal
-        if show == self._heal_cols_shown:
+        """Show/hide every optional piece of meter chrome in one go: the
+        healing columns (the meter's HEAL header, and the breakdown's HEALING
+        list with its divider) and the patch-quirk BOOST header. Guarded on the
+        last applied state — re-packing widgets on every 250 ms tick would
+        flicker."""
+        state = (self._show_heal, self._show_boost)
+        if state == self._cols_shown:
             return
-        self._heal_cols_shown = show
+        # The header line carries both; only the healing half owns widgets, so
+        # a boost-only change redraws the header and stops there.
+        heal_changed = self._cols_shown[0] != self._show_heal
+        self._cols_shown = state
         self.cols_lbl.config(text=self._meter_cols_text())
-        if show:
+        if not heal_changed:
+            return
+        if self._show_heal:
             self.col_sep.pack(side="left", fill="y", padx=6)
             self.heal_col.f.pack(side="left", anchor="n")
         else:
@@ -8990,9 +9116,14 @@ class Overlay:
         # The Social pages are deliberately NOT refreshed here: they load on
         # the menu opening, the tab being raised, and the Refresh button, and
         # hold still in between — see _reload_social for what polling cost.
-        self._apply_heal_columns()
         _, _, rows = self.session.snapshot()
         rows = self._apply_mode(rows)
+        # Decided from the rows that are about to be drawn, so the column
+        # follows what you can actually see: a boosted player filtered out by
+        # party mode takes their column with them. It costs one pass over at
+        # most eight rows.
+        self._show_boost = any(p.boost_total > 0.5 for p in rows)
+        self._apply_heal_columns()
         if self._sort_heal:
             rows.sort(key=lambda p: -p.heal_total)
         # The capture clock only advances while at least one *displayed*
@@ -9059,6 +9190,7 @@ class Overlay:
                          heal_frac=p.heal_total / top_heal,
                          heal_self_frac=p.heal_self / top_heal,
                          show_heal=self._show_heal,
+                         show_boost=self._show_boost,
                          cls_tag=_class_tag(self.world.class_of(p.name)))
             else:
                 row.hide()
@@ -9077,6 +9209,11 @@ class Overlay:
             crit_pct = (fp.crits / fp.hits * 100) if fp.hits else 0.0
             stats = [f"{int(fp.total)} dmg", f"{fdps:.0f} dps",
                      f"{fp.hits} hits", f"{crit_pct:.0f}% crit"]
+            # Named in the breakdown rather than left as a bare number in the
+            # column: this is where there is room to say what it was.
+            if fp.boost_total > 0.5:
+                stats.append(f"{int(fp.boost_total)} boost "
+                             f"({fp.boost_hits} hits)")
             if self._show_heal:
                 stats.append(f"{int(fp.heal_total)} heal")
                 if fp.heal_total > 0.5:
@@ -9342,7 +9479,7 @@ class PlayerRow:
         return text
 
     def show(self, rank, p, dps, pct, focused, dmg_frac, heal_frac,
-             heal_self_frac=0.0, show_heal=True, cls_tag=""):
+             heal_self_frac=0.0, show_heal=True, show_boost=False, cls_tag=""):
         if not self._packed:
             self.f.pack(fill="x", pady=1)
             self._packed = True
@@ -9364,6 +9501,12 @@ class PlayerRow:
         self.top.grid_columnconfigure(1, minsize=cell * METER_CLASS_CELLS)
         line = f"{tag}{rank}.{me}{self._trim(p.name, METER_NAME_CELLS)}"
         nums = f"{int(p.total):>9} {dps:>6.0f} {pct:>3.0f}%"
+        if show_boost:
+            # Blank, not "0", for everyone the buff isn't crediting: a column
+            # of zeroes down a party of eight says nothing, and the one row
+            # that has a number is the whole point of the column.
+            nums += (f"{int(p.boost_total):>9}" if p.boost_total > 0.5
+                     else " " * 9)
         if show_heal:
             nums += f"{int(p.heal_total):>9}"
             # A row that never healed has no overheal share to report, and a
@@ -9839,9 +9982,13 @@ def render_parse_image(data, path):
 
     d.text((x0, y), f"{data['mode']}   ({len(rows)})", font=ui_small, fill=ACCENT)
     y += 18
+    # Same rule as the overlay's BOOST column: drawn only when the parse
+    # actually contains boosted damage. Older snapshots have no such key.
+    show_boost = any(r.get("boost", 0.0) > 0.5 for r in rows)
     d.text((x0, y),
            f"  #  {'NAME':<12}{'DMG':>9} {'DPS':>6} {'%':>4}"
-           f"{'HEAL':>9}{'OVER':>6}",
+           + (f"{'BOOST':>9}" if show_boost else "")
+           + f"{'HEAL':>9}{'OVER':>6}",
            font=mono, fill=FG_DIM)
     y += line_h
 
@@ -9851,9 +9998,13 @@ def render_parse_image(data, path):
         me = "*" if r["is_me"] else " "
         over = (f"{r.get('overheal', 0.0):>5.0f}%" if r["heal"] > 0.5
                 else " " * 6)
+        boost = ""
+        if show_boost:
+            boost = (f"{int(r['boost']):>9}" if r.get("boost", 0.0) > 0.5
+                     else " " * 9)
         d.text((x0, y), f"  {i}.{me}{r['name'][:12]:<12}{int(r['total']):>9} "
                         f"{r['dps']:>6.0f} {r['pct']:>3.0f}%"
-                        f"{int(r['heal']):>9}{over}",
+                        f"{boost}{int(r['heal']):>9}{over}",
                font=mono, fill=FG_VALUE if r["is_me"] else FG_TEXT)
         y += line_h
         bar(x0, y, x1 - x0, r["total"] / top_dmg, DMG_BAR, bar_h)
@@ -10502,6 +10653,11 @@ def _run(tray, session, ui_state, world, rift_rec, heal_sizer):
     # start — because a fight that never formally ended was never re-timed
     # either. `kinds` is what keys the record; see _record_boss_kill.
     boss_clock = {"t0": None, "kinds": ()}
+    # (skill id, display name) pairs already reported for boosted damage. The
+    # quirk is matched on the display name because the id was never measured —
+    # this is what measures it, once per id, so BOOST_SKILL_IDS can be filled
+    # in from a log rather than from a guess. See "Patch quirks".
+    boost_seen: set = set()
 
     heal_log_at = [0.0]
 
@@ -10541,6 +10697,17 @@ def _run(tray, session, ui_state, world, rift_rec, heal_sizer):
             # record() rather than subtracted after, so it can't start an
             # encounter or extend one either — whaling on an immune boss is not
             # combat as far as the parse is concerned.
+            # Classified here, once, and stamped onto the event: both
+            # aggregators then bucket it the same way without either of them
+            # knowing which skill the current patch is broken on.
+            if is_boost_hit(p):
+                p["boost"] = 1
+                sig = (p.get("skill") or "?", p.get("name") or "")
+                if sig not in boost_seen:
+                    boost_seen.add(sig)
+                    print(f"[meter] boosted damage: skill={sig[0]!r} "
+                          f"name={sig[1]!r} — counted as Boost, not damage",
+                          file=sys.stderr)
             if not dropped:
                 session.record(p)
                 rift_rec.record("hit", p)
