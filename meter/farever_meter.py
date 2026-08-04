@@ -2566,7 +2566,14 @@ def _set_rounded_corners(hwnd):
         pass
 
 
-def _set_clickthrough(hwnd, enabled):
+def _set_clickthrough(hwnd, enabled, activatable=False):
+    """Set one window's click-through, and whether it may hold keyboard focus.
+
+    `activatable` drops WS_EX_NOACTIVATE. Only the control menu asks for it,
+    and only because it carries the Social tab's search boxes: a window that
+    never activates never receives a keystroke, so a tk.Entry on one is inert
+    no matter what is bound to it — the same wall _begin_bind_capture works
+    around by polling the keyboard instead of binding to it."""
     if sys.platform != "win32":
         return
     u = ctypes.windll.user32
@@ -2574,7 +2581,11 @@ def _set_clickthrough(hwnd, enabled):
         get, setl = u.GetWindowLongPtrW, u.SetWindowLongPtrW
     else:
         get, setl = u.GetWindowLongW, u.SetWindowLongW
-    ex = get(hwnd, GWL_EXSTYLE) | WS_EX_LAYERED | WS_EX_NOACTIVATE
+    ex = get(hwnd, GWL_EXSTYLE) | WS_EX_LAYERED
+    if activatable:
+        ex &= ~WS_EX_NOACTIVATE
+    else:
+        ex |= WS_EX_NOACTIVATE
     if enabled:
         ex |= WS_EX_TRANSPARENT
     else:
@@ -3423,6 +3434,10 @@ class Overlay:
         # its escape menu. There is no manual lock any more — the game's own UI
         # state is the single source of truth.
         self._menu_unlock = False
+        # A search box on the control menu has keyboard focus, so the game is
+        # not seeing keystrokes right now. Everything that would otherwise
+        # shove focus back at the game defers to this — see _refocus_game.
+        self._typing = False
         self._hide_ooc = False         # "hide out of combat" setting
         self._social_sort = "name"     # Social roster order; see SOCIAL_SORTS
         self._best_times = self._load_best_times()   # fastest boss kills, secs by kind
@@ -4392,6 +4407,19 @@ class Overlay:
                 relief="flat", bd=0, highlightthickness=1,
                 highlightbackground=BG_BAR_TRACK, highlightcolor=ACCENT)
             ent.pack(side="left", fill="x", expand=True, padx=(8, 8))
+            # focus_FORCE, not focus_set: the menu is an overrideredirect
+            # window, so Tk does not believe it holds the focus and focus_set
+            # alone leaves the caret dead even now that the window can activate.
+            ent.bind("<Button-1>", lambda _e, w=ent: w.focus_force())
+            ent.bind("<FocusIn>", lambda _e: self._set_typing(True))
+            ent.bind("<FocusOut>", lambda _e: self._set_typing(False))
+            # Esc and Return both mean "done typing". Esc matters most: while
+            # this box holds the keyboard, the game cannot see its own Escape,
+            # so the first press leaves the box and the second reaches the game
+            # and closes its menu. Swallowed ("break") so the first press isn't
+            # also read as something else on the way past.
+            for seq in ("<Escape>", "<Return>", "<KP_Enter>"):
+                ent.bind(seq, lambda _e: (self._stop_typing(), "break")[1])
             count = tk.Label(row, text="", bg=BG_BODY, fg=FG_DIM,
                              font=self.fonts_m["ui_tiny_i"], anchor="e")
             count.pack(side="right")
@@ -4764,6 +4792,12 @@ class Overlay:
         re-layout."""
         if name not in self._menu_tab_frames:
             return
+        # Leaving Social means you're done typing. Tk focus survives a raise —
+        # the search box is only hidden, not destroyed — so without this the
+        # keyboard would still be pointed at an off-screen Entry, and a key
+        # pressed over on Windows while rebinding would land in it too.
+        if name != "Social":
+            self._stop_typing()
         self._menu_tab = name
         self._menu_tab_frames[name].tkraise()
         for n, b in self._menu_tab_btns.items():
@@ -6754,7 +6788,16 @@ class Overlay:
         and once one of those has been opened the game stops seeing keystrokes.
         The symptom is Esc not closing the game's menu until you click the game
         first. Rather than leaving that to the player, every interaction with
-        the control menu ends by giving the game the foreground back."""
+        the control menu ends by giving the game the foreground back.
+
+        Except while a search box is being typed into — that is the one time
+        the overlay is meant to hold the keyboard, and handing it back mid-word
+        would eat the rest of what you were typing. Clicking a button on the
+        menu therefore does NOT end typing (Tk doesn't move focus on a button
+        click), which is what makes "type a name, hit the sort toggle, keep
+        typing" work."""
+        if self._typing:
+            return
         if sys.platform != "win32" or not self.target_pid:
             return
         hwnd = self._game_hwnd
@@ -6769,18 +6812,38 @@ class Overlay:
         except Exception:
             pass
 
+    def _set_typing(self, on):
+        self._typing = bool(on)
+
+    def _stop_typing(self):
+        """Give the keyboard back to the game.
+
+        Esc or Return in a search box, and every route by which the control
+        menu leaves the screen. That second half is not optional: a _typing
+        that outlived the window it belonged to would silently disable
+        _refocus_game for the rest of the run. Cheap and idempotent, because
+        _refresh_visibility calls it on every tick the menu is down."""
+        if not self._typing:
+            return
+        self._typing = False
+        try:
+            self.menu.focus_set()   # off the Entry, before the game takes over
+        except tk.TclError:
+            pass
+        self._refocus_game()
+
     def _on_row_click(self, name):
         # Same rule as the window's click-through, or the row would be
         # clickable-looking and inert while the mouse is free.
         if self._mouse_available() and name:
             self.focus_player = name
 
-    def _set_win_clickthrough(self, win, enabled):
+    def _set_win_clickthrough(self, win, enabled, activatable=False):
         if sys.platform != "win32":
             return
         hwnd = win.winfo_id()
         parent = ctypes.windll.user32.GetParent(hwnd)
-        _set_clickthrough(parent or hwnd, enabled)
+        _set_clickthrough(parent or hwnd, enabled, activatable)
 
     def _round_win_corners(self, win):
         """Round one window, on the wrapper hwnd click-through also targets.
@@ -6841,7 +6904,15 @@ class Overlay:
         # The control menu is always interactive (it is only ever shown while
         # the cursor is free); the floating hint and parse banner are text over
         # the game and must never take a click.
-        self._set_win_clickthrough(self.menu, False)
+        #
+        # It is also the one window allowed to ACTIVATE, because it is the one
+        # window with a text field on it. Harmless here where it would not be
+        # elsewhere: the menu is only ever on screen while the game's escape
+        # menu holds the cursor, and _game_has_focus already counts our own
+        # process as the game having focus, so taking the foreground does not
+        # trip the alt-tab hiding rule. See _stop_typing for how it's handed
+        # back.
+        self._set_win_clickthrough(self.menu, False, activatable=True)
         self._set_win_clickthrough(self.hintwin, True)
         self._set_win_clickthrough(self.parsewin, True)
         self._set_win_clickthrough(self.killwin, True)
@@ -7982,6 +8053,7 @@ class Overlay:
         #
         # Both were reported as the menu rendering over the exit prompt.
         if self._game_gone:
+            self._stop_typing()
             changed = False
             for key in self._fade_win:
                 changed |= self._want_visible(key, False)
@@ -8067,9 +8139,11 @@ class Overlay:
                         and self._focused and not menu_hidden
                         and not self._updating)
         # Whatever route the menu leaves by — Esc, alt-tab, the game opening
-        # something over it — its dropdowns leave with it.
+        # something over it — its dropdowns leave with it, and so does the
+        # keyboard if a search box was holding it.
         if not menu_visible:
             self._unpost_menus()
+            self._stop_typing()
         changed |= self._want_visible("menu", menu_visible)
         changed |= self._want_visible("hint", menu_visible)
         changed |= self._want_visible("prompt", self._prompt_open)
@@ -8205,11 +8279,14 @@ class Overlay:
         """Listen for the next keypress and make it the reset bind.
 
         POLLED, not bound. The obvious version — focus the button and take a
-        Tk <KeyPress> — silently never fires: every overlay window is
-        overrideredirect and carries WS_EX_NOACTIVATE precisely so that
-        clicking it can't steal focus from the game, which also means it never
-        receives a keystroke. The keyboard belongs to Farever the entire time
-        this panel is on screen.
+        Tk <KeyPress> — silently never fires unless something has deliberately
+        claimed the keyboard first: the overlay windows are overrideredirect,
+        and every one of them except the control menu carries WS_EX_NOACTIVATE
+        precisely so that clicking it can't steal focus from the game, which
+        also means it never receives a keystroke. The menu is the exception
+        only while a Social search box has focus (see _stop_typing) — and
+        _set_menu_tab ends that on the way to this tab, so by the time you are
+        looking at this button the keyboard belongs to Farever again.
 
         GetAsyncKeyState doesn't care who has focus, needs no hook, and reads
         the same virtual-key codes the hook will later match against — so what
@@ -8502,6 +8579,9 @@ class Overlay:
         """Raise one of the Social sub-pages and paint its tab."""
         if key not in self._social_page_frames:
             return
+        # Each page has its own search box, and the one being left keeps Tk's
+        # focus through the raise — same trap as _set_menu_tab.
+        self._stop_typing()
         self._social_page = key
         self._social_page_frames[key].tkraise()
         for k, b in self._social_page_btns.items():
