@@ -3571,6 +3571,8 @@ class Overlay:
         # hidden in that state unless the escape menu is open, so it isn't
         # sitting there saying "No rift upcoming" for six minutes of every hour.
         self._rift_idle = True
+        # The breakdown has no player to break down — see _refresh_visibility.
+        self._detail_idle = True
         self._last_epoch = session.epoch
         # Parse mode: None | "countdown" (pre-roll) | "parsing" | "done" (the
         # finished sample, frozen on screen until it's cleared).
@@ -8234,6 +8236,12 @@ class Overlay:
             # so the Show/hide tick can be seen to do something.
             if key == "rift" and self._rift_idle and not self._menu_unlock:
                 want = False
+            # Same rule for the breakdown: with nobody to inspect it is a box
+            # whose only content is the fact that it has none. It comes back
+            # the moment anything is recorded, and the escape menu still shows
+            # it regardless, so the Show/hide tick can be seen to do something.
+            if key == "detail" and self._detail_idle and not self._menu_unlock:
+                want = False
             # The game puts its boss/elite healthbar across the top of the
             # screen, which is exactly where the compass sits. Unconditional,
             # like the rift rule above: the two are fighting for the same
@@ -9205,11 +9213,13 @@ class Overlay:
         fp = next((p for p in rows if p.name == focus), None)
         if fp is None:
             self.d_title.config(text="Breakdown")
+            self._detail_idle = True
             self._set_side_stats([])
             self.dmg_col.show([], 0)
             self.heal_col.show([], 0)
             self.elem_lbl.config(text="")
         else:
+            self._detail_idle = False
             self.d_title.config(text=f"Breakdown — {fp.name}")
             fdps = fp.total / duration if duration > 0 else 0.0
             crit_pct = (fp.crits / fp.hits * 100) if fp.hits else 0.0
