@@ -821,23 +821,27 @@ ACCENT = "#3D7C7C"
 DMG_BAR = "#5279B5"       # blue — damage bars
 HEAL_BAR = "#5E9C4A"      # green — healing bars
 # Healing done to yourself, drawn as the LEFT segment of every healing bar so
-# the split reads at a glance down a column. A washed-out green — the same
-# family as HEAL_BAR, because healing yourself is still healing. It was teal
-# first (read as a shield), then off-white (too stark next to the green).
+# the split reads at a glance down a column. A vivid green-teal — still the
+# healing family, because healing yourself is still healing, but saturated
+# where HEAL_BAR is muted. The shade has been round the houses: teal first
+# (read as a shield), then off-white (too stark), then a washed-out green
+# (#D8E9D0 — separated well from the green, but nearly landed on the Farever
+# theme's tan track), and now this.
 #
-# The shade is measured, not picked, and it is pinned between two limits:
-#   * 2.60:1 luminance against HEAL_BAR. The segments sit edge to edge with no
-#     gap, so this separation is the whole thing that has to hold at four
-#     pixels tall.
-#   * the FAREVER theme's bar track (#D9C09A) is the binding constraint — a
-#     light tan, and going greener collapses onto it fast (#B4D2A6 lands at
-#     1.06:1 and is invisible).
-# On that track the greyscale ratio is only 1.28:1, which reads as marginal and
-# isn't: the two differ in HUE more than in lightness, and measured as colour
-# rather than as brightness the gap is deltaE 17.3 — seven times the
-# just-noticeable step. A contrast ratio cannot see that, which is why
-# heal_color_check.py screenshots each theme and compares in Lab.
-SELF_HEAL_BAR = "#D8E9D0"
+# The separation this one trades on is CHROMA AND HUE, not lightness. Against
+# HEAL_BAR the greyscale ratio is only 1.35:1, which reads as a failure and
+# isn't — measured as colour the gap is deltaE2000 12.3, five times the
+# just-noticeable step, and it is a vivid-vs-muted jump rather than a
+# light-vs-dark one. A contrast ratio cannot see that, which is why the colour
+# is checked in Lab and on screen rather than by ratio.
+#
+# What it fixes: the old shade sat at deltaE 18.3 from the Farever track
+# (#D9C09A) and 14.7 from that theme's body — close enough that a short self
+# segment on a light theme could read as empty track. This one is at 31.3 and
+# 32.9, and clears every theme's track and body by a wide margin. The binding
+# constraint has moved back to the HEAL_BAR boundary, which is the one that
+# only has to hold across a hard edge at five pixels tall.
+SELF_HEAL_BAR = "#08BD71"
 TRANSPARENT_KEY = "#010101"
 
 # The countdown box escalates as the rift approaches: ordinary Farever colours
@@ -9193,8 +9197,9 @@ class PlayerRow:
         self.heal_track.pack(fill="x", pady=(1, 2))
         self.heal_bar = tk.Frame(self.heal_track, bg=HEAL_BAR, height=5)
         self.heal_bar.place(relwidth=0.0, relheight=1.0)
-        # Self-healing, parchment, always from the left edge — so the split sits at
-        # the same place on every row and the column can be read down. Placed
+        # Self-healing, green-teal, always from the left edge — so the split
+        # sits at the same place on every row and the column can be read
+        # down. Placed
         # after (and therefore over) the green bar, which draws the full
         # amount: only one of the two widths has to be exactly right, and no
         # rounding gap can open between them.

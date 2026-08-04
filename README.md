@@ -194,14 +194,14 @@ Two overlay windows appear top-right:
   a player called 双子星 doesn't shove the numbers along. Under each line sit two
   bars: **blue = damage**, **green = healing**, each scaled against the
   biggest damage/healing number currently on the meter. The healing bar is
-  split — **parchment = healing put on themselves**, always the left segment, green
-  for everything else — so a self-healer and a party healer read apart at a
-  glance.
+  split — **green-teal = healing put on themselves**, always the left segment,
+  the muted green for everything else — so a self-healer and a party healer read
+  apart at a glance.
 * **Breakdown** — the inspected player's (default: you) per-skill damage and
   per-skill healing side by side, each ordered greatest → least with a bar
-  under every row (blue for damage, green for healing, parchment for the
+  under every row (blue for damage, green for healing, green-teal for the
   self-healed share of each skill — a heal cast only on yourself is a fully
-  parchment bar), plus
+  green-teal bar), plus
   per-element totals.
 
 ### Only one at a time
