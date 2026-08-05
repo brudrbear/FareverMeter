@@ -361,6 +361,11 @@ def main():
         print(f"[written] {out_codex} ({len(codex['noCodex'])} excluded, "
               f"{len(codex['elite'])} elite/boss, {len(codex['big'])} big, "
               f"thresholds {codex['thresholds']})")
+        traits = extract_unit_traits(Path(hlboot).parent)
+        out_traits = _OUT_DIR / "unit_traits.json"
+        out_traits.write_text(json.dumps(traits, indent=0), encoding="utf-8")
+        print(f"[written] {out_traits} ({len(traits['critter'])} critters, "
+              f"{len(traits['spark'])} sparkling)")
     except Exception as e:
         print(f"[!] display names skipped ({e}) — boss toasts and history "
               f"dataset names fall back to ids")
@@ -546,6 +551,53 @@ def extract_codex_units(game_dir):
             big.append(uid)
     return {"thresholds": out_thr, "noCodex": sorted(no_codex),
             "elite": sorted(elite), "big": sorted(big)}
+
+
+def extract_unit_traits(game_dir):
+    """Two per-unit traits the minimap wants, straight out of data.cdb.
+
+      critter - `unit.type == "Critter"`, which the game's own unitType sheet
+                calls "Companions". 74 of them, and they are NOT foes in any
+                sense that matters on a map: they wander, they don't fight, and
+                drawing them as red dots among real mobs is what this fixes.
+      spark   - the `Spark` unit FLAG (bit 22, read off the column definition
+                rather than hardcoded). 36 units carry it and every one of them
+                is named "Sparkling ..." in the cdb: Sparkling Grassflopper,
+                Sparktail, Sparkling Skunk, Sparkling Crab. Ten are critters;
+                the rest are the rare `_U` variants of ordinary mobs.
+
+    `Base_Critter` is excluded — it is the inherit template every critter
+    derives from, not something that spawns.
+
+    Emitted as two id lists. Anything not listed has neither trait.
+    """
+    import pak_extract
+    data, entries, data_off = pak_extract.load(Path(game_dir) / "res.light.pak")
+    e = next(x for x in entries if x.path.endswith("data.cdb"))
+    cdb = json.loads(data[data_off + e.pos: data_off + e.pos + e.size])
+    sheets = {s["name"]: s for s in cdb["sheets"]}
+
+    bits = {}
+    for c in sheets["unit"]["columns"]:
+        if c["name"] == "flags" and isinstance(c.get("typeStr"), str):
+            names = c["typeStr"].split(":", 1)[-1].split(",")
+            bits = {n: i for i, n in enumerate(names)}
+    if "Spark" not in bits:
+        raise ValueError("unit flags column has no Spark bit")
+    spark_bit = bits["Spark"]
+
+    critters, spark = [], []
+    for ln in sheets["unit"]["lines"]:
+        uid = ln.get("id")
+        if not isinstance(uid, str) or uid == "Base_Critter":
+            continue
+        fl = ln.get("flags")
+        fl = fl if isinstance(fl, int) else 0
+        if ln.get("type") == "Critter":
+            critters.append(uid)
+        if (fl >> spark_bit) & 1:
+            spark.append(uid)
+    return {"critter": sorted(critters), "spark": sorted(spark)}
 
 
 if __name__ == "__main__":

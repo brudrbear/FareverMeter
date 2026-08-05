@@ -29,6 +29,9 @@ datas = [
     # it every mob is treated as an ordinary foe and none as excluded, so the
     # toast quotes 1/8/20 at an elite that masters in one kill.
     (str(ROOT / "analysis_out" / "codex_units.json"), "res/analysis_out"),
+    # Which unit kinds are critters and which carry the Spark flag. Without it
+    # critters draw as ordinary red enemies and the sparkly tracker never fires.
+    (str(ROOT / "analysis_out" / "unit_traits.json"), "res/analysis_out"),
     (str(ROOT / "assets" / "farevermeter.ico"), "res/assets"),
     # Fixed cues, played through Windows' own MCI so they add files rather than
     # an audio dependency. Listed one by one rather than by glob, so a new cue

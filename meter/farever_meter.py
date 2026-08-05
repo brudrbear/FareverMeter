@@ -265,6 +265,32 @@ CODEX_DISCOVERED = "CodexDiscovered"
 CODEX_RANKED = "CodexCompleted"
 CODEX_MASTERED = "CodexMastered"
 
+# The sparkly tracker's panel, below the codex line. It PERSISTS while a
+# sparkling unit is in range rather than flashing like the toasts above it, so
+# it gets the bottom of the stack where nothing else will overwrite it.
+TOP_STRIP_SPARKLY = 336
+# The arrow's half-width in degrees is not a constant here — the glyph is drawn
+# from these three radii, which keep it readable at every UI scale.
+SPARKLY_ARROW_R = 15.0          # px at 100%, the arrow's reach from centre
+SPARKLY_PAD = 9
+# Which categories the tracker will point at. CRITTERS ONLY, deliberately.
+#
+# The game's Spark flag covers 36 units and only ten are critters; the rest are
+# the rare `_U` variants of ordinary mobs — Sparkling Builder (a bee),
+# Sparkling Skunk, Sparkling Crab. Those are combat spawns you meet by walking
+# into them, not things you cross a zone to find, and having the panel announce
+# one made the tracker useless for what it is for. The MAP still haloes every
+# sparkling unit, because marking a rare variant you can see is information
+# rather than a directive.
+SPARKLY_TRACK_CATS = ("critter",)
+
+# Once a sparkly leaves the sweep the panel lingers this long before going.
+# The client streams entities in and out (see WorldSnapshot), so a sparkling
+# critter at range drops out for a second or two at a time — without this the
+# panel would blink while you were running toward it, which is the one moment
+# it has to hold still.
+SPARKLY_KEEP_SECS = 6.0
+
 OVERLAY_ALPHA = 0.94
 # Extra see-through on top of that, from the Transparency slider. 0 leaves the
 # overlay exactly as it has always looked; the cap stops short of a UI you can
@@ -385,14 +411,25 @@ MINIMAP_BG_TINT = 0.45
 # The floor and ceiling the range is allowed to take. The Zoom control below
 # moves it between these and nowhere else.
 #
-# The ceiling is the hook's foe cull (SWEEP_RADIUS_FOE, 600u) and not a pixel
+# The ceiling is the hook's foe cull (SWEEP_RADIUS_FOE) and not a pixel
 # further. Everything else — chests, orbs, obelisks, respawn points,
 # activities, players — is already swept from the WHOLE layer at any distance,
 # so those keep appearing however far you zoom out; foes are the one category
-# with a radius. Past 600 the map would show navigation markers with the mobs
-# thinning out around them, which reads as the map breaking rather than as the
-# cull it is. At 600 exactly, the two edges coincide and nothing looks wrong.
-MINIMAP_RANGE_MIN, MINIMAP_RANGE_MAX = 80, 600
+# with a radius. If the map could see past the cull it would show navigation
+# markers with the mobs thinning out around them, which reads as the map
+# breaking rather than as the cull it is. The two edges coincide, and that is
+# the invariant: MOVE THEM TOGETHER OR NOT AT ALL.
+#
+# 1750 rather than the 600 this shipped with, because chests and orbs are the
+# thing people actually zoom out to find and 600u is barely a corner of a zone.
+# It is a clean slider step, too: the range is MINIMAP_RANGE*100/zoom%, so
+# 175/1750 lands the slider's low end at exactly 10% instead of a step that
+# rounds inward and can never quite reach the ceiling.
+#
+# What this DOESN'T buy is a treasure map. Chests stream — measured, four or
+# five loaded in a zone that holds 47 — so zooming out shows the ones the
+# client knows about, not the ones that are there. See TESTING.md.
+MINIMAP_RANGE_MIN, MINIMAP_RANGE_MAX = 80, 1750
 
 # Zoom is a percentage because that is what it looks like on screen: 100% is
 # the range the map shipped with, larger numbers magnify, smaller ones pull
@@ -470,6 +507,14 @@ MINIMAP_STYLE = (
     # markers you navigate by. Hovering one still works: the hit test has its
     # own slack (MINIMAP_TIP_RADIUS) and doesn't shrink with the dot.
     ("foe",      {"fill": "#FF5348", "r": 2.4, "shape": "dot"}),
+    # Critters (the game calls them Companions) — frogs, rabbits, squirrels.
+    # Green because they are the one unit category that will never hurt you,
+    # and a pawprint because at this size a shape reads faster than a colour:
+    # a green dot among red ones is a mob you misjudged, a paw is obviously
+    # something else. Drawn AFTER foes so a critter in a pack still shows.
+    # Slightly larger than a foe dot for the same reason the ore rock is —
+    # an irregular silhouette carries less visual mass than a solid disc.
+    ("critter",  {"fill": "#6BE06B", "r": 4.2, "shape": "paw"}),
 )
 MINIMAP_STYLE_MAP = dict(MINIMAP_STYLE)
 MINIMAP_ORDER = [k for k, _ in MINIMAP_STYLE]
@@ -523,6 +568,10 @@ MINIMAP_FILTERS = (
     ("nodes",      "Ore & herb nodes", ("ore", "herb")),
     ("players",    "Players",      ("hero",)),
     ("activities", "Activities",   ("activity",)),
+    # Critters get a tick of their own rather than riding the Enemies cycle:
+    # they are not enemies, and the reason to hide them (a zone carpeted in
+    # frogs) has nothing to do with the reason to hide mobs.
+    ("critters",   "Critters",     ("critter",)),
 )
 # category -> which tick governs it, built once rather than searched per marker.
 MINIMAP_FILTER_OF = {cat: key for key, _label, cats in MINIMAP_FILTERS
@@ -636,7 +685,16 @@ MINIMAP_LABELS = {
     "hero": "Player", "foe": "Enemy", "chest": "Chest", "orb": "Orb",
     "obelisk": "Obelisk", "respawn": "Respawn point", "activity": "Activity",
     "soulstone": "Soulstone", "ore": "Ore", "herb": "Herb",
+    "critter": "Critter",
 }
+
+# A sparkling unit — the cdb's own Spark flag — gets a halo and a size bump,
+# the same "this one is special" grammar the rare gathering nodes already
+# speak. Gold rather than the category colour so it reads as rarity and not as
+# another kind of critter, and it applies to sparkling MOBS too (the rare `_U`
+# variants), which is why it lives here rather than in the critter style.
+SPARK_RING = "#FFE68A"
+SPARK_SCALE = 1.45
 
 # ---------------------------------------------------------------------------
 # Compass
@@ -2759,11 +2817,18 @@ class WorldSnapshot:
         keyed by name, which follows them as they run. Foes get no key on
         purpose: they move, they're unnamed until the CDB lookup lands, and
         they're the one category where a delay would matter — a mob appearing
-        late is worse than a mob flickering."""
+        late is worse than a mob flickering.
+
+        Critters are exempt for the same reason and it matters more, not less:
+        they wander constantly, so a position key would mint a fresh marker on
+        every step (none of which ever survives MARKER_SHOW_SECS) while the
+        stale ones sat in _tracked for MARKER_KEEP_SECS. That reads as critters
+        that flicker AND leave ghosts behind them — and it would have had the
+        sparkly tracker still pointing at a rabbit that walked off."""
         cat = e.get("c")
         if cat == "hero":
             return ("hero", e.get("n")) if e.get("n") else None
-        if cat == "foe":
+        if cat in ("foe", "critter"):
             return None
         return (cat, e.get("x"), e.get("y"), e.get("z"))
 
@@ -3029,32 +3094,54 @@ class GameUIState:
             self._zone_world_map = (None if world_map is None
                                     else bool(world_map))
 
-    def set_codex_ranks(self, ranks):
-        """The whole kind -> rank mirror from the hook, replacing what we had.
+    def set_codex_ranks(self, entries):
+        """The whole kind -> [killCount, rank] mirror from the hook, replacing
+        what we had.
 
         Replaced rather than merged on purpose: switching character is a
         different codex entirely, and merging would leave the old character's
-        mastered mobs hidden from the new one's map."""
+        mastered mobs hidden from the new one's map.
+
+        A bare int is still accepted as a rank so an older agent (or a replayed
+        message) doesn't wipe the mirror — it just carries no kill count."""
         clean = {}
-        for kind, rank in ranks.items():
-            if isinstance(kind, str) and isinstance(rank, int):
-                clean[kind] = rank
+        for kind, v in entries.items():
+            if not isinstance(kind, str):
+                continue
+            if isinstance(v, (list, tuple)) and len(v) == 2 \
+                    and all(isinstance(n, int) for n in v):
+                clean[kind] = (v[0], v[1])
+            elif isinstance(v, int):
+                clean[kind] = (0, v)
         with self._lock:
             self._codex_ranks = clean
             self._codex_seen = True
 
-    def set_codex_rank(self, kind, rank):
+    def set_codex_rank(self, kind, rank, kills=None):
         """One entry moved, between full refreshes."""
         if not isinstance(kind, str) or not isinstance(rank, int):
             return
         with self._lock:
-            self._codex_ranks[kind] = rank
+            prev = self._codex_ranks.get(kind)
+            self._codex_ranks[kind] = (
+                kills if isinstance(kills, int) else (prev[0] if prev else 0),
+                rank)
 
     def codex_rank(self, kind):
         """This character's rank for `kind` — 0 for a mob never killed, which
         is what an absent key means in the replicated store."""
         with self._lock:
-            return self._codex_ranks.get(kind, 0)
+            e = self._codex_ranks.get(kind)
+            return e[1] if e else 0
+
+    def codex_kills(self, kind):
+        """Lifetime kills of `kind` on this character, or None if we have no
+        figure. Distinct from 0: "never killed" and "the mirror hasn't arrived"
+        would otherwise both read as zero, and only one of them is worth
+        printing on a toast."""
+        with self._lock:
+            e = self._codex_ranks.get(kind)
+            return e[0] if e else None
 
     def codex_ready(self):
         """Whether a mirror has arrived at all. False means "don't filter" —
@@ -4196,6 +4283,10 @@ class Overlay:
         # feature nobody can see until they find a tick is a feature nobody
         # finds. The map filter is deliberately NOT gated on this.
         self._codex_alerts = True
+        # Points at the nearest sparkling unit whenever one is in range. On by
+        # default: it costs nothing while none is around (the panel stays
+        # hidden) and a rare spawn you never noticed is the case it exists for.
+        self._sparkly_on = True
         self._map_rate = "High"        # Ultra exists but is opt-in
         # The world-map backdrop. On by default: it only ever draws when a
         # shipped asset matches the zone, so "on with no asset" costs nothing.
@@ -4340,11 +4431,13 @@ class Overlay:
         self.killwin.title("Farever+ Kill Time")
         self.codexwin = tk.Toplevel(self.root)
         self.codexwin.title("Farever+ Codex")
+        self.sparklywin = tk.Toplevel(self.root)
+        self.sparklywin.title("Farever+ Sparkly Tracker")
         for win in (self.root, self.detail, self.menu, self.hintwin,
                     self.parsewin, self.promptwin, self.reportwin,
                     self.updatewin, self.riftwin, self.mapwin,
                     self.compasswin, self.badgewin, self.killwin,
-                    self.codexwin):
+                    self.codexwin, self.sparklywin):
             win.overrideredirect(True)
             win.attributes("-topmost", True)
             win.configure(bg=TRANSPARENT_KEY)
@@ -4402,6 +4495,7 @@ class Overlay:
         self._build_parse()
         self._build_kill_toast()
         self._build_codex_toast()
+        self._build_sparkly_tracker()
         self._build_prompt()
         self._build_report()
         self._build_update_offer()
@@ -4440,6 +4534,8 @@ class Overlay:
         self.killwin.withdraw()
         # ...nor the codex toast, which maps itself on a kill that counts.
         self.codexwin.withdraw()
+        # ...nor the sparkly tracker, which maps itself when one is in range.
+        self.sparklywin.withdraw()
         # DERIVED from _shown rather than hand-listed, because the hand-listed
         # version had exactly one failure mode and it happened: add a faded
         # window, forget to add it here, and it starts MAPPED. A Toplevel left
@@ -4642,6 +4738,8 @@ class Overlay:
         # silently turning enemies back on for anyone who had them off.
         if isinstance(data.get("codex_alerts"), bool):
             self._codex_alerts = data["codex_alerts"]
+        if isinstance(data.get("sparkly_tracker"), bool):
+            self._sparkly_on = data["sparkly_tracker"]
         fm = data.get("foe_mode")
         if fm in MINIMAP_FOE_MODE_KEYS:
             self._foe_mode = fm
@@ -4741,6 +4839,7 @@ class Overlay:
                     for k, _label, _cats in COMPASS_FILTERS},
                 "foe_mode": self._foe_mode,
                 "codex_alerts": bool(self._codex_alerts),
+                "sparkly_tracker": bool(self._sparkly_on),
                 "mode": self.mode,
                 "hide_ooc": self._hide_ooc,
                 "map_bg": bool(self._map_bg_on),
@@ -5346,11 +5445,15 @@ class Overlay:
         # setting nobody goes looking for.
         self.btn_codex_alerts = button(
             gen, self._enqueue(self._toggle_codex_alerts))
+        self.btn_sparkly = button(gen, self._enqueue(self._toggle_sparkly))
         tk.Label(gen,
-                 text=("The running codex count on each kill, and the "
-                       "fanfare when an entry fills. The map's "
-                       "'only missing from codex' filter is separate and "
-                       "keeps working either way."),
+                 text=("Codex alerts: the running count on each kill and the "
+                       "fanfare when an entry fills — the map's 'only missing "
+                       "from codex' filter is separate and keeps working "
+                       "either way. Sparkly tracker: a pointer to the nearest "
+                       "sparkling critter, as far out as the game will tell us "
+                       "about it. Sparkling versions of ordinary mobs still "
+                       "get a halo on the map but are not tracked."),
                  bg=BG_BODY, fg=FG_DIM, font=self.fonts_m["ui_tiny_i"],
                  anchor="w", justify="left",
                  wraplength=WARN_WRAP).pack(fill="x", pady=(0, 2))
@@ -5902,6 +6005,12 @@ class Overlay:
                        if cat in ("ore", "herb") else None)
                 if nst and nst.get("rare"):
                     r *= NODE_RARE_SCALE
+                # A sparkling unit — the game's own Spark flag, sent as `sp`.
+                # Bigger and haloed, so it is findable in a field of ordinary
+                # ones without having to hover anything.
+                sparkly = bool(e.get("sp"))
+                if sparkly:
+                    r *= SPARK_SCALE
                 # The local player is drawn last, as an arrow, not a dot.
                 if cat == "hero" and e.get("n") and e["n"] == local:
                     continue
@@ -5925,6 +6034,21 @@ class Overlay:
                 # Outlined against the panel, not black: on the rift theme a
                 # hard black edge on a dark body reads as a hole.
                 edge = _lerp_hex(body, BG_BORDER, 0.35 if fade else 0.8)
+                if sparkly:
+                    # Drawn under the glyph rather than passed as `ring`: the
+                    # shapes that take a ring draw it as part of themselves
+                    # (the orb's glow), and a pawprint has no single circle to
+                    # hang one on. A ring around the whole marker works for
+                    # every shape, which matters because sparkling MOBS are
+                    # dots and sparkling critters are paws.
+                    rr = r + 2.2 * self._scales["minimap"]
+                    halo = self._marker_fill(SPARK_RING)
+                    if fade:
+                        halo = _lerp_hex(body, halo, MINIMAP_Z_DIM)
+                    c.create_oval(x - rr, y - rr, x + rr, y + rr,
+                                  outline=halo, fill="",
+                                  width=max(1, int(round(
+                                      self._scales["minimap"] * 2))))
                 self._map_glyph(c, x, y, r, style, fill, facing, edge,
                                 ring=self._marker_fill(
                                     (nst or style).get("ring")))
@@ -6096,11 +6220,18 @@ class Overlay:
                 return "Player"
             kind = "Party" if name in roster else "Player"
             return f"{self._elide(name)} ({kind})"
-        if cat == "foe":
+        if cat in ("foe", "critter"):
             # The CDB display name once the agent has resolved it; until then
             # the internal id, prettified, so a foe is never just "Enemy".
             nm = (name or "").strip() or _pretty_id(e.get("k") or "")
-            return f"{self._elide(nm)} (Enemy)" if nm else "Enemy"
+            tag = MINIMAP_LABELS[cat]
+            # The game already names them "Sparkling Grassflopper", so the
+            # marker would be saying it twice. Tag the ones whose display name
+            # doesn't already carry it — "Sparktail" is sparkling and doesn't
+            # say so anywhere in its name.
+            if e.get("sp") and "sparkl" not in nm.lower():
+                tag = f"{tag} · Sparkling"
+            return f"{self._elide(nm)} ({tag})" if nm else tag
         if cat in ("ore", "herb"):
             # "Copper Lode (Ore)", from the same CDB texts the game's own
             # widget shows. The placement id fallback is prettified for the
@@ -6272,6 +6403,30 @@ class Overlay:
             c.create_line(x + B[0] * 1.35 * r, y + B[1] * 1.35 * r,
                           x + T[0] * 0.72 * r, y + T[1] * 0.72 * r,
                           fill=vein, width=1)
+            return
+        if shape == "paw":
+            # A pawprint: one pad and four toes. At this size the toes are two
+            # or three pixels each, so they are placed by angle around the pad
+            # rather than drawn as a picture — that keeps the silhouette even
+            # at every scale instead of the outer toes drifting off as it
+            # shrinks. The pad is a wide oval rather than a circle because a
+            # round pad with round toes reads as a flower.
+            pad_w, pad_h = r * 0.72, r * 0.60
+            pad_y = y + r * 0.34
+            c.create_oval(x - pad_w, pad_y - pad_h, x + pad_w, pad_y + pad_h,
+                          fill=fill, outline=edge or "", width=1)
+            toe = r * 0.30
+            # Angles in degrees from straight up, the outer pair splayed
+            # further and set slightly lower — that asymmetry is most of what
+            # makes it read as a paw rather than as four dots in an arc.
+            for ang, dist, scale in ((-46, 0.92, 0.86), (-16, 1.00, 1.0),
+                                     (16, 1.00, 1.0), (46, 0.92, 0.86)):
+                a = math.radians(ang)
+                tx = x + math.sin(a) * r * dist
+                ty = y - math.cos(a) * r * dist * 0.78
+                tr = toe * scale
+                c.create_oval(tx - tr, ty - tr, tx + tr, ty + tr,
+                              fill=fill, outline=edge or "", width=1)
             return
         if shape in ("dot", "chevron"):
             # `ring` is a second colour around the dot, for markers the game
@@ -7879,17 +8034,28 @@ class Overlay:
     def _show_kill_toast(self, text, best):
         """Put the time on screen for KILL_TOAST_SECS. Gold when it set a
         record — the one moment the colour means something — body-coloured
-        like the parse banner otherwise."""
+        like the parse banner otherwise.
+
+        `text` may carry newlines; the box sizes to the widest line and the
+        lines are centred against each other, which is what keeps a short
+        tally line from hanging off the left of a long headline."""
         f, c = self._kill_font, self._kill_canvas
         pad, off = 8, 2
-        w = f.measure(text) + pad * 2 + off
-        h = f.metrics("linespace") + pad * 2 + off
+        lines = str(text).split("\n")
+        line_h = f.metrics("linespace")
+        widest = max(f.measure(ln) for ln in lines)
+        w = widest + pad * 2 + off
+        h = line_h * len(lines) + pad * 2 + off
         c.config(width=w, height=h)
         c.delete("all")
-        c.create_text(pad + off, pad + off, text=text, font=f, fill=BG_BORDER,
-                      anchor="nw")
-        c.create_text(pad, pad, text=text, font=f,
-                      fill=REPORT_MEDALS[0] if best else BG_BODY, anchor="nw")
+        mid = pad + widest / 2.0
+        for i, ln in enumerate(lines):
+            ly = pad + i * line_h
+            c.create_text(mid + off, ly + off, text=ln, font=f, fill=BG_BORDER,
+                          anchor="n")
+            c.create_text(mid, ly, text=ln, font=f,
+                          fill=REPORT_MEDALS[0] if best else BG_BODY,
+                          anchor="n")
         self.killwin.update_idletasks()
         l, t, r, _b = self._game_rect()
         self.killwin.geometry(f"+{l + ((r - l) - w) // 2}+{t + TOP_STRIP_KILL}")
@@ -7954,6 +8120,136 @@ class Overlay:
     def _hide_codex_toast(self):
         self._codex_toast_job = None
         self.codexwin.withdraw()
+
+    # ---- sparkly tracker ----------------------------------------------------
+    def _build_sparkly_tracker(self):
+        """A small panel that points at the nearest sparkling unit.
+
+        Not a toast: it stays up and keeps pointing while one is around, which
+        is the whole use — you read it while running toward the thing."""
+        self._sparkly_font = self.fonts["ui"]
+        self._sparkly_font_b = self.fonts["ui_parse_b"]
+        self._sparkly_canvas = tk.Canvas(self.sparklywin, bg=TRANSPARENT_KEY,
+                                         highlightthickness=0, bd=0)
+        self._sparkly_canvas.pack()
+        self._sparkly_last = None      # (name, x, y, z) of the last one seen
+        self._sparkly_seen_at = 0.0    # when, for SPARKLY_KEEP_SECS
+        self._sparkly_up = False
+
+    def _tick_sparkly(self):
+        """Find the nearest sparkling CRITTER and point at it.
+
+        Critters only — see SPARKLY_TRACK_CATS for why a sparkling bee is not
+        something this should announce.
+
+        Reads the same snapshot the map does but stands apart from it: the
+        tracker has to keep working with the minimap hidden, and it deliberately
+        ignores the map's category ticks — hiding critters on the map is about
+        clutter, and has nothing to do with wanting to be told about a rare one.
+        """
+        if not self._sparkly_on:
+            if self._sparkly_up:
+                self._sparkly_up = False
+                self.sparklywin.withdraw()
+            return
+        me, ents, _stamp = self.world.read()
+        now = time.monotonic()
+        best, best_d = None, None
+        if self.world.fresh():
+            for e in ents:
+                if not e.get("sp") or e.get("c") not in SPARKLY_TRACK_CATS:
+                    continue
+                dx = e.get("x", 0) - me.get("x", 0)
+                dy = e.get("y", 0) - me.get("y", 0)
+                d = math.hypot(dx, dy)
+                if best_d is None or d < best_d:
+                    best_d, best = d, e
+        if best is not None:
+            nm = (best.get("n") or "").strip() or _pretty_id(best.get("k") or "")
+            self._sparkly_last = (nm, best.get("x", 0), best.get("y", 0),
+                                  best.get("z", 0))
+            self._sparkly_seen_at = now
+        elif (self._sparkly_last is None
+                or now - self._sparkly_seen_at > SPARKLY_KEEP_SECS):
+            # Nothing around, and the grace period is over.
+            self._sparkly_last = None
+            if self._sparkly_up:
+                self._sparkly_up = False
+                self.sparklywin.withdraw()
+            return
+        # Held or live, the geometry is recomputed from OUR current position —
+        # so while it lingers the arrow still swings correctly as you move.
+        name, sx, sy, sz = self._sparkly_last
+        self._draw_sparkly(name, sx - me.get("x", 0), sy - me.get("y", 0),
+                           sz - me.get("z", 0), me,
+                           stale=best is None)
+
+    def _draw_sparkly(self, name, dx, dy, dz, me, stale):
+        c = self._sparkly_canvas
+        s = self._scales["meter"]
+        pad = int(SPARKLY_PAD * s)
+        arrow_r = SPARKLY_ARROW_R * s
+        # The same projection the minimap uses, so the arrow and the marker
+        # can never disagree about which way the thing is. Evaluated at
+        # half=0/scale=1 it returns a plain screen-space direction vector.
+        cam = me.get("c")
+        if cam is not None:
+            self._last_cam = float(cam)
+        heading = float(self._last_cam if self._last_cam is not None
+                        else (me.get("r", 0.0) or 0.0))
+        rot = (math.cos(heading), math.sin(heading))
+        px, py = self._minimap_px(me.get("x", 0) + dx, me.get("y", 0) + dy,
+                                  me, 0.0, 1.0, rot)
+        ang = math.atan2(px, -py) if (px or py) else 0.0
+
+        dist = math.hypot(dx, dy)
+        flat = f"{dist:.0f}u" if dist < 1000 else f"{dist / 1000.0:.1f}ku"
+        # Up/down is worth its own reading rather than being folded into the
+        # distance: a sparkly 20 units away and 40 below is not 45 units of
+        # walking, it is a different floor.
+        vert = ("level" if abs(dz) < 3
+                else f"{abs(dz):.0f}u {'up' if dz > 0 else 'down'}")
+        label = name.upper()
+        sub = f"{flat}  ·  {vert}"
+
+        fb, fs = self._sparkly_font_b, self._sparkly_font
+        tw = max(fb.measure(label), fs.measure(sub))
+        gap = int(10 * s)
+        w = pad * 2 + int(arrow_r * 2) + gap + tw
+        h = pad * 2 + fb.metrics("linespace") + fs.metrics("linespace")
+        h = max(h, pad * 2 + int(arrow_r * 2))
+        c.config(width=w, height=h)
+        c.delete("all")
+
+        ink = SPARK_RING if not stale else _lerp_hex(BG_BODY, SPARK_RING, 0.55)
+        cx, cy = pad + arrow_r, h / 2.0
+        # A filled triangle with a notched tail — a plain triangle at this size
+        # reads as a generic marker, the notch makes it a pointer.
+        pts = []
+        for a_off, rad in ((0.0, 1.0), (2.4, 0.95), (math.pi, 0.42),
+                           (-2.4, 0.95)):
+            a = ang + a_off
+            pts.extend((cx + math.sin(a) * arrow_r * rad,
+                        cy - math.cos(a) * arrow_r * rad))
+        c.create_polygon(*pts, fill=ink, outline=BG_BORDER, width=1)
+
+        tx = pad + arrow_r * 2 + gap
+        ty = (h - fb.metrics("linespace") - fs.metrics("linespace")) / 2.0
+        for off, fill in ((2, BG_BORDER), (0, ink)):
+            c.create_text(tx + off, ty + off, text=label, font=fb,
+                          fill=fill, anchor="nw")
+        for off, fill in ((2, BG_BORDER), (0, BG_BODY)):
+            c.create_text(tx + off, ty + fb.metrics("linespace") + off,
+                          text=sub, font=fs, fill=fill, anchor="nw")
+
+        self.sparklywin.update_idletasks()
+        l, t, r, _b = self._game_rect()
+        self.sparklywin.geometry(
+            f"+{l + ((r - l) - w) // 2}+{t + TOP_STRIP_SPARKLY}")
+        if not self._sparkly_up:
+            self._sparkly_up = True
+            self.sparklywin.deiconify()
+            self.sparklywin.attributes("-topmost", True)
 
     def _toggle_parse(self):
         if self._parse_state is None:
@@ -8318,6 +8614,7 @@ class Overlay:
         self._set_win_clickthrough(self.parsewin, True)
         self._set_win_clickthrough(self.killwin, True)
         self._set_win_clickthrough(self.codexwin, True)
+        self._set_win_clickthrough(self.sparklywin, True)
         # The prompt must take clicks whenever it's up, regardless of lock
         # state — it's the one overlay window that has to be answered.
         self._set_win_clickthrough(self.promptwin, False)
@@ -9133,6 +9430,19 @@ class Overlay:
             self._hide_codex_toast()
         self._save_settings()
 
+    def _toggle_sparkly(self):
+        """The sparkly tracker on or off. Taking it down immediately rather
+        than on the next tick, so the switch and the screen agree."""
+        self._sparkly_on = not self._sparkly_on
+        if not self._sparkly_on:
+            self._sparkly_up = False
+            self._sparkly_last = None
+            try:
+                self.sparklywin.withdraw()
+            except tk.TclError:
+                pass
+        self._save_settings()
+
     def _cycle_foe_mode(self):
         """all -> only missing from codex -> hidden -> all.
 
@@ -9227,7 +9537,28 @@ class Overlay:
             best = False
         print(f"[meter] boss kill timed: {key} {secs:.1f}s"
               + (f" (best {self._best_times[key]:.1f}s)"), file=sys.stderr)
+        tally = self._boss_tally_line(kinds)
+        if tally:
+            text = f"{text}\n{tally}"
         self._show_kill_toast(text, best)
+
+    def _boss_tally_line(self, kinds):
+        """"Boss slain 12 times" — the lifetime count from the codex store.
+
+        Only for a single-kind pull. A council is several units killed
+        together, and there is no honest single number for "how many times have
+        you killed them" when the members have been killed different numbers of
+        times; the alternatives are all a lie or an essay, so it says nothing.
+
+        Silent too when the mirror hasn't arrived, which is why codex_kills
+        returns None rather than 0 — a real first kill reads 1 here, and 0
+        would only ever mean "we don't know"."""
+        if len(kinds) != 1:
+            return None
+        n = self.ui_state.codex_kills(kinds[0])
+        if not isinstance(n, int) or n < 1:
+            return None
+        return f"Boss slain {n:,} time{'' if n == 1 else 's'}"
 
     @staticmethod
     def _load_best_times():
@@ -9261,19 +9592,23 @@ class Overlay:
         toast reading "Dummy 0/0" on every training-dummy hit is noise."""
         if not self._codex_alerts or not kind or not isinstance(kills, int):
             return
-        prog = _codex_progress(kind, kills)
+        prog = _codex_progress(kind, kills, rank)
         if prog is None:
             return                      # NoCodex — nothing to report
         shown, target, final = prog
-        # Suppress the toast for an entry already finished. It fires once more
-        # on the kill that MASTERS it (rank reaches max here), which is the
-        # moment worth seeing; every kill after that is just farming.
+        name = _unit_names().get(kind) or _pretty_id(kind)
+        # Past the last threshold the codex has nothing more to say, but
+        # killCount keeps climbing — it is a LIFETIME total per mob type, not a
+        # counter that stops at the threshold (measured: an entry mastered on
+        # kill one still read 12 after twelve kills). So the toast switches
+        # from progress to a tally.
         if isinstance(rank, int) and rank >= CODEX_MAX_RANK and shown > target:
+            self._enqueue(lambda: self._show_codex_toast(
+                f"{_ordinal(shown)} {name} masterfully slain", gold=False))()
             return
         # "Codex Mastery" only on the stretch that will finish the entry, so
         # the wording itself says how much is left to care about.
         word = "Codex Mastery" if final else "Codex"
-        name = _unit_names().get(kind) or _pretty_id(kind)
         self._enqueue(lambda: self._show_codex_toast(
             f"{name}  —  {word} {shown}/{target}", gold=False))()
 
@@ -10296,6 +10631,9 @@ class Overlay:
         self.btn_codex_alerts.config(
             text=("☑  Codex alerts" if self._codex_alerts
                   else "☐  Codex alerts"))
+        self.btn_sparkly.config(
+            text=("☑  Sparkly Tracker" if self._sparkly_on
+                  else "☐  Sparkly Tracker"))
         # Reads state, not action — and it's the same setting the rift prompt's
         # "Do this every time" ticks, so a player who opted in from the prompt
         # finds it already on here.
@@ -10550,6 +10888,10 @@ class Overlay:
             try:
                 self._draw_minimap()
                 self._draw_compass()
+                # Reads the same snapshot but is NOT part of either panel: the
+                # tracker has to keep pointing whether or not the map is shown,
+                # which is most of the point of it.
+                self._tick_sparkly()
             except tk.TclError:
                 return              # window went away; stop rescheduling
             self.root.after(max(25, MINIMAP_RATE_MS[self._map_rate] // 2),
@@ -10692,7 +11034,61 @@ def _codex_thresholds(kind):
     return t["foe"]
 
 
-def _codex_progress(kind, kills):
+def _ordinal(n):
+    """1st, 2nd, 3rd, 4th — and 11th/12th/13th, which are the ones a naive
+    last-digit rule gets wrong."""
+    n = int(n)
+    if 11 <= (abs(n) % 100) <= 13:
+        return f"{n}th"
+    return f"{n}" + {1: "st", 2: "nd", 3: "rd"}.get(abs(n) % 10, "th")
+
+
+def _rank_under(thr, kills):
+    """What rank `kills` earns against a threshold set."""
+    return sum(1 for t in thr if kills >= t)
+
+
+def _codex_set(kind, kills=None, rank=None):
+    """The threshold set to use for `kind`, or None if it has no codex entry.
+
+    The cdb-derived bucket is only a PRIOR. `rank` comes from the game's own
+    replicated store and is exact, so when the two disagree the game wins:
+    whichever set explains the observed (kills, rank) is the right one.
+
+    That matters because the static rule — Elite|Boss flags mean a one-kill
+    entry — is demonstrably incomplete. 62 units carry `Unique` without either
+    flag (Crimson Captain Agamemnon, Sparkling Crab, Sparkling Boar) and they
+    are the "named mobs that clear in one" that the bucket misses, which showed
+    up in play as "Codex Mastery 12/20" on an entry that finished on kill one.
+    Rather than widen the flag test on a guess and risk being wrong the other
+    way, the observation decides — and this self-corrects for any mob whose
+    bucket is wrong, including ones nobody has noticed yet.
+
+    Ambiguity is normal and harmless: every set starts at 1, so before the
+    first kill they all agree, and the prior simply stands."""
+    d = _codex_data()
+    if kind in d["noCodex"]:
+        return None
+    t = d["thresholds"]
+    prior = (t["elite"] if kind in d["elite"]
+             else t["big"] if kind in d["big"] else t["foe"])
+    if not isinstance(kills, int) or not isinstance(rank, int):
+        return prior
+    if _rank_under(prior, kills) == rank:
+        return prior                    # the prior explains it; keep it
+    for name in ("elite", "big", "foe"):
+        if _rank_under(t[name], kills) == rank:
+            return t[name]
+    return prior                        # nothing fits (a patch?); say so below
+
+
+def _codex_thresholds(kind):
+    """The static bucket alone — used where there is no observation to go on,
+    and as the "does this mob have a codex entry at all" test."""
+    return _codex_set(kind)
+
+
+def _codex_progress(kind, kills, rank=None):
     """(kills_so_far, target_for_this_tier, is_the_final_tier) or None.
 
     At full rank the target is the FINAL threshold rather than None, so
@@ -10705,7 +11101,7 @@ def _codex_progress(kind, kills):
     index, and that is not a stylistic choice: an elite's thresholds are
     [1,1,1], so the first tier it offers you is also the last one, and indexing
     would call a one-kill mastery "not final" and word it wrong."""
-    thr = _codex_thresholds(kind)
+    thr = _codex_set(kind, kills, rank)
     if not thr:
         return None
     for t in thr:
@@ -10975,10 +11371,23 @@ class SkillColumn:
 # Frida host
 # ---------------------------------------------------------------------------
 def build_script_source():
-    data = (ANALYSIS / "resolver_data.json").read_text(encoding="utf-8")
+    data = json.loads((ANALYSIS / "resolver_data.json").read_text(encoding="utf-8"))
     off = (ANALYSIS / "meter_offsets.json").read_text(encoding="utf-8")
+    # Which unit kinds are critters, and which carry the cdb's Spark flag. It
+    # rides inside DATA rather than as a third global so the agent keeps one
+    # place to look; folded in here rather than by build_targets.py because it
+    # comes out of data.cdb (emit_offsets' half) and not out of hlboot.dat.
+    # Absent, the agent simply classifies no critters — the map keeps drawing
+    # them as foes, which is what it did before this existed.
+    try:
+        data["unit_traits"] = json.loads(
+            (ANALYSIS / "unit_traits.json").read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"[meter] unit_traits.json unavailable ({e}) — critters will "
+              "draw as ordinary enemies and the sparkly tracker will not fire",
+              file=sys.stderr)
     js = (FRIDA_DIR / "meter_hook.js").read_text(encoding="utf-8")
-    return f"const DATA = {data};\nconst OFF = {off};\n" + js
+    return (f"const DATA = {json.dumps(data)};\nconst OFF = {off};\n" + js)
 
 
 DATA_STAMP = ANALYSIS / ".data_stamp.json"
@@ -11136,6 +11545,14 @@ def _data_is_current():
     if not (ANALYSIS / "codex_units.json").exists():
         print("[meter] codex_units.json absent — regenerating for the codex "
               "thresholds and exclusions.", file=sys.stderr)
+        return False
+    # unit_traits.json arrived with the critter markers and the sparkly tracker
+    # (3.7). Absent, the agent classifies no critters at all — they draw as
+    # ordinary red enemies and no sparkling unit is ever reported, which looks
+    # like the features simply not existing rather than like stale data.
+    if not (ANALYSIS / "unit_traits.json").exists():
+        print("[meter] unit_traits.json absent — regenerating for the critter "
+              "markers and the sparkly tracker.", file=sys.stderr)
         return False
     return True
 
@@ -12343,6 +12760,9 @@ def _run(tray, session, ui_state, world, rift_rec, heal_sizer):
             # Every kill of anything. `c`/`r` are read AFTER the game has
             # incremented, because the codex events fire before this one
             # (measured) — so the numbers here are already the new ones.
+            # Mirrored as well as shown: the boss kill toast wants the lifetime
+            # count and must not wait up to 20s for the next full refresh.
+            ui_state.set_codex_rank(p.get("u"), p.get("r"), p.get("c"))
             ov = _OVERLAY["ref"]
             if ov is not None:
                 ov.on_codex_kill(p.get("u"), p.get("c"), p.get("r"))

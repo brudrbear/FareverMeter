@@ -319,19 +319,58 @@ function checkRift() {
 //
 // Foes keep a radius, and are the only category that does. They are the
 // numerous class (95 of those 252), they are worthless on a compass that
-// deliberately doesn't draw them, and the minimap cannot zoom past 600 —
-// MINIMAP_RANGE_MAX is pinned to this number for exactly that reason, so the
-// map's widest view and the last foe we send end at the same place. Raising
-// this without raising that just sends foes nobody draws; raising that without
-// raising this puts a ring of missing mobs around the edge of the map.
-const SWEEP_RADIUS_FOE = 600;    // world units; MINIMAP_RANGE_MAX matches it
-const SWEEP_MAX = 400;           // hard cap on entities reported, worst case
+// deliberately doesn't draw them, and MINIMAP_RANGE_MAX is pinned to this
+// number, so the map's widest view and the last foe we send end at the same
+// place. Raising this without raising that just sends foes nobody draws;
+// raising that without raising this puts a ring of missing mobs around the
+// edge of the map. MOVE THEM TOGETHER OR NOT AT ALL.
+const SWEEP_RADIUS_FOE = 1750;   // world units; MINIMAP_RANGE_MAX matches it
+// Raised with the radius: a 1750u view takes in far more scenery, and the
+// whole point of zooming out is to see the chests and orbs in it. Foes and
+// critters have budgets of their own, so this bounds everything else.
+const SWEEP_MAX = 700;           // hard cap on entities reported, worst case
 // Foes get their own slice of SWEEP_MAX. Without it, `units` being swept first
 // means a crowded fight can spend the whole budget on mobs and push the chests
 // and party members off the far end — which, now that those are unbounded in
 // range, would empty the compass exactly when it's carrying the most.
+//
+// The budget is spent NEAREST-FIRST. It used to be whatever the array walk
+// reached first, which is arbitrary order — fine when the radius was 600 and
+// the cap was rarely hit, but at 1750u a crowded far corner could spend the
+// whole 150 and leave the mob swinging at you undrawn. Foes are collected with
+// their distance and the nearest are kept once the walk is done; sorting a few
+// hundred numbers costs nothing next to the reads that produced them.
 const SWEEP_FOE_MAX = 150;
-let foeCount = 0;                // reset per sweep, in sweepWorld()
+const FOE_BUF_MAX = 1500;        // sanity bound on the collection, not on the map
+let foeBuf = [];                 // [{d2, ent}] this sweep, trimmed at the end
+
+// ---- critters (companions) ----
+// The cdb's own `unit.type == "Critter"`, shipped as a kind list in
+// unit_traits.json. They are ent.Foe at runtime like every other unit, so
+// without this they arrive as red dots among real mobs — which is wrong twice
+// over: they don't fight, and the sparkling ones are the whole reason anyone
+// looks for them.
+//
+// Deliberately NOT given the foe radius. Every non-foe category in this sweep
+// is already unbounded (see the note on SWEEP_RADIUS_FOE — foes are the only
+// class that carries one), so promoting critters out of `foe` gets them the
+// widest scan the client can offer for free. "The whole map" is bounded by
+// what the game streams to us, not by anything here; `critterFar` reports the
+// farthest one seen so that limit is measurable rather than assumed.
+//
+// They keep a budget of their own for the same reason foes do: unbounded range
+// plus a swarm must not spend SWEEP_MAX and push chests off the far end.
+const CRITTER_MAX = 120;
+let critterCount = 0;            // reset per sweep
+let critterFar = 0;              // farthest critter seen this sweep, in units
+const critterKinds = {};         // kind -> 1, from unit_traits.json
+const sparkKinds = {};           // kind -> 1, the Spark flag
+(DATA.unit_traits && DATA.unit_traits.critter || []).forEach(function (k) {
+    critterKinds[k] = 1;
+});
+(DATA.unit_traits && DATA.unit_traits.spark || []).forEach(function (k) {
+    sparkKinds[k] = 1;
+});
 // Foes this far above or below are dropped outright rather than sent and
 // faded. In the vertical zones this is for, a mob two floors down is not
 // something you can fight or avoid, and there can be a great many of them —
@@ -744,7 +783,13 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
     if (n <= 0 || n > 20000) return;              // never trust a raw length
     const data = arrPtr.add(A.array).readPointer();
     if (data.isNull()) return;
-    for (let i = 0; i < n && out.length < SWEEP_MAX; i++) {
+    // Both budgets have to have room, not just `out` — foes are collected into
+    // foeBuf and trimmed later, so stopping the walk on `out` alone would have
+    // a scenery-dense area silently swallow the mobs standing next to you.
+    // FOE_BUF_MAX is a sanity bound on the collection, well above any measured
+    // layer (252 entities total, 95 of them foes), not a display limit.
+    for (let i = 0; i < n && (out.length < SWEEP_MAX
+                              || foeBuf.length < FOE_BUF_MAX); i++) {
         let e;
         try { e = data.add(A.data + i * 8).readPointer(); } catch (x) { continue; }
         if (!e || e.isNull() || e.compare(ptr("0x10000")) <= 0) continue;
@@ -802,15 +847,36 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
                 const owner = e.add(OFF.Foe.summonOwner).readPointer();
                 if (owner && !owner.isNull()) continue;
             }
+            // A critter is a foe by class and nothing else. Reclassify BEFORE
+            // the foe culls below, which is the entire point — the radius and
+            // the z-cull are what would otherwise keep a sparkling rabbit two
+            // hills away off the map.
+            let unitKind = null;
+            if (cat === "foe" && OFF.Unit) {
+                unitKind = hlStr(e.add(OFF.Unit.kind).readPointer());
+                if (unitKind && critterKinds[unitKind]) cat = "critter";
+            }
             const x = e.add(OFF.Entity.posx).readDouble();
             const y = e.add(OFF.Entity.posy).readDouble();
             const z = e.add(OFF.Entity.posz).readDouble();
+            let foeD2 = 0;
             if (cat === "foe") {
                 const dx = x - me.x, dy = y - me.y;
-                if (dx * dx + dy * dy > SWEEP_RADIUS_FOE * SWEEP_RADIUS_FOE) continue;
+                foeD2 = dx * dx + dy * dy;
+                if (foeD2 > SWEEP_RADIUS_FOE * SWEEP_RADIUS_FOE) continue;
                 if (Math.abs(z - me.z) > SWEEP_Z_CULL) continue;
-                if (foeCount >= SWEEP_FOE_MAX) continue;
-                foeCount++;
+                // NOT capped here any more — the trim happens after the walk,
+                // so the cap keeps the NEAREST foes rather than the first ones
+                // the arrays happened to hold.
+            } else if (cat === "critter") {
+                // No radius and no z-cull: a critter on the floor below is
+                // still one you can walk to, and the sparkling ones are worth
+                // crossing a zone for. Only the budget applies.
+                if (critterCount >= CRITTER_MAX) continue;
+                critterCount++;
+                const dx = x - me.x, dy = y - me.y;
+                const d = Math.sqrt(dx * dx + dy * dy);
+                if (d > critterFar) critterFar = d;
             }
             // Foes are culled here rather than overlay-side so the payload
             // stays small regardless of how crowded the zone is. Rounded for
@@ -824,7 +890,8 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
             // A static marker's rounding is a fixed offset you never see; a
             // moving one's changes every frame, which is the same jitter the
             // player's own position had.
-            const q = (cat === "hero" || cat === "foe") ? 10 : 1;
+            const q = (cat === "hero" || cat === "foe" || cat === "critter")
+                ? 10 : 1;
             const ent = { c: cat, x: Math.round(x * q) / q,
                           y: Math.round(y * q) / q, z: Math.round(z * q) / q };
             if (cat === "hero") {
@@ -844,16 +911,24 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
                 // point where they're going rather than as anonymous dots.
                 ent.r = Math.round(
                     e.add(OFF.Entity.rotationZ).readDouble() * 1000) / 1000;
-            } else if (cat === "foe") {
+            } else if (cat === "foe" || cat === "critter") {
                 // Send the id always and the display name once resolved, so
                 // the overlay has something to show on the first frame a foe
                 // appears rather than waiting for the lookup.
-                const kind = hlStr(e.add(OFF.Unit.kind).readPointer());
+                // `unitKind` was already read above to classify critters, so
+                // this costs nothing extra for them.
+                const kind = unitKind !== null ? unitKind
+                    : hlStr(e.add(OFF.Unit.kind).readPointer());
                 if (kind) {
                     ent.k = kind;
                     const nm = unitNameCache[kind];
                     if (nm) ent.n = nm;
                     else queueUnitName(kind, e);
+                    // The cdb's Spark flag — "Sparkling Grassflopper",
+                    // "Sparktail". Sent for foes too, not just critters: the
+                    // rare `_U` variants of ordinary mobs carry it as well and
+                    // are just as worth stopping for.
+                    if (sparkKinds[kind]) ent.sp = 1;
                 }
             } else if (cat !== "activity") {
                 try { ent.e = e.add(OFF.Interactible.enabled).readU8() ? 1 : 0; }
@@ -887,7 +962,14 @@ function sweepArray(arrPtr, out, me, isEntities, seen) {
                 if (gatherInfo && gatherInfo.n) ent.n = gatherInfo.n;
                 if (gatherInfo && gatherInfo.g) ent.g = gatherInfo.g;
             }
-            out.push(ent);
+            // Foes are held back and trimmed to the nearest SWEEP_FOE_MAX once
+            // the whole layer has been walked; everything else goes straight
+            // out. See the note on SWEEP_FOE_MAX.
+            if (cat === "foe") {
+                if (foeBuf.length < FOE_BUF_MAX) foeBuf.push({ d2: foeD2, e: ent });
+            } else if (out.length < SWEEP_MAX) {
+                out.push(ent);
+            }
         } catch (x) {}
     }
 }
@@ -905,7 +987,9 @@ function sweepWorld() {
         };
         const cam = cameraDirection();
         const out = [], seen = {};
-        foeCount = 0;
+        foeBuf = [];
+        critterCount = 0;
+        critterFar = 0;
         const G = OFF.GameLayer;
         // Order matters with the dedupe: the narrow, purpose-built lists first,
         // then `entities` last to pick up activities and anything the other two
@@ -913,6 +997,14 @@ function sweepWorld() {
         sweepArray(layer.add(G.units).readPointer(), out, me, false, seen);
         sweepArray(layer.add(G.interactibles).readPointer(), out, me, false, seen);
         sweepArray(layer.add(G.entities).readPointer(), out, me, true, seen);
+        // The nearest foes, not the first ones found. Only sorted when the cap
+        // is actually in play — in ordinary play there are far fewer than 150
+        // in range and this is a length check.
+        if (foeBuf.length > SWEEP_FOE_MAX) {
+            foeBuf.sort(function (a, b) { return a.d2 - b.d2; });
+            foeBuf.length = SWEEP_FOE_MAX;
+        }
+        for (let i = 0; i < foeBuf.length; i++) out.push(foeBuf[i].e);
         // Two decimals on YOUR position, where every other coordinate gets
         // whole units. It matters here and nowhere else: a static marker's
         // rounded position never changes, but yours does, so rounding it put a
@@ -931,8 +1023,18 @@ function sweepWorld() {
                                     c: cam === null ? null
                                        : Math.round(cam * 1000) / 1000 },
                ents: out });
+        // How far the client actually streams critters to us. "Scan the whole
+        // map" is bounded by that, not by anything here, so it is reported
+        // rather than assumed — the host logs the high-water mark once so the
+        // real reach is a measured number instead of a guess.
+        if (critterFar > critterFarSeen + 50) {
+            critterFarSeen = critterFar;
+            send({ kind: "critterrange", far: Math.round(critterFar),
+                   n: critterCount, capped: critterCount >= CRITTER_MAX });
+        }
     } catch (e) {}
 }
+let critterFarSeen = 0;
 
 function resetWindows() {
     for (const nm in winOpenCount) send({ kind: "window", name: nm, open: 0 });
@@ -1346,7 +1448,12 @@ function refreshCodexRanks() {
             if (!id) continue;
             const v = hbGet(h, kb);
             if (!v || v.isNull()) continue;
-            out[id] = v.add(OFF.CodexProxy.rank).readS32();
+            // [killCount, rank]. The count is a LIFETIME total per mob type —
+            // it keeps climbing after the entry is mastered and the codex has
+            // stopped caring — which is what lets the host say "12th X slain"
+            // and put a tally on the boss kill toast.
+            out[id] = [v.add(OFF.CodexProxy.count).readS32(),
+                       v.add(OFF.CodexProxy.rank).readS32()];
         }
         codexRanks = out;
         send({ kind: "codex", ranks: out });
@@ -1376,7 +1483,7 @@ function hookCodex(base) {
             const id = hlStr(this.context.rdx);
             if (!id) return;
             const e = codexEntry(unitsProgressMap(), id);
-            if (e) codexRanks[id] = e.r;
+            if (e) codexRanks[id] = [e.c, e.r];
             send({ kind: "codexkill", u: id,
                    c: e ? e.c : null, r: e ? e.r : null });
         } catch (x) {}
@@ -1393,7 +1500,8 @@ function hookCodex(base) {
             const id = hlStr(this.context.rdx);
             const rank = this.context.r8.toInt32();
             if (!id) return;
-            codexRanks[id] = rank;
+            const prev = codexRanks[id];
+            codexRanks[id] = [prev ? prev[0] : 0, rank];
             send({ kind: "codexrank", u: id, r: rank });
         } catch (x) {}
     });

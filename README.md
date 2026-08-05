@@ -244,6 +244,7 @@ again.
 | Options | Show all players / Show party only | switches between your group and everyone nearby; resets the encounter |
 | Options | Auto 'View All Players' in rifts | presses the button above for you at both rift boundaries — all-players going in, party-only coming out — and retires the [rift prompt](#rifts) that would otherwise ask. Same setting as that prompt's **Do this every time** tick. Off by default. Applies from your next crossing, not the rift you're already in |
 | Options | Codex alerts | the two [codex popups](#codex-popups) — the running count on each kill and the fanfare when an entry fills. On by default. The minimap's *only missing from codex* filter is separate and unaffected |
+| Options | Sparkly Tracker | a pointer to the nearest sparkling **critter**, with its distance and how far up or down it is. On by default; the panel only appears when there's one to point at. See [Sparkly Tracker](#sparkly-tracker) |
 | Options | Theme | Five choices — see [Themes](#themes). `Dark Dynamic` is the default. |
 | Options | Transparency | how see-through the overlay is, 0-80%. It covers the meter, breakdown, minimap, compass and rift timer — panel, header bar and text together, since window opacity is the only kind Windows offers. The control menu and the rift prompt are exempt: one is what you're reading while you drag the slider, the other is a question that has to be answered |
 | Options | Minimap | `Rotating` (default) turns the map with the camera, so the top of the map is whatever you're looking at. `Fixed` keeps north up and turns the arrow instead. |
@@ -329,6 +330,16 @@ compass. A marker now waits a quarter-second before it's drawn, and lingers a
 couple of seconds after it stops being reported, so what you see holds still.
 Enemies are exempt: a mob appearing late is worse than a mob flickering.
 
+**Critters are green pawprints**, not red dots. The game calls them
+Companions — frogs, rabbits, squirrels, goats — and they were previously drawn
+as enemies, which they aren't. They have their own **Critters** tick, so a zone
+carpeted in them can be cleared off the map without hiding anything that can
+actually hurt you.
+
+Critters are also swept **without a distance limit**, unlike enemies. That's
+what makes the sparkly tracker below work: a sparkling critter three hills away
+still reaches the map, as far out as the game will tell the client about it.
+
 **Enemies have three states rather than a tick**, in the control menu:
 `Enemies: all` → `Enemies: only missing from codex` → `Enemies: hidden`.
 
@@ -357,9 +368,21 @@ and it has a Show / hide tick like the other windows.
 `Rotating` (the default) turns the map **with the camera**, so the top of the
 map is whatever you're looking at — not where your character happens to be
 pointing, which changes constantly as it turns to face things. `Fixed` keeps the
-map still and turns the arrow instead. The range is 250 world units from the
-centre out, on a panel 405px square at 100% — the Minimap scale slider takes it
-from there.
+map still and turns the arrow instead. At 100% zoom the map reaches 175 world
+units from the centre out, on a panel 405px square — the Zoom slider takes it
+from there, down to 80u and **out to 1750u**.
+
+That far end is new, and it's there for **chests and orbs**: they were always
+swept from the whole layer at any distance, so the only thing stopping you
+seeing a distant one was how far the map could zoom out. It now covers roughly
+nine times the area it used to.
+
+Two honest caveats. **Enemies stop where the map does** — they're the one
+category with a distance limit, deliberately, and it's moved out to match, so
+there's no ring of missing mobs at the rim. And zooming out is **not a treasure
+map**: chests stream, and the client only holds a handful loaded at a time, so
+you see the ones the game has told it about rather than every chest in the
+zone.
 
 Other players are drawn as outlined chevrons pointing where they're facing, so
 you can read which way a group is heading; group members get a blue ring.
@@ -634,17 +657,29 @@ Two of them, on their own line under the boss kill time:
   how close the next tick is. On the last stretch — the one that will finish
   the entry — the wording changes to `Skunk — Codex Mastery 12/20`, so you can
   tell at a glance whether it's worth staying. Mobs with no codex entry say
-  nothing, and once an entry is finished it stops reporting rather than nagging
-  you through a grind.
+  nothing at all.
 * **Finishing an entry** puts `CODEX COMPLETE — SKUNK` up in gold and plays a
   cue. The sound rides the single **Enable sounds** setting like every other
   cue — there's no separate switch — and if the audio is missing that one cue
   is skipped while the rest keep working.
+* **After that it becomes a tally** — `47th Skunk masterfully slain`. The count
+  the game keeps is a *lifetime* total per mob type: it carries on climbing
+  long after the codex has stopped caring, so once an entry is done the toast
+  reports the running total instead of repeating a finished `20/20`.
+
+**Boss kills show that number too**, on their own line under the kill time —
+`Boss slain 12 times`. Only for a single boss: when several are pulled together
+there's no honest single number for it, so it says nothing rather than
+something wrong.
 
 Codex entries run to three ranks, and how many kills each takes depends on the
 mob: **1 / 8 / 20** for ordinary ones, **1 / 4 / 10** for the big ones (ogres
-and the like), and **one kill** masters an elite or a boss outright. The meter
-reads all of that out of the game's own data rather than guessing.
+and the like), and **one kill** for elites and named mobs, which master
+outright.
+
+The meter reads those numbers from the game's own data, and cross-checks them
+against your actual rank — so if a mob's group is ever miscategorised, the game
+wins and the count shown stays right.
 
 Both are on by default and both are covered by one tick — **Codex alerts**, in
 the control menu under Options. Turning it off silences the running count and
@@ -653,6 +688,45 @@ deliberately separate and keeps working either way.
 
 Worth saying: the game already shows its own quiet notifications for these
 moments. These are the loud version, not a new capability.
+
+### Sparkly Tracker
+
+The game flags a handful of units as **sparkling** — the rare variants, named
+in its own data as *Sparkling Grassflopper*, *Sparktail*, *Sparkling Tortrock*,
+and also the rare `_U` versions of ordinary mobs like *Sparkling Skunk* and
+*Sparkling Crab*. 36 units carry it, ten of them critters.
+
+Any sparkling unit on the map is drawn **larger with a gold halo**, whatever it
+is, so it stands out among its ordinary siblings.
+
+**Sparkly Tracker** (in Options, on by default) is narrower on purpose: it
+points at **sparkling critters only**. The other sparkling units are rare
+variants of ordinary mobs — a Sparkling Builder is a bee — and they're things
+you meet by walking into them, not things you cross a zone to find. Having the
+panel announce one made it useless for what it's for. They still get the halo
+on the map, because marking something you can see is information; sending you
+after it is not.
+
+It puts a small panel on screen whenever one is in range:
+
+```
+  ➤   SPARKLING GRASSFLOPPER
+      412u  ·  38u up
+```
+
+The arrow points at it and turns with your camera exactly as the minimap does —
+they're computed from the same projection, so the arrow and the map marker can
+never disagree. The two distances are separate on purpose: something 20 units
+away and 40 below is not 45 units of walking, it's a different floor.
+
+The panel appears only when there's something to point at, and lingers a few
+seconds if the target drops out of range — the game streams entities in and out
+constantly, and without that the panel would blink at you while you ran toward
+it.
+
+**How far it reaches is the game's decision, not the meter's.** The client is
+only told about entities near enough to matter to it, and that's the real limit
+on "scan the whole map".
 
 ### Your own sounds
 
