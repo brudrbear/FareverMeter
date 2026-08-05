@@ -18,7 +18,8 @@ datas = [
     (str(ROOT / "frida" / "meter_hook.js"), "res/frida"),
     (str(ROOT / "analysis_out" / "resolver_data.json"), "res/analysis_out"),
     (str(ROOT / "analysis_out" / "meter_offsets.json"), "res/analysis_out"),
-    (str(ROOT / "analysis_out" / "item_names.json"), "res/analysis_out"),
+    # Names a boss kill toast and every combat history dataset: a unit's kind
+    # is a backend id, not what the game puts on its nameplate.
     (str(ROOT / "analysis_out" / "unit_names.json"), "res/analysis_out"),
     # Without this the installed build cannot size a heal that restored
     # nothing, and healing silently means "health actually restored" again —
