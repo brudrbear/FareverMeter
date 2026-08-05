@@ -633,6 +633,16 @@
     "ent.Unit.isBoss": 4735,
     "ent.Unit.isElite": 4737
   },
+  "codex_targets": {
+    "st.Player.notifyCodexUnit__impl": 3868,
+    "st.Player.onUnitCodexRankProgress__impl": 3869,
+    "st.Player.notifyUnitKilled__impl": 3871
+  },
+  "map_natives": {
+    "hbkeys": 24780,
+    "hbsize": 24783,
+    "hbget": 22130
+  },
   "funcs": {
     "ui.Console.getMyHero": 12357,
     "GameApp.getCameraHero": 11658

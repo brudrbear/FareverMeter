@@ -45,6 +45,7 @@ import json
 import math
 import os
 import queue
+import random
 import re
 import sys
 import tempfile
@@ -247,6 +248,22 @@ TOP_STRIP_RIFT = 190
 # so it gets its own line rather than a timeshare.
 TOP_STRIP_KILL = 240
 KILL_TOAST_SECS = 8.0       # how long the time stays on screen
+# The codex toast gets its own strip below the kill time, for the same reason
+# the kill time has one: mastering a codex entry and killing a boss are the
+# same event often enough (a boss IS a codex entry, and one kill masters it)
+# that sharing a line would have them overwrite each other.
+TOP_STRIP_CODEX = 288
+# Much shorter than the kill toast. This one fires on ordinary kills, so it has
+# to be gone before the next one arrives or a grind turns the strip into a
+# permanent fixture. The completion toast holds longer — it's the rare one.
+CODEX_TOAST_SECS = 2.2
+CODEX_MASTER_TOAST_SECS = 6.0
+# st.Player.notifyCodexUnit__impl's `kind` argument. Measured: the names are
+# NOT what they suggest — CodexDiscovered is rank 1, CodexCompleted is an
+# INTERMEDIATE rank-up, and only CodexMastered means the entry is finished.
+CODEX_DISCOVERED = "CodexDiscovered"
+CODEX_RANKED = "CodexCompleted"
+CODEX_MASTERED = "CodexMastered"
 
 OVERLAY_ALPHA = 0.94
 # Extra see-through on top of that, from the Transparency slider. 0 leaves the
@@ -505,12 +522,26 @@ MINIMAP_FILTERS = (
     # chests-without-orbs isn't.
     ("nodes",      "Ore & herb nodes", ("ore", "herb")),
     ("players",    "Players",      ("hero",)),
-    ("enemies",    "Enemies",      ("foe",)),
     ("activities", "Activities",   ("activity",)),
 )
 # category -> which tick governs it, built once rather than searched per marker.
 MINIMAP_FILTER_OF = {cat: key for key, _label, cats in MINIMAP_FILTERS
                      for cat in cats}
+
+# Enemies are the one category with THREE useful states rather than two, so
+# they get a cycling button instead of a tick. "Missing from codex" is the
+# whole reason: with 493 codex mobs in the game, the interesting question
+# while you finish a codex is not "are enemies shown" but "which of these do
+# I still need". Cycling rather than a Tk dropdown because every other row in
+# this menu is a labelled button and a combobox in the middle of them reads as
+# a different program.
+MINIMAP_FOE_MODES = (
+    ("all",   "Enemies: all"),
+    ("codex", "Enemies: only missing from codex"),
+    ("off",   "Enemies: hidden"),
+)
+MINIMAP_FOE_MODE_KEYS = [k for k, _ in MINIMAP_FOE_MODES]
+MINIMAP_FOE_LABEL = dict(MINIMAP_FOE_MODES)
 
 # The compass gets its own pair, deliberately not shared with the map's. The
 # two panels answer different questions — "what is around me" against "which
@@ -2978,6 +3009,12 @@ class GameUIState:
         # carried it — which is not the same as False, and a history dataset
         # would otherwise call an unknown zone a dungeon.
         self._zone_world_map = None
+        # unit kind -> codex rank, mirrored from the replicated store. Empty
+        # until the first `codex` message; the map filter treats "no mirror
+        # yet" as "show everything" rather than hiding the world, because an
+        # empty dict and a fully-mastered codex are indistinguishable here.
+        self._codex_ranks: dict[str, int] = {}
+        self._codex_seen = False
 
     def set_zone(self, sig, world_map=None):
         """layer.world.level from the hook — the loaded level's name, sent
@@ -2991,6 +3028,39 @@ class GameUIState:
             self._zone_sig = sig or None
             self._zone_world_map = (None if world_map is None
                                     else bool(world_map))
+
+    def set_codex_ranks(self, ranks):
+        """The whole kind -> rank mirror from the hook, replacing what we had.
+
+        Replaced rather than merged on purpose: switching character is a
+        different codex entirely, and merging would leave the old character's
+        mastered mobs hidden from the new one's map."""
+        clean = {}
+        for kind, rank in ranks.items():
+            if isinstance(kind, str) and isinstance(rank, int):
+                clean[kind] = rank
+        with self._lock:
+            self._codex_ranks = clean
+            self._codex_seen = True
+
+    def set_codex_rank(self, kind, rank):
+        """One entry moved, between full refreshes."""
+        if not isinstance(kind, str) or not isinstance(rank, int):
+            return
+        with self._lock:
+            self._codex_ranks[kind] = rank
+
+    def codex_rank(self, kind):
+        """This character's rank for `kind` — 0 for a mob never killed, which
+        is what an absent key means in the replicated store."""
+        with self._lock:
+            return self._codex_ranks.get(kind, 0)
+
+    def codex_ready(self):
+        """Whether a mirror has arrived at all. False means "don't filter" —
+        see the note on _codex_ranks."""
+        with self._lock:
+            return self._codex_seen
 
     def zone_sig(self):
         with self._lock:
@@ -3488,11 +3558,67 @@ ICON_FILE = ROOT / "assets" / "farevermeter.ico"
 # All three ride the single "Enable sounds" setting; there is no per-cue switch.
 SOUND_FILES = {
     "pull": ROOT / "assets" / "boss_pulled.wav",
-    "victory": ROOT / "assets" / "boss_victory.mp3",
     "legendary": ROOT / "assets" / "legendary_pickup.mp3",
 }
+
+# Cues that pick at random from a FOLDER instead of playing one fixed file.
+#
+# A folder rather than a list in here because the point is adding to it without
+# touching code: drop a file in, and the next boss kill can play it. The
+# folders are re-read on every play, so that works while the meter is running —
+# no restart, no rebuild. Filenames are never parsed, which is what lets a file
+# keep its creator's name.
+#
+# TWO folders per cue, and the second is the one that matters to anyone who
+# didn't build this:
+#
+#   assets/<cue>       ships with the meter. In an installed build this lives
+#                      inside the program folder, so anything added there is
+#                      wiped by the next update.
+#   sounds/<cue>       yours, under %LOCALAPPDATA%\FareverMeter alongside your
+#                      settings and history — the same place that already
+#                      survives updates. Created on demand; absent is normal.
+#
+# Anything MCI's mpegvideo driver opens will do; .mp3 and .wav are both
+# measured working. A cue whose folders are all missing or empty retires ALONE
+# and says so, exactly as a missing fixed file does.
+SOUND_USER_DIR = _WRITABLE / "sounds"
+SOUND_POOLS = {
+    "victory": "victory",
+    # Fires when a codex entry is MASTERED — see on_codex_notify. A pool from
+    # the start for the same reason victory is one.
+    "codex": "codex",
+}
+SOUND_POOL_EXTS = (".mp3", ".wav", ".wma", ".m4a", ".aac")
 SOUND_VOLUME_DEFAULT = 60         # percent
 SOUND_VOLUME_MAX = 100
+
+
+def _sound_pool_dirs(key):
+    """Where a cue's files can live: shipped first, then yours."""
+    name = SOUND_POOLS.get(key)
+    if name is None:
+        return []
+    return [ROOT / "assets" / name, SOUND_USER_DIR / name]
+
+
+def _sound_pool_files(key):
+    """Every playable file across a cue's folders, sorted and de-duplicated by
+    name so a user file shadowing a shipped one doesn't play twice.
+
+    An absent folder is not an error here — only "nothing to add"."""
+    out, seen = [], set()
+    for d in _sound_pool_dirs(key):
+        try:
+            entries = sorted(d.iterdir())
+        except OSError:
+            continue                      # missing or unreadable: normal
+        for p in entries:
+            if (p.is_file() and p.suffix.lower() in SOUND_POOL_EXTS
+                    and p.name.lower() not in seen):
+                seen.add(p.name.lower())
+                out.append(p)
+    return out
 
 # st.item.Weapon.rarity, read live off equipped gear. Capitalised, and one of
 # a small set — Legendary / Epic / Rare were all observed. Compared exactly:
@@ -3521,6 +3647,10 @@ class SoundPlayer:
     anyway, and the Tk thread must not wait on audio. Files are opened once and
     kept open, so a cue starts when it's asked for rather than after a disk
     read.
+
+    Two kinds of cue: a fixed file (SOUND_FILES) and a random pick from a
+    folder (SOUND_POOLS). Devices are keyed by PATH rather than by cue, since
+    a pool has many files and each needs its own.
     """
 
     def __init__(self):
@@ -3531,8 +3661,11 @@ class SoundPlayer:
         self._q: queue.Queue = queue.Queue()
         self._thread = None
         # Worker-thread-only state; no lock needed, nothing else touches it.
-        self._open: dict[str, str] = {}       # key -> MCI alias
+        self._open: dict[str, str] = {}       # path -> MCI alias
         self._checked = False                 # verified a cue actually played
+        self._reported: set[str] = set()      # cues already moaned about once
+        self._last: dict[str, str] = {}       # cue -> last path played, to vary
+        self._alias_n = 0                     # unique suffix per opened device
         try:
             self._mci = ctypes.windll.winmm.mciSendStringW
         except Exception:
@@ -3553,28 +3686,76 @@ class SoundPlayer:
         except Exception:
             return None
 
-    def _alias_for(self, key: str) -> str | None:
-        if key in self._open:
-            return self._open[key]
-        path = SOUND_FILES.get(key)
-        if path is None or not path.is_file():
+    def _alias_for_path(self, path) -> str | None:
+        """An open MCI device for `path`, opened once and kept.
+
+        Keyed by path, not by cue: a pool plays several files and each needs
+        its own device, and two cues sharing a file should share the device."""
+        k = str(path)
+        if k in self._open:
+            return self._open[k]
+        if not path.is_file():
             return None
-        alias = f"fmsnd_{key}_{os.getpid()}"
+        self._alias_n += 1
+        alias = f"fmsnd_{os.getpid()}_{self._alias_n}"
         if self._send(f'open "{path}" type mpegvideo alias {alias}') is None:
             return None
-        self._open[key] = alias
+        self._open[k] = alias
         with self._lock:
             vol = self._volume
         self._send(f"setaudio {alias} volume to {vol * 10}")
         return alias
 
+    def _pick(self, key: str):
+        """Which file this cue should play now, or None if it has none.
+
+        Pools are re-read here rather than cached, so a file dropped into the
+        folder is picked up on the next play without a restart. With more than
+        one to choose from the previous pick is excluded, which is the
+        difference between a pool and a coin that keeps landing the same way."""
+        if key in SOUND_POOLS:
+            files = _sound_pool_files(key)
+            if not files:
+                return None
+            if len(files) > 1:
+                last = self._last.get(key)
+                choices = [p for p in files if str(p) != last] or files
+            else:
+                choices = files
+            pick = random.choice(choices)
+            self._last[key] = str(pick)
+            return pick
+        path = SOUND_FILES.get(key)
+        return path if (path is not None and path.is_file()) else None
+
     def _do_play(self, key: str):
-        alias = self._alias_for(key)
+        path = self._pick(key)
+        if path is None:
+            # NOTHING TO PLAY silences that cue only. This used to set _broken
+            # and take every other cue down with it, which meant one absent
+            # asset silenced the boss fanfare too — and silently, since the
+            # line below is the only trace. Cues ship independently, and a pool
+            # folder can legitimately be emptied, so neither may mute the rest.
+            #
+            # Complained about once, but retried every time: a pool is read off
+            # disk on each play, so dropping the first file into an empty
+            # folder starts working immediately rather than after a restart.
+            if key not in self._reported:
+                self._reported.add(key)
+                if key in SOUND_POOLS:
+                    where = " or ".join(str(d) for d in _sound_pool_dirs(key))
+                else:
+                    where = str(SOUND_FILES.get(key) or "(unregistered)")
+                print(f"[meter] sound {key!r} has nothing to play in {where}; "
+                      "that cue is off, the others still play",
+                      file=sys.stderr)
+            return
+        alias = self._alias_for_path(path)
         if alias is None:
             with self._lock:
-                self._broken = True       # missing/unplayable: stop retrying
-            print(f"[meter] sound {key!r} unavailable; sounds disabled",
-                  file=sys.stderr)
+                self._broken = True       # MCI itself failed: stop retrying
+            print(f"[meter] sound {key!r} unavailable ({path.name}); "
+                  "sounds disabled", file=sys.stderr)
             return
         # `from 0` so a second pull retriggers the cue instead of being ignored
         # because the previous play hasn't finished.
@@ -3604,8 +3785,17 @@ class SoundPlayer:
                     self._open.clear()
                     return
                 if op == "prime":
+                    # Fixed cues only. Pool files open on their first play
+                    # instead: a pool is meant to grow, and priming one would
+                    # both hold a device per file and freeze the folder's
+                    # contents at startup, which is the thing pools exist to
+                    # avoid. The cost is a disk read the first time a given
+                    # file comes up — inaudible on a fanfare that follows a
+                    # boss dying.
                     for key in SOUND_FILES:
-                        self._alias_for(key)
+                        p = SOUND_FILES[key]
+                        if p.is_file():
+                            self._alias_for_path(p)
                 elif op == "volume":
                     for alias in self._open.values():
                         self._send(f"setaudio {alias} volume to {job[1] * 10}")
@@ -3999,6 +4189,13 @@ class Overlay:
         self._map_filters = {key: True for key, _label, _cats in MINIMAP_FILTERS}
         self._compass_filters = {key: True
                                  for key, _label, _cats in COMPASS_FILTERS}
+        # Enemies have their own three-state mode; see MINIMAP_FOE_MODES.
+        self._foe_mode = "all"
+        # Codex popups — both the per-kill count and the completion fanfare.
+        # On by default: it's the visible half of the codex feature, and a
+        # feature nobody can see until they find a tick is a feature nobody
+        # finds. The map filter is deliberately NOT gated on this.
+        self._codex_alerts = True
         self._map_rate = "High"        # Ultra exists but is opt-in
         # The world-map backdrop. On by default: it only ever draws when a
         # shipped asset matches the zone, so "on with no asset" costs nothing.
@@ -4141,10 +4338,13 @@ class Overlay:
         self.badgewin.title("Farever+ Compass Badges")
         self.killwin = tk.Toplevel(self.root)
         self.killwin.title("Farever+ Kill Time")
+        self.codexwin = tk.Toplevel(self.root)
+        self.codexwin.title("Farever+ Codex")
         for win in (self.root, self.detail, self.menu, self.hintwin,
                     self.parsewin, self.promptwin, self.reportwin,
                     self.updatewin, self.riftwin, self.mapwin,
-                    self.compasswin, self.badgewin, self.killwin):
+                    self.compasswin, self.badgewin, self.killwin,
+                    self.codexwin):
             win.overrideredirect(True)
             win.attributes("-topmost", True)
             win.configure(bg=TRANSPARENT_KEY)
@@ -4201,6 +4401,7 @@ class Overlay:
         self._build_hint()
         self._build_parse()
         self._build_kill_toast()
+        self._build_codex_toast()
         self._build_prompt()
         self._build_report()
         self._build_update_offer()
@@ -4237,6 +4438,8 @@ class Overlay:
         self.parsewin.withdraw()
         # Nor this one: the kill-time toast maps itself when a boss dies.
         self.killwin.withdraw()
+        # ...nor the codex toast, which maps itself on a kill that counts.
+        self.codexwin.withdraw()
         # DERIVED from _shown rather than hand-listed, because the hand-listed
         # version had exactly one failure mode and it happened: add a faded
         # window, forget to add it here, and it starts MAPPED. A Toplevel left
@@ -4434,6 +4637,18 @@ class Overlay:
             for key, _label, _cats in table:
                 if isinstance(saved_filters.get(key), bool):
                     into[key] = saved_filters[key]
+        # Enemies used to be an ordinary tick in map_filters; it is a
+        # three-state mode now. Carry the old setting across rather than
+        # silently turning enemies back on for anyone who had them off.
+        if isinstance(data.get("codex_alerts"), bool):
+            self._codex_alerts = data["codex_alerts"]
+        fm = data.get("foe_mode")
+        if fm in MINIMAP_FOE_MODE_KEYS:
+            self._foe_mode = fm
+        else:
+            old = data.get("map_filters")
+            if isinstance(old, dict) and old.get("enemies") is False:
+                self._foe_mode = "off"
         if data.get("mode") in ("party", "all"):
             self.mode = data["mode"]
         if isinstance(data.get("hide_ooc"), bool):
@@ -4524,6 +4739,8 @@ class Overlay:
                 "compass_filters": {
                     k: bool(self._compass_filters.get(k, True))
                     for k, _label, _cats in COMPASS_FILTERS},
+                "foe_mode": self._foe_mode,
+                "codex_alerts": bool(self._codex_alerts),
                 "mode": self.mode,
                 "hide_ooc": self._hide_ooc,
                 "map_bg": bool(self._map_bg_on),
@@ -5123,6 +5340,20 @@ class Overlay:
                  wraplength=WARN_WRAP).pack(fill="x", pady=(0, 2))
         self.btn_auto_reset = button(gen,
                                      self._enqueue(self._toggle_auto_reset_boss))
+        # One switch for the whole codex feature's popups — the running count
+        # on every kill AND the completion fanfare. They're one thing to want
+        # or not want, and a second tick for "the rare one only" would be a
+        # setting nobody goes looking for.
+        self.btn_codex_alerts = button(
+            gen, self._enqueue(self._toggle_codex_alerts))
+        tk.Label(gen,
+                 text=("The running codex count on each kill, and the "
+                       "fanfare when an entry fills. The map's "
+                       "'only missing from codex' filter is separate and "
+                       "keeps working either way."),
+                 bg=BG_BODY, fg=FG_DIM, font=self.fonts_m["ui_tiny_i"],
+                 anchor="w", justify="left",
+                 wraplength=WARN_WRAP).pack(fill="x", pady=(0, 2))
         row = field(gen, "Reset data")
         self.btn_bind = tk.Button(
             row, text="", command=self._begin_bind_capture, anchor="w",
@@ -5362,6 +5593,8 @@ class Overlay:
         for key, label, _cats in MINIMAP_FILTERS:
             self.btn_map_filter[key] = button(
                 mp, self._enqueue(lambda k=key: self._toggle_map_filter(k)))
+        # Enemies cycle all -> missing-from-codex -> hidden; see MINIMAP_FOE_MODES.
+        self.btn_map_foes = button(mp, self._enqueue(self._cycle_foe_mode))
 
         section(mp, "COMPASS")
         self.btn_compass_filter = {}
@@ -5641,8 +5874,23 @@ class Overlay:
             # reads the same snapshot and these ticks are the MAP's.
             if not self._map_filters.get(MINIMAP_FILTER_OF.get(cat), True):
                 continue
+            # Enemies answer to their own three-state mode rather than a tick.
+            if cat == "foe" and self._foe_mode == "off":
+                continue
+            codex_only = (cat == "foe" and self._foe_mode == "codex"
+                          and self.ui_state.codex_ready())
             style = MINIMAP_STYLE_MAP[cat]
             for e in by_cat.get(cat, ()):
+                # "Still missing" means the mob HAS a codex entry and this
+                # character hasn't finished it. Every unit threshold set has
+                # three tiers (measured), so a finished entry is rank 3
+                # whatever kind of mob it is — no bucket lookup needed here.
+                if codex_only:
+                    kind = e.get("k")
+                    if not kind or _codex_thresholds(kind) is None:
+                        continue        # no codex entry at all
+                    if self.ui_state.codex_rank(kind) >= CODEX_MAX_RANK:
+                        continue        # already mastered
                 x, y = self._minimap_px(e.get("x", 0), e.get("y", 0), me,
                                         half, scale, rot)
                 if not (0 <= x <= size and 0 <= y <= size):
@@ -7661,6 +7909,52 @@ class Overlay:
         self._kill_toast_job = None
         self.killwin.withdraw()
 
+    def _build_codex_toast(self):
+        """The codex line — same drop-shadowed floating text as the kill time,
+        on its own window because mastering an entry and killing a boss are
+        routinely the same event (a boss IS a one-kill codex entry)."""
+        self._codex_font = self.fonts["ui_parse_b"]
+        self._codex_canvas = tk.Canvas(self.codexwin, bg=TRANSPARENT_KEY,
+                                       highlightthickness=0, bd=0)
+        self._codex_canvas.pack()
+        self._codex_toast_job = None
+
+    def _show_codex_toast(self, text, gold):
+        """Put `text` on the codex strip. Gold and long for a mastered entry,
+        body-coloured and brief for ordinary progress — the same grammar the
+        kill toast uses for a record."""
+        f, c = self._codex_font, self._codex_canvas
+        pad, off = 8, 2
+        w = f.measure(text) + pad * 2 + off
+        h = f.metrics("linespace") + pad * 2 + off
+        c.config(width=w, height=h)
+        c.delete("all")
+        c.create_text(pad + off, pad + off, text=text, font=f, fill=BG_BORDER,
+                      anchor="nw")
+        c.create_text(pad, pad, text=text, font=f,
+                      fill=REPORT_MEDALS[0] if gold else BG_BODY, anchor="nw")
+        self.codexwin.update_idletasks()
+        l, t, r, _b = self._game_rect()
+        self.codexwin.geometry(f"+{l + ((r - l) - w) // 2}+{t + TOP_STRIP_CODEX}")
+        self.codexwin.deiconify()
+        self.codexwin.attributes("-topmost", True)
+        # A second kill inside the window restarts the clock rather than
+        # letting the first one's timer take the new text down early. During a
+        # grind that means the strip stays up continuously, which is correct:
+        # it is always showing the most recent count.
+        if self._codex_toast_job is not None:
+            try:
+                self.root.after_cancel(self._codex_toast_job)
+            except Exception:
+                pass
+        secs = CODEX_MASTER_TOAST_SECS if gold else CODEX_TOAST_SECS
+        self._codex_toast_job = self.root.after(int(secs * 1000),
+                                                self._hide_codex_toast)
+
+    def _hide_codex_toast(self):
+        self._codex_toast_job = None
+        self.codexwin.withdraw()
+
     def _toggle_parse(self):
         if self._parse_state is None:
             self._parse_state = "countdown"
@@ -8023,6 +8317,7 @@ class Overlay:
         self._set_win_clickthrough(self.hintwin, True)
         self._set_win_clickthrough(self.parsewin, True)
         self._set_win_clickthrough(self.killwin, True)
+        self._set_win_clickthrough(self.codexwin, True)
         # The prompt must take clicks whenever it's up, regardless of lock
         # state — it's the one overlay window that has to be answered.
         self._set_win_clickthrough(self.promptwin, False)
@@ -8827,6 +9122,30 @@ class Overlay:
         self._map_bg_on = not self._map_bg_on
         self._save_settings()
 
+    def _toggle_codex_alerts(self):
+        """Both codex popups on or off. The map's codex filter is untouched —
+        wanting the map to show what you still need without a toast on every
+        kill is an ordinary thing to want."""
+        self._codex_alerts = not self._codex_alerts
+        if not self._codex_alerts:
+            # Take down anything currently up, rather than leaving the last
+            # toast stranded on screen until its timer runs out.
+            self._hide_codex_toast()
+        self._save_settings()
+
+    def _cycle_foe_mode(self):
+        """all -> only missing from codex -> hidden -> all.
+
+        A cycle rather than a tick because enemies have three states worth
+        having; see MINIMAP_FOE_MODES. Nothing redraws by hand — the map
+        repaints on its own tick and reads the mode there."""
+        try:
+            i = MINIMAP_FOE_MODE_KEYS.index(self._foe_mode)
+        except ValueError:
+            i = -1        # an unknown mode from a hand-edited settings file
+        self._foe_mode = MINIMAP_FOE_MODE_KEYS[(i + 1) % len(MINIMAP_FOE_MODE_KEYS)]
+        self._save_settings()
+
     def _toggle_map_filter(self, key):
         """One category group on or off. Nothing to redraw by hand — the map is
         repainted wholesale on the next tick and reads the ticks as it goes."""
@@ -8932,6 +9251,49 @@ class Overlay:
         """A legendary weapon appeared in the loadout that wasn't there before.
         Called from the hook thread — the cue belongs to the Tk one."""
         self._enqueue(lambda: self.sounds.play("legendary"))()
+
+    def on_codex_kill(self, kind, kills, rank):
+        """Every kill, from the hook thread. Shows the running codex count.
+
+        The numbers are already the post-kill ones: the codex events fire
+        BEFORE notifyUnitKilled (measured), so the hook read them after the
+        game incremented. Mobs with no codex entry say nothing at all — a
+        toast reading "Dummy 0/0" on every training-dummy hit is noise."""
+        if not self._codex_alerts or not kind or not isinstance(kills, int):
+            return
+        prog = _codex_progress(kind, kills)
+        if prog is None:
+            return                      # NoCodex — nothing to report
+        shown, target, final = prog
+        # Suppress the toast for an entry already finished. It fires once more
+        # on the kill that MASTERS it (rank reaches max here), which is the
+        # moment worth seeing; every kill after that is just farming.
+        if isinstance(rank, int) and rank >= CODEX_MAX_RANK and shown > target:
+            return
+        # "Codex Mastery" only on the stretch that will finish the entry, so
+        # the wording itself says how much is left to care about.
+        word = "Codex Mastery" if final else "Codex"
+        name = _unit_names().get(kind) or _pretty_id(kind)
+        self._enqueue(lambda: self._show_codex_toast(
+            f"{name}  —  {word} {shown}/{target}", gold=False))()
+
+    def on_codex_notify(self, what, kind):
+        """The game's own codex notification, from the hook thread.
+
+        The names are NOT what they look like (measured): CodexDiscovered is
+        rank 1, CodexCompleted is an INTERMEDIATE rank-up, and only
+        CodexMastered means the entry is finished. Hanging the fanfare on
+        CodexCompleted would set it off at 8 kills of 20."""
+        if not self._codex_alerts or not kind or what != CODEX_MASTERED:
+            return
+        name = _unit_names().get(kind) or _pretty_id(kind)
+        def fire():
+            self._show_codex_toast(f"CODEX COMPLETE  —  {name.upper()}",
+                                   gold=True)
+            # No switch of its own: it rides the master Sounds setting, which
+            # SoundPlayer.play() already gates on.
+            self.sounds.play("codex")
+        self._enqueue(fire)()
 
     def _toggle_sounds(self):
         self._sounds_on = not self._sounds_on
@@ -9902,6 +10264,12 @@ class Overlay:
             on = self._map_filters.get(key, True)
             self.btn_map_filter[key].config(
                 text=("☑  " if on else "☐  ") + label)
+        # Three states, so the marker says which one rather than ticked/not.
+        # A hollow circle for "hidden" keeps it visually a filter row.
+        foe_glyph = {"all": "☑", "codex": "◪", "off": "☐"}.get(self._foe_mode, "☑")
+        self.btn_map_foes.config(
+            text=f"{foe_glyph}  "
+                 + MINIMAP_FOE_LABEL.get(self._foe_mode, "Enemies: all"))
         self.btn_map_bg.config(
             text=("☑  World map background" if self._map_bg_on
                   else "☐  World map background"))
@@ -9925,6 +10293,9 @@ class Overlay:
         self.btn_auto_reset.config(
             text=("☑  Auto reset on boss pull" if self._auto_reset_boss
                   else "☐  Auto reset on boss pull"))
+        self.btn_codex_alerts.config(
+            text=("☑  Codex alerts" if self._codex_alerts
+                  else "☐  Codex alerts"))
         # Reads state, not action — and it's the same setting the rift prompt's
         # "Do this every time" ticks, so a player who opted in from the prompt
         # finds it already on here.
@@ -10261,6 +10632,88 @@ def _heal_specs():
     return _HEAL_SPECS
 
 
+_CODEX_DATA = None
+# Fallback used only when codex_units.json is missing. The thresholds are the
+# game's own constants, so an out-of-date file still gives sane arithmetic for
+# ordinary mobs — but with no `elite`/`big`/`noCodex` lists every mob is
+# treated as an ordinary foe, which is why its absence is logged.
+_CODEX_FALLBACK = {"thresholds": {"foe": [1, 8, 20], "big": [1, 4, 10],
+                                  "elite": [1, 1, 1], "item": [1, 5, 25, 50]},
+                   "noCodex": [], "elite": [], "big": []}
+
+
+def _codex_data():
+    """The codex reference table from analysis_out/codex_units.json.
+
+    Three id lists plus the rank thresholds, extracted from the game's own
+    data.cdb by emit_offsets.py on the same self-heal cycle as the offsets:
+
+      noCodex - mobs with no codex entry at all (the game's NoCodex flag)
+      elite   - elite/boss, one kill masters the entry
+      big     - inherits a *_Big base, so 1/4/10 rather than 1/8/20
+
+    Anything not listed is an ordinary foe. See "The codex" in TESTING.md for
+    how the buckets were measured."""
+    global _CODEX_DATA
+    if _CODEX_DATA is None:
+        try:
+            d = json.loads(
+                (ANALYSIS / "codex_units.json").read_text(encoding="utf-8"))
+            _CODEX_DATA = {"thresholds": d["thresholds"],
+                           "noCodex": set(d.get("noCodex") or ()),
+                           "elite": set(d.get("elite") or ()),
+                           "big": set(d.get("big") or ())}
+        except Exception as e:
+            print(f"[meter] codex_units.json unavailable ({e}) — every mob "
+                  "will be treated as an ordinary foe and none as excluded",
+                  file=sys.stderr)
+            _CODEX_DATA = {"thresholds": _CODEX_FALLBACK["thresholds"],
+                           "noCodex": set(), "elite": set(), "big": set()}
+    return _CODEX_DATA
+
+
+# Every UNIT threshold set has three tiers (measured), so a finished entry is
+# rank 3 whichever set applies — which is what lets the map filter work without
+# knowing a mob's bucket at all.
+CODEX_MAX_RANK = 3
+
+
+def _codex_thresholds(kind):
+    """The kill counts at which `kind` gains each codex rank, or None if the
+    mob has no codex entry."""
+    d = _codex_data()
+    if kind in d["noCodex"]:
+        return None
+    t = d["thresholds"]
+    if kind in d["elite"]:
+        return t["elite"]
+    if kind in d["big"]:
+        return t["big"]
+    return t["foe"]
+
+
+def _codex_progress(kind, kills):
+    """(kills_so_far, target_for_this_tier, is_the_final_tier) or None.
+
+    At full rank the target is the FINAL threshold rather than None, so
+    "20/20" reads as finished instead of the caller having to special-case it.
+
+    The third value is what lets the toast say "Codex Mastery 12/20" on the
+    stretch that will finish the entry and plain "Codex 3/8" before it.
+
+    It tests the target VALUE against the last threshold rather than the tier's
+    index, and that is not a stylistic choice: an elite's thresholds are
+    [1,1,1], so the first tier it offers you is also the last one, and indexing
+    would call a one-kill mastery "not final" and word it wrong."""
+    thr = _codex_thresholds(kind)
+    if not thr:
+        return None
+    for t in thr:
+        if kills < t:
+            return (kills, t, t >= thr[-1])
+    return (kills, thr[-1], True)
+
+
 def _boss_label(kind):
     """The boss's real display name, falling back to the prettified kind for
     anything the unit sheet doesn't carry."""
@@ -10544,7 +10997,13 @@ DATA_STAMP = ANALYSIS / ".data_stamp.json"
 # `if (!OFF.Entity || !OFF.ArrayObj) return`, which fails silently forever.
 # Add to these lists whenever the hook starts reading something new.
 REQUIRED_RESOLVER_KEYS = ("anchors", "boss_fns", "boss_targets", "cam_targets",
-                          "count_targets", "funcs", "ui_targets")
+                          "count_targets", "funcs", "ui_targets",
+                          # The codex (3.6). Without the hooks no popup ever
+                          # fires, and without the map natives the kind->rank
+                          # mirror is never read — so the "only missing from
+                          # codex" filter shows everything, forever, with
+                          # nothing anywhere saying why.
+                          "codex_targets", "map_natives")
 # The minimap's half of the offsets. The combat half (DamageResult, HitData,
 # ...) is deliberately not listed wholesale: it has been there since the first
 # release, so it can't be what an upgrade is missing, and a list that mentions
@@ -10610,7 +11069,15 @@ REQUIRED_OFFSET_KEYS = ("Activity", "ArrayObj", "BossInfo", "BossesInfo",
                         # ent.GameObject, so the field may not be there at
                         # all) — every dataset would fall back to its zone
                         # name alone.
-                        "DamageResult.target", "unitClasses")
+                        "DamageResult.target", "unitClasses",
+                        # The codex (3.6). st.Player has existed forever, so
+                        # its presence proves nothing — `progress` is the hop a
+                        # pre-3.6 file lacks, and unitsProgressMap() returns
+                        # null on its first line without it. The rest are new
+                        # groups. Absent, the popups never fire and the map
+                        # filter has no ranks to filter on.
+                        "Player.progress", "Progress", "MapData", "StringMap",
+                        "CodexProxy")
 
 
 def _data_is_current():
@@ -10659,6 +11126,16 @@ def _data_is_current():
     if not (ANALYSIS / "heal_specs.json").exists():
         print("[meter] heal_specs.json absent — regenerating so healing can "
               "be counted on full-health targets.", file=sys.stderr)
+        return False
+    # codex_units.json arrived with the codex feature (3.6). Its absence is the
+    # quietest failure of the three: _codex_data() falls back to treating every
+    # mob as an ordinary foe and NONE as excluded, so the toast quotes 1/8/20
+    # at an elite that masters in one kill and the map filter offers you
+    # training dummies. Both look like features working badly rather than like
+    # a stale data directory.
+    if not (ANALYSIS / "codex_units.json").exists():
+        print("[meter] codex_units.json absent — regenerating for the codex "
+              "thresholds and exclusions.", file=sys.stderr)
         return False
     return True
 
@@ -11851,6 +12328,31 @@ def _run(tray, session, ui_state, world, rift_rec, heal_sizer):
                 ov = _OVERLAY["ref"]
                 if ov is not None:
                     ov.on_legendary_pickup()
+        elif k == "codex":
+            # The whole kind->rank mirror, resent every 20s. Wholesale rather
+            # than a delta: it is a few hundred small entries and the map
+            # filter wants it complete, not eventually-consistent.
+            ranks = p.get("ranks")
+            if isinstance(ranks, dict):
+                ui_state.set_codex_ranks(ranks)
+        elif k == "codexrank":
+            # A single entry moved. Kept in step between full refreshes so a
+            # mob you just mastered stops drawing on the map immediately.
+            ui_state.set_codex_rank(p.get("u"), p.get("r"))
+        elif k == "codexkill":
+            # Every kill of anything. `c`/`r` are read AFTER the game has
+            # incremented, because the codex events fire before this one
+            # (measured) — so the numbers here are already the new ones.
+            ov = _OVERLAY["ref"]
+            if ov is not None:
+                ov.on_codex_kill(p.get("u"), p.get("c"), p.get("r"))
+        elif k == "codexnotify":
+            # CodexDiscovered = rank 1, CodexCompleted = an INTERMEDIATE
+            # rank-up, CodexMastered = the entry is finished. The names do not
+            # mean what they look like; see TESTING.md.
+            ov = _OVERLAY["ref"]
+            if ov is not None:
+                ov.on_codex_notify(p.get("n"), p.get("u"))
         elif k == "zone":
             # The first report after attach says where we already are — it
             # keys the map background but is not a loading screen, so nothing

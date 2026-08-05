@@ -25,14 +25,16 @@ datas = [
     # nothing, and healing silently means "health actually restored" again —
     # the bug the OVER column exists to fix.
     (str(ROOT / "analysis_out" / "heal_specs.json"), "res/analysis_out"),
+    # The codex rank thresholds and the excluded/elite/big unit lists. Without
+    # it every mob is treated as an ordinary foe and none as excluded, so the
+    # toast quotes 1/8/20 at an elite that masters in one kill.
+    (str(ROOT / "analysis_out" / "codex_units.json"), "res/analysis_out"),
     (str(ROOT / "assets" / "farevermeter.ico"), "res/assets"),
-    # Boss-fight cues. Played through Windows' own MCI, so they add two files
-    # rather than an audio dependency.
+    # Fixed cues, played through Windows' own MCI so they add files rather than
+    # an audio dependency. Listed one by one rather than by glob, so a new cue
+    # added to SOUND_FILES and forgotten here fails loudly at build review
+    # instead of working from source and being silently mute when shipped.
     (str(ROOT / "assets" / "boss_pulled.wav"), "res/assets"),
-    (str(ROOT / "assets" / "boss_victory.mp3"), "res/assets"),
-    # Listed one by one rather than by glob, so a new cue that is added to
-    # SOUND_FILES and forgotten here works from source and is silently mute in
-    # the shipped build.
     (str(ROOT / "assets" / "legendary_pickup.mp3"), "res/assets"),
 ]
 
@@ -42,6 +44,28 @@ datas = [
 for f in sorted((ROOT / "assets" / "maps").glob("*")):
     if f.suffix in (".webp", ".json"):
         datas.append((str(f), "res/assets/maps"))
+
+# The POOLED cues (SOUND_POOLS): one folder per cue, every playable file in it.
+# Globbed on purpose, and for the opposite reason the fixed cues are listed by
+# hand — a pool exists to be added to, so "whatever is in the folder at build
+# time" is exactly the intent.
+#
+# This ships the DEFAULTS only. A user's own additions go in
+# %LOCALAPPDATA%\FareverMeter\sounds\<cue>, which the meter also reads and
+# which survives an update — putting them here would mean losing them on the
+# next install.
+for pool in ("victory", "codex"):
+    d = ROOT / "assets" / pool
+    if not d.is_dir():
+        raise SystemExit(f"[!] sound pool assets/{pool} is missing — the "
+                         f"{pool} cue would ship mute")
+    found = [f for f in sorted(d.glob("*"))
+             if f.suffix.lower() in (".mp3", ".wav", ".wma", ".m4a", ".aac")]
+    if not found:
+        raise SystemExit(f"[!] sound pool assets/{pool} is empty — the "
+                         f"{pool} cue would ship mute")
+    for f in found:
+        datas.append((str(f), f"res/assets/{pool}"))
 
 # The self-heal path re-runs these against the running game's hlboot.dat after a
 # Farever patch, so they have to ship — without them an installed meter couldn't

@@ -118,6 +118,33 @@ boss_targets = {nm: fi for fi, nm in names.items() if nm in BOSS_TARGETS}
 BOSS_FNS = ["ent.Unit.isBoss", "ent.Unit.isElite"]
 boss_fns = {nm: fi for fi, nm in names.items() if nm in BOSS_FNS}
 
+# ---- the codex (hunting log) ----
+# Measured 2026-08-05 (see "The codex" in TESTING.md): these three fire
+# CLIENT-side on a kill, in this order, and the codex pair lands BEFORE the kill
+# event — so a toast hung on notifyUnitKilled can quote the already-incremented
+# count without waiting a frame.
+#
+#   notifyCodexUnit__impl(this, kind:String, unitId:String)
+#        kind: CodexDiscovered (rank 1) | CodexCompleted (rank 2, an
+#        INTERMEDIATE rank-up despite the name) | CodexMastered (rank 3, done)
+#   onUnitCodexRankProgress__impl(this, unitId:String, rank:Int)
+#   notifyUnitKilled__impl(this, unitId:String)      — every kill
+#
+# The non-`__impl` wrappers are the RPC senders and never fired client-side;
+# hooking them would be silent. `Progress.getNbUnitKilled` fires constantly but
+# is the codex WINDOW reading counts, not a kill signal.
+CODEX_TARGETS = ["st.Player.notifyUnitKilled__impl",
+                 "st.Player.notifyCodexUnit__impl",
+                 "st.Player.onUnitCodexRankProgress__impl"]
+codex_targets = {nm: fi for fi, nm in names.items() if nm in CODEX_TARGETS}
+
+# haxe.ds.StringMap is a thin wrapper over the native hl.types.BytesMap, so
+# reading it means calling these. They ALLOCATE (hbkeys builds an hl_varray),
+# which puts them under the same game-thread rule as every other HL call.
+MAP_NATIVES = ["hbget", "hbkeys", "hbsize"]
+map_natives = {n.name: n.findex for n in code.natives
+               if n.lib == "std" and n.name in MAP_NATIVES}
+
 payload = {
     "nfunctions": code.counts["nfunctions"],
     "nnatives": code.counts["nnatives"],
@@ -128,6 +155,8 @@ payload = {
     "cam_targets": cam_targets,
     "boss_targets": boss_targets,
     "boss_fns": boss_fns,
+    "codex_targets": codex_targets,
+    "map_natives": map_natives,
     "funcs": funcs,
     "map_fn": map_fn,
 }
@@ -143,6 +172,10 @@ for nm in CAM_TARGETS:
 for nm in BOSS_TARGETS + BOSS_FNS:
     if nm not in boss_targets and nm not in boss_fns:
         print(f"    [!] boss target not found in this build: {nm}")
+for nm in CODEX_TARGETS:
+    if nm not in codex_targets:
+        print(f"    [!] codex target not found in this build: {nm} — "
+              f"codex popups will not fire")
 for nm, fi in sorted(candidates.items()):
     print(f"    {nm:<45} findex={fi}")
 print(f"[written] {OUT / 'resolver_data.json'}")

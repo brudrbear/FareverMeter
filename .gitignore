@@ -20,6 +20,17 @@ __pycache__/
 # Your fastest boss kills. Records, not configuration — and personal either way.
 .meter_besttimes.json
 
+# Your own additions to the sound pools. The shipped defaults live in
+# assets/victory and assets/codex and ARE tracked; this is the folder the meter
+# also reads so that what you add survives an update. Yours, not the project's.
+sounds/
+
+# A codex probe's dump of one character's kill counts. Yours, and a measurement
+# artifact rather than data the meter needs — it regenerates whenever the probe
+# runs. (analysis_out/codex_units.json IS tracked: that one is derived from the
+# game's data.cdb, same as the offsets beside it.)
+analysis_out/codex_progress_dump.json
+
 # Release build output from packaging/build.ps1 — a few hundred megabytes of
 # regenerated bundle. The installer it produces belongs on a GitHub release,
 # not in the repo. (assets/farevermeter.ico IS tracked: a from-source run wants

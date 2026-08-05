@@ -86,6 +86,16 @@ def main():
     gath = offs("ent.interactible.Gatherable")
     aproxy = offs("hxbit.ArrayProxyData")
     adyn = offs("hl.types.ArrayDyn")
+    progress = offs("st.player.Progress")
+    mapdata = offs("hxbit.MapData")
+    smap = offs("haxe.ds.StringMap")
+    # The codex counter proxy. hxbit generates one class per record shape and
+    # NAMES IT after the shape, which is how the layout was confirmed rather
+    # than guessed — ObjProxy_OkillCount_Int_rank_Int really does carry
+    # killCount then rank. Resolved by name so a patch that adds a field to the
+    # record (and so renames the class) fails loudly here instead of reading a
+    # stale offset.
+    kproxy = offs("hxbit.ObjProxy_OkillCount_Int_rank_Int")
 
     # st.Equipment extends st.Inventory, so one `content` offset serves both
     # containers. Verified rather than assumed — if the two ever diverge, the
@@ -274,13 +284,31 @@ def main():
         # tab show a class for everyone rather than only for people nearby.
         "Player": {"name": player["name"][0], "group": player["group"][0],
                    "isMe": player["isMe"][0], "lobbyId": player["lobbyId"][0],
-                   "uid": player["uid"][0], "hero": player["hero"][0]},
+                   "uid": player["uid"][0], "hero": player["hero"][0],
+                   # ...and the per-character codex/collection store.
+                   "progress": player["progress"][0]},
         # hxbit wraps a replicated array in a proxy: Group.players is an
         # ArrayProxyData whose ArrayDyn wraps an ArrayObj. Two hops, and the
         # party roster is the reason they are here.
         "ArrayProxyData": {"array": aproxy["array"][0]},
         "ArrayDyn": {"array": adyn["array"][0]},
         "Group": {"groupId": group["groupId"][0], "players": group["players"][0]},
+        # The codex (hunting log), measured 2026-08-05 — see TESTING.md. The
+        # whole thing is replicated to the client and reachable by plain
+        # pointer reads from the hero:
+        #   Hero.player -> Player.progress -> Progress.unitsProgress
+        #   -> MapData.map (a virtual; hl_vvirtual.value @8 is the real
+        #      StringMap) -> StringMap.h -> $std.hbget(h, utf16(unitKind))
+        #   -> ObjProxy { killCount, rank }
+        # `rank` is how many thresholds the count has passed, and every UNIT
+        # threshold set has three tiers, so rank==3 means the entry is done and
+        # nothing has to know WHICH set applies.
+        "Progress": {"unitsProgress": progress["unitsProgress"][0],
+                     "itemProgress": progress["itemProgress"][0]},
+        "MapData": {"map": mapdata["map"][0], "value": 8},
+        "StringMap": {"h": smap["h"][0]},
+        "CodexProxy": {"count": kproxy["killCount"][0],
+                       "rank": kproxy["rank"][0]},
         # The game's boss/elite healthbar. `bossInfos` is NOT a fixed pool —
         # measured lengths were only ever 0 (no bar) or 1 (bar up), so its
         # length alone says whether a bar is on screen. Each entry's `active`
@@ -327,6 +355,12 @@ def main():
         out_heal = _OUT_DIR / "heal_specs.json"
         out_heal.write_text(json.dumps(specs, indent=0), encoding="utf-8")
         print(f"[written] {out_heal} ({len(specs)} heal skills)")
+        codex = extract_codex_units(Path(hlboot).parent)
+        out_codex = _OUT_DIR / "codex_units.json"
+        out_codex.write_text(json.dumps(codex, indent=0), encoding="utf-8")
+        print(f"[written] {out_codex} ({len(codex['noCodex'])} excluded, "
+              f"{len(codex['elite'])} elite/boss, {len(codex['big'])} big, "
+              f"thresholds {codex['thresholds']})")
     except Exception as e:
         print(f"[!] display names skipped ({e}) — boss toasts and history "
               f"dataset names fall back to ids")
@@ -425,6 +459,93 @@ def extract_display_names(game_dir):
         return out
 
     return sheet_names("unit")
+
+
+# Which rank-threshold set a unit's codex entry uses. Measured 2026-08-05 on a
+# fresh character, 11/11 samples agreeing — see "The codex" in TESTING.md.
+# The bucket names are ours; the numbers are the cdb's own constants.
+CODEX_SETS = {
+    "elite": "EliteAndBossProgressThresholds",
+    "big": "BigFoeProgressLevelThreshold",
+    "foe": "FoeProgressLevelThreshold",
+    "item": "ItemProgressLevelThreshold",
+}
+
+
+def extract_codex_units(game_dir):
+    """What the meter needs to say "12/20" and "still missing" per mob.
+
+    Three facts per unit, all from data.cdb so nothing has to be asked of the
+    running game:
+
+      * `NoCodex` — the game's own "this mob has no codex entry" flag. Its BIT
+        INDEX is read off the flags column definition rather than hardcoded to
+        18, because a patch inserting a flag above it would otherwise silently
+        re-point it at NeutralAggro.
+      * elite/boss — `flags & (Elite|Boss)`, which is a 1-kill entry.
+      * "big" — the `inherit` column referencing a `*_Big` base
+        (`W_Base_Big`, `D_Base_Big`). NOT model scale and NOT a flag: measured,
+        `OgreManfish_Z1W_Claws` and `Manfish_Z1W_Claws` share a type and a
+        faction, the big one carries no `scale` at all, and only `inherit`
+        separates them. It is what `Progress.unitInheritFrom` tests.
+
+    Emitted as three id lists plus the thresholds — anything not listed is an
+    ordinary foe, which keeps the file to about 130 ids instead of 500 rows.
+    """
+    import pak_extract
+    data, entries, data_off = pak_extract.load(Path(game_dir) / "res.light.pak")
+    e = next(x for x in entries if x.path.endswith("data.cdb"))
+    cdb = json.loads(data[data_off + e.pos: data_off + e.pos + e.size])
+    sheets = {s["name"]: s for s in cdb["sheets"]}
+    rows = {ln["id"]: ln for ln in sheets["unit"]["lines"]
+            if isinstance(ln.get("id"), str)}
+
+    bits = {}
+    for c in sheets["unit"]["columns"]:
+        if c["name"] == "flags" and isinstance(c.get("typeStr"), str):
+            names = c["typeStr"].split(":", 1)[-1].split(",")
+            bits = {n: i for i, n in enumerate(names)}
+    for need in ("NoCodex", "Elite", "Boss"):
+        if need not in bits:
+            raise ValueError(f"unit flags column has no {need} bit")
+
+    thresholds = {}
+    for ln in sheets["constant"]["lines"]:
+        v = ln.get("v") or {}
+        if isinstance(v, dict) and isinstance(v.get("floats"), list):
+            thresholds[ln.get("id")] = [f.get("v") for f in v["floats"]]
+    out_thr = {}
+    for bucket, const in CODEX_SETS.items():
+        vals = thresholds.get(const)
+        if not vals:
+            raise ValueError(f"cdb constant {const} missing")
+        out_thr[bucket] = [int(x) for x in vals]
+
+    def inherit_refs(uid, seen=None):
+        """The full inherit closure — a base can itself inherit."""
+        seen = set() if seen is None else seen
+        acc = set()
+        for h in (rows.get(uid, {}).get("inherit") or []):
+            ref = h.get("ref")
+            if ref and ref not in seen:
+                seen.add(ref)
+                acc.add(ref)
+                acc |= inherit_refs(ref, seen)
+        return acc
+
+    no_codex, elite, big = [], [], []
+    for uid, r in rows.items():
+        fl = r.get("flags")
+        fl = fl if isinstance(fl, int) else 0
+        if (fl >> bits["NoCodex"]) & 1:
+            no_codex.append(uid)
+            continue                       # no entry at all; bucket is moot
+        if ((fl >> bits["Elite"]) & 1) or ((fl >> bits["Boss"]) & 1):
+            elite.append(uid)
+        elif any("Big" in ref for ref in inherit_refs(uid)):
+            big.append(uid)
+    return {"thresholds": out_thr, "noCodex": sorted(no_codex),
+            "elite": sorted(elite), "big": sorted(big)}
 
 
 if __name__ == "__main__":

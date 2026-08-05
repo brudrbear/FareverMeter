@@ -147,7 +147,8 @@
     "isMe": 312,
     "lobbyId": 264,
     "uid": 184,
-    "hero": 304
+    "hero": 304,
+    "progress": 240
   },
   "ArrayProxyData": {
     "array": 40
@@ -158,6 +159,21 @@
   "Group": {
     "groupId": 176,
     "players": 184
+  },
+  "Progress": {
+    "unitsProgress": 160,
+    "itemProgress": 168
+  },
+  "MapData": {
+    "map": 40,
+    "value": 8
+  },
+  "StringMap": {
+    "h": 8
+  },
+  "CodexProxy": {
+    "count": 20,
+    "rank": 24
   },
   "BossesInfo": {
     "bossInfos": 1096

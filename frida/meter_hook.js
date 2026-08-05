@@ -419,6 +419,9 @@ function hookCamera(base) {
                 drainUnitNames();
                 drainGatherKinds();
                 if (heroRefreshDue) { heroRefreshDue = false; refreshLocalHero(); }
+                // The codex mirror. hbkeys allocates, so this belongs here and
+                // not on the timer that sets the flag.
+                if (codexSendDue) { codexSendDue = false; refreshCodexRanks(); }
             }
         });
     } catch (e) {
@@ -1253,6 +1256,150 @@ function sweepInventory() {
     } catch (e) {}
 }
 
+// ---- the codex (hunting log) ----
+// Measured 2026-08-05, see "The codex" in TESTING.md. The per-character store
+// is REPLICATED, so the whole thing is plain pointer reads from the hero plus
+// one native map call — nothing is asked of the game:
+//
+//   Hero.player -> Player.progress -> Progress.unitsProgress (hxbit.MapData)
+//     -> MapData.map (a virtual; hl_vvirtual.value @8 is the real StringMap)
+//     -> StringMap.h -> $std.hbget(h, utf16(unitKind))
+//     -> ObjProxy { killCount, rank }
+//
+// `rank` is how many kill thresholds the count has passed. Every UNIT
+// threshold set has three tiers, so rank==3 means the entry is finished and
+// the overlay never has to know WHICH set applies — that only matters for the
+// "12/20" denominator, which the host computes from cdb data it already has.
+//
+// hbkeys/hbget ALLOCATE, so every call here is on the game thread (the camera
+// hook, or the codex event hooks, which are game code themselves).
+let hbGet = null, hbKeys = null, hbSize = null;
+let codexRanks = {};            // unit kind -> rank, mirrored to the host
+let codexSendDue = true;
+
+function setupCodexApi(base) {
+    const N = DATA.map_natives || {};
+    try {
+        if (N.hbget != null)
+            hbGet = new NativeFunction(base.add(N.hbget * 8).readPointer(),
+                                       "pointer", ["pointer", "pointer"]);
+        if (N.hbkeys != null)
+            hbKeys = new NativeFunction(base.add(N.hbkeys * 8).readPointer(),
+                                        "pointer", ["pointer"]);
+        if (N.hbsize != null)
+            hbSize = new NativeFunction(base.add(N.hbsize * 8).readPointer(),
+                                        "int", ["pointer"]);
+        return hbGet !== null && hbKeys !== null;
+    } catch (e) { return false; }
+}
+
+// The native BytesMap behind Progress.unitsProgress, or null.
+function unitsProgressMap() {
+    try {
+        if (!localHero || localHero.isNull() || !OFF.Progress) return null;
+        const player = localHero.add(OFF.Hero.player).readPointer();
+        if (!player || player.isNull()) return null;
+        const prog = player.add(OFF.Player.progress).readPointer();
+        if (!prog || prog.isNull()) return null;
+        const md = prog.add(OFF.Progress.unitsProgress).readPointer();
+        if (!md || md.isNull()) return null;
+        const v = md.add(OFF.MapData.map).readPointer();
+        if (!v || v.isNull()) return null;
+        // A virtual wrapping a real object: hl_vvirtual.value is the map.
+        // typeKind 15 is HVIRTUAL; anything else means the field already IS
+        // the map, which is worth tolerating rather than assuming.
+        const inner = v.readPointer().readU32() === 15
+            ? v.add(OFF.MapData.value).readPointer() : v;
+        if (!inner || inner.isNull()) return null;
+        const h = inner.add(OFF.StringMap.h).readPointer();
+        return (h && !h.isNull()) ? h : null;
+    } catch (e) { return null; }
+}
+
+function codexEntry(h, kind) {
+    try {
+        if (!h || !hbGet || !kind) return null;
+        const v = hbGet(h, Memory.allocUtf16String(kind));
+        if (!v || v.isNull()) return null;
+        return { c: v.add(OFF.CodexProxy.count).readS32(),
+                 r: v.add(OFF.CodexProxy.rank).readS32() };
+    } catch (e) { return null; }
+}
+
+// GAME THREAD ONLY. Rebuilds the kind->rank mirror and ships it whole. The
+// table is a few hundred small entries and this runs on a slow cadence, so
+// sending it wholesale beats maintaining a delta protocol for it.
+function refreshCodexRanks() {
+    const h = unitsProgressMap();
+    if (!h || !hbKeys) return;
+    try {
+        const keys = hbKeys(h);
+        if (!keys || keys.isNull()) return;
+        // hl_varray: { t@0, at@8, size@16, pad@20 }, elements from +24.
+        const n = keys.add(16).readS32();
+        if (n < 0 || n > 20000) return;
+        const out = {};
+        for (let i = 0; i < n; i++) {
+            const kb = keys.add(24 + i * 8).readPointer();
+            if (!kb || kb.isNull()) continue;
+            const id = kb.readUtf16String();
+            if (!id) continue;
+            const v = hbGet(h, kb);
+            if (!v || v.isNull()) continue;
+            out[id] = v.add(OFF.CodexProxy.rank).readS32();
+        }
+        codexRanks = out;
+        send({ kind: "codex", ranks: out });
+    } catch (e) {}
+}
+
+// The three client-side kill events, in the order they fire. The codex pair
+// lands BEFORE the kill event, so by the time notifyUnitKilled runs the count
+// is already incremented and the toast can quote it without waiting a frame.
+//
+// The notification names do NOT mean what they look like (measured):
+//   CodexDiscovered - rank 1, first kill
+//   CodexCompleted  - rank 2, an INTERMEDIATE rank-up
+//   CodexMastered   - rank 3, the entry is actually finished
+// The host decides what to show; the agent only reports.
+function hookCodex(base) {
+    const T = DATA.codex_targets || {};
+    function attach(name, fn) {
+        const fi = T[name];
+        if (fi == null) { log("!! codex target missing: " + name); return; }
+        try {
+            Interceptor.attach(base.add(fi * 8).readPointer(), { onEnter: fn });
+        } catch (e) { log("!! codex hook failed for " + name + ": " + e); }
+    }
+    attach("st.Player.notifyUnitKilled__impl", function () {
+        try {
+            const id = hlStr(this.context.rdx);
+            if (!id) return;
+            const e = codexEntry(unitsProgressMap(), id);
+            if (e) codexRanks[id] = e.r;
+            send({ kind: "codexkill", u: id,
+                   c: e ? e.c : null, r: e ? e.r : null });
+        } catch (x) {}
+    });
+    attach("st.Player.notifyCodexUnit__impl", function () {
+        try {
+            const what = hlStr(this.context.rdx);      // Discovered/Completed/Mastered
+            const id = hlStr(this.context.r8);
+            if (id) send({ kind: "codexnotify", n: what, u: id });
+        } catch (x) {}
+    });
+    attach("st.Player.onUnitCodexRankProgress__impl", function () {
+        try {
+            const id = hlStr(this.context.rdx);
+            const rank = this.context.r8.toInt32();
+            if (!id) return;
+            codexRanks[id] = rank;
+            send({ kind: "codexrank", u: id, r: rank });
+        } catch (x) {}
+    });
+    log("codex tracking active");
+}
+
 // Set by a timer, consumed on the game thread by the camera hook. The lookup
 // itself must NOT run on the timer: getHero is an HL call, and an HL call off
 // the game thread kills the game with "Can't lock GC in unregistered thread".
@@ -1358,6 +1505,25 @@ function main() {
     // setting as soon as it connects.
     hookCamera(base);
     hookBossBar(base);
+    // The codex is optional in exactly the way the boss bar is: if the offsets
+    // or targets are missing the rest of the meter carries on, so say so once
+    // rather than leaving the popups mysteriously silent.
+    const CODEX_NEED = ["Progress", "MapData", "StringMap", "CodexProxy"];
+    const codexAbsent = CODEX_NEED.filter(function (k) { return !OFF[k]; });
+    if (codexAbsent.length) {
+        log("!! codex offsets missing (" + codexAbsent.join(", ") +
+            ") — codex popups and the 'missing from codex' map filter will " +
+            "not work. Delete analysis_out and restart to regenerate.");
+    } else if (!setupCodexApi(base)) {
+        log("!! codex map natives unavailable — codex features disabled");
+    } else {
+        hookCodex(base);
+        // Slow on purpose: the mirror only has to be right, not instant. Kill
+        // events update individual entries as they happen, so this is the
+        // catch-up for progress made outside them (another character, a
+        // relog, or a rank the events missed).
+        setInterval(function () { codexSendDue = true; }, 20000);
+    }
     // Say so if the sweep can't run. sweepWorld bails on its first line when
     // an offset it needs is absent, and it does that inside a try/catch on a
     // timer — so without this the minimap simply stays on "waiting for the

@@ -243,11 +243,12 @@ again.
 |---|---|---|
 | Options | Show all players / Show party only | switches between your group and everyone nearby; resets the encounter |
 | Options | Auto 'View All Players' in rifts | presses the button above for you at both rift boundaries — all-players going in, party-only coming out — and retires the [rift prompt](#rifts) that would otherwise ask. Same setting as that prompt's **Do this every time** tick. Off by default. Applies from your next crossing, not the rift you're already in |
+| Options | Codex alerts | the two [codex popups](#codex-popups) — the running count on each kill and the fanfare when an entry fills. On by default. The minimap's *only missing from codex* filter is separate and unaffected |
 | Options | Theme | Five choices — see [Themes](#themes). `Dark Dynamic` is the default. |
 | Options | Transparency | how see-through the overlay is, 0-80%. It covers the meter, breakdown, minimap, compass and rift timer — panel, header bar and text together, since window opacity is the only kind Windows offers. The control menu and the rift prompt are exempt: one is what you're reading while you drag the slider, the other is a question that has to be answered |
 | Options | Minimap | `Rotating` (default) turns the map with the camera, so the top of the map is whatever you're looking at. `Fixed` keeps north up and turns the arrow instead. |
 | Options | Map refresh | how often the minimap is updated — `Ultra` (~30/sec), `High` (~16/sec, default), `Medium` (~9/sec), `Low` (~4/sec). Lower costs less CPU in the game; below about 8/sec the dots visibly step. |
-| Options | Enable sounds | the audio cues, off by default. One switch covers all three: a boss fight starting, a boss dying, and a **legendary weapon** landing in your bags. Turning it on plays a sample, so you know the audio path works without having to go and find a boss |
+| Options | Enable sounds | the audio cues, off by default. One switch covers all of them: a boss fight starting, a boss dying, a **legendary weapon** landing in your bags, and a **codex entry filling**. Turning it on plays a sample, so you know the audio path works without having to go and find a boss. See [Your own sounds](#your-own-sounds) |
 | Options | Volume | how loud those cues are, 0-100%. Live while you drag |
 | Scaling | Meter / Breakdown / Settings / Minimap | each window sizes independently, so one can be big and another small |
 | Show / hide | Damage meter / Breakdown / Rift timer / Minimap | `Show`, `Hide`, or `Show in ESC` — the last keeps it off screen while you play and brings it back with the game's menu |
@@ -327,6 +328,21 @@ or two and come back — which showed up as icons blinking on the map and
 compass. A marker now waits a quarter-second before it's drawn, and lingers a
 couple of seconds after it stops being reported, so what you see holds still.
 Enemies are exempt: a mob appearing late is worse than a mob flickering.
+
+**Enemies have three states rather than a tick**, in the control menu:
+`Enemies: all` → `Enemies: only missing from codex` → `Enemies: hidden`.
+
+The middle one is the interesting one. Your codex (hunting log) is per
+character and the game replicates it to the client, so the meter knows exactly
+which mobs you've finished and which you haven't. Set it and the map draws
+**only the mobs that still owe you codex progress** — anything mastered drops
+off, and so do the 23 mobs the game marks as having no codex entry at all
+(training dummies and the like). Walking a zone with it on shows you what's
+left to hunt instead of a wall of red dots.
+
+Until the meter has heard from the game it shows everything rather than an
+empty map — a codex it hasn't read yet and a codex you've finished look the
+same from here, and hiding the world would be the worse mistake.
 
 Also worth knowing: **the game only keeps a handful of chests loaded at a time**
 — four or five, in a zone with 47 of them. So a chest appears on the map as you
@@ -609,6 +625,66 @@ The list shows **everything on disk**, newest first, whichever session it came
 from. Rows from today show a time; anything older shows the date too. The
 search box filters by name or zone.
 
+### Codex popups
+
+Two of them, on their own line under the boss kill time:
+
+* **Every kill that counts** shows a running total — `Skunk — Codex 7/8`. The
+  number on the right is the *next* rank, not the final one, so it tells you
+  how close the next tick is. On the last stretch — the one that will finish
+  the entry — the wording changes to `Skunk — Codex Mastery 12/20`, so you can
+  tell at a glance whether it's worth staying. Mobs with no codex entry say
+  nothing, and once an entry is finished it stops reporting rather than nagging
+  you through a grind.
+* **Finishing an entry** puts `CODEX COMPLETE — SKUNK` up in gold and plays a
+  cue. The sound rides the single **Enable sounds** setting like every other
+  cue — there's no separate switch — and if the audio is missing that one cue
+  is skipped while the rest keep working.
+
+Codex entries run to three ranks, and how many kills each takes depends on the
+mob: **1 / 8 / 20** for ordinary ones, **1 / 4 / 10** for the big ones (ogres
+and the like), and **one kill** masters an elite or a boss outright. The meter
+reads all of that out of the game's own data rather than guessing.
+
+Both are on by default and both are covered by one tick — **Codex alerts**, in
+the control menu under Options. Turning it off silences the running count and
+the completion fanfare together; the map's *only missing from codex* filter is
+deliberately separate and keeps working either way.
+
+Worth saying: the game already shows its own quiet notifications for these
+moments. These are the loud version, not a new capability.
+
+### Your own sounds
+
+Two of the cues are **pools** rather than single files: **boss victory** and
+**codex complete**. Each one picks at random from a folder, and with more than
+one file in it, it won't play the same one twice running.
+
+To add your own, drop audio into the matching folder under
+`%LOCALAPPDATA%\FareverMeter\sounds`:
+
+```
+%LOCALAPPDATA%\FareverMeter\sounds\victory\   ← plays when a boss dies
+%LOCALAPPDATA%\FareverMeter\sounds\codex\     ← plays when a codex entry fills
+```
+
+Create the folders if they aren't there. **`.mp3` and `.wav` both work**
+(`.wma`, `.m4a` and `.aac` are accepted too — anything Windows' own MCI can
+open). Filenames don't matter and aren't parsed, so a file can keep whatever
+name its creator gave it.
+
+Two things worth knowing:
+
+* **It's live.** The folders are re-read on every play, so a file you drop in
+  is in the rotation on the next boss kill — no restart.
+* **That folder survives updates**, which is why it's the one to use. The
+  meter also plays the defaults it ships with, but those live inside the
+  program folder and an update replaces them.
+
+The other two cues — boss pull and legendary pickup — are still single fixed
+files. Everything rides the one **Enable sounds** switch; there's no per-cue
+control, and an empty or missing pool silences only that cue.
+
 ### Also worth knowing
 
 **Click a player's line on the meter** while the escape menu is open to point the
@@ -674,6 +750,7 @@ read-only bundle that Windows unpacks somewhere different on every launch.
 | Parse screenshots | `%LOCALAPPDATA%\FareverMeter\parses\` | `parses/` in the project |
 | Combat history | `%LOCALAPPDATA%\FareverMeter\history\` | `history/` in the project |
 | Regenerated offsets | `%LOCALAPPDATA%\FareverMeter\analysis_out\` | `analysis_out/` in the project |
+| Your own cue sounds | `%LOCALAPPDATA%\FareverMeter\sounds\` | `sounds/` in the project |
 
 Uninstalling leaves `%LOCALAPPDATA%\FareverMeter` alone — your parses, your
 combat history and your window positions survive it, and survive upgrades.
