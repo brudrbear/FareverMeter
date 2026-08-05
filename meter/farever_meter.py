@@ -3254,7 +3254,7 @@ def reset_hint_text():
 # Bump this on every release, and tag the repo with the same string — it's the
 # left-hand side of the comparison below, so a release that forgets it tells
 # everyone they're out of date forever.
-VERSION = "3.4.0"
+VERSION = "3.5.0"
 
 REPO = "brudrbear/FareverMeter"
 REPO_URL = f"https://github.com/{REPO}"
