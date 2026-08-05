@@ -633,13 +633,6 @@
     "ent.Unit.isBoss": 4735,
     "ent.Unit.isElite": 4737
   },
-  "mount_targets": {
-    "ent.Hero.setMount": 7685
-  },
-  "glider_targets": {
-    "st.player.Collection.equipItem": 15006,
-    "ent.Hero.toggleGlide": 7537
-  },
   "funcs": {
     "ui.Console.getMyHero": 12357,
     "GameApp.getCameraHero": 11658

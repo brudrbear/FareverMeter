@@ -101,6 +101,11 @@ SETTINGS_CACHE = _WRITABLE / ".meter_settings.json"
 # writing when it's beaten. Same home as the positions, so it survives updates.
 BEST_TIMES_CACHE = _WRITABLE / ".meter_besttimes.json"
 PARSES_DIR = _WRITABLE / "parses"   # finished-parse images land here (gitignored)
+# Every encounter the meter has finished, as data. Its own folder rather than
+# a corner of parses/: parses/ holds things you MADE to share (a screenshot, a
+# report card), and this holds what the meter recorded whether you asked for
+# it or not. Nothing in here is ever deleted by the meter — see HistoryStore.
+HISTORY_DIR = _WRITABLE / "history"
 LOG_FILE = DATA_HOME / "meter.log"
 TARGET_PROCESS = "Farever.exe"
 
@@ -961,9 +966,6 @@ SCALE_DEFAULTS = {"menu": 1.30}
 # Wider than the UI's: a minimap is worth making genuinely large on a big
 # screen, and genuinely small when it's only there for a glance.
 MINIMAP_SCALE_MIN, MINIMAP_SCALE_MAX = 50, 250
-# How the mount feature picks from the favorites: a fresh roll per summon, or
-# strict rotation through the list. The hook receives it lowercased.
-MOUNT_MODES = ("Random", "Cycle")
 # Minimum widths, at 100%. They're pixel values, so the scale slider has to
 # scale them too or scaling down just hits the floor and nothing moves.
 # The menu is wide because its tabs run down the LEFT rather than across the
@@ -1005,6 +1007,32 @@ SOCIAL_PAGES = (("shard", "Current Shard"), ("session", "This session"))
 SESSION_SORTS = ("recent", "name")
 SESSION_SORT_LABEL = {"recent": "Sort: Last seen", "name": "Sort: Name"}
 SOCIAL_SEEN_CELLS = 7
+
+# ---- combat history ----
+# The floor a finished encounter has to clear to be worth keeping. Both, not
+# either: a single crit on a passing boar clears the event count in one hit,
+# and standing in a damage aura for ten seconds clears the duration without
+# anything happening. Deliberately low — this exists to keep mis-clicks and
+# walk-bys out of the list, not to judge which fights were interesting.
+HISTORY_MIN_SECS = 5.0
+HISTORY_MIN_EVENTS = 5
+# Rows in the history list, and the widths that keep their columns lined up.
+HISTORY_LIST_H = 300
+HISTORY_NAME_CELLS = 26
+# The list holds every session, so a bare "17:30" is ambiguous the moment you
+# have two days of datasets. The date appears exactly when it stops being
+# obvious — the same rule the rift report card uses for its title — which is
+# why this column is sized for "Aug 04 17:30" and not for a clock.
+HISTORY_WHEN_CELLS = 13
+HISTORY_META_CELLS = 15
+# How many entries the browser draws at once. NOT a cap on what is stored —
+# nothing here ever deletes a file — only on how many rows are built, because
+# a session that ran all night is thousands of frames tk would build one at a
+# time. The count label always says the true total.
+HISTORY_PAGE = 200
+# Per-player skill/heal rows in a dataset's detail view.
+HISTORY_DETAIL_SKILLS = 12
+HISTORY_PAGES = (("list", "Datasets"), ("detail", "Dataset"))
 
 
 def _seen_ago(secs):
@@ -1524,9 +1552,101 @@ def _pretty_id(sid: str) -> str:
     return sid.replace("_", " ") if sid and sid != "?" else sid
 
 
+# Backend decoration on a level id, longest first so the specific prefixes win
+# over the generic ones. Measured from the zone signals normal play produces:
+# 'POI/Z1Levels/Z1_POI_Dungeon_ManfishRuines', 'POI/Rifts/POI_Rift_01',
+# 'World/W1_Siagarta'.
+_ZONE_STRIP = re.compile(
+    r"^(?:Z\d+_)?POI_(?:Dungeon|Boss|Cave|Camp)_|^(?:Z\d+_)?POI_|^W\d+_|^Z\d+_")
+# A trailing variant number is the game's, not the player's — 'POI_Rift_01' is
+# the rift, and "Rift 01" reads like there are others you should know about.
+_ZONE_TRAILING_NUM = re.compile(r"[ _]\d+$")
+_CAMEL_SPLIT = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def _zone_label(sig, world_map=None):
+    """A level signature as somewhere you can name out loud.
+
+    The game's `World.name` and `World.branchName` ride along on every zone
+    message and have read back empty on every zone this build has seen (the
+    meter.log lines print them only when they are set, and none of them are),
+    so the signature itself is the honest source. `world_map` is the game's own
+    `_isWorldMap` flag — the one thing that distinguishes an overworld region
+    from a dungeon without pattern-matching the path.
+    """
+    if not sig:
+        return "Unknown"
+    leaf = str(sig).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    leaf = _ZONE_STRIP.sub("", leaf) or str(sig)
+    leaf = _CAMEL_SPLIT.sub(" ", leaf.replace("_", " ")).strip()
+    leaf = _ZONE_TRAILING_NUM.sub("", leaf).strip() or str(sig)
+    # " Overworld", not "Overworld: " — the region is what you would say first,
+    # and the qualifier is only there to distinguish it from a dungeon of the
+    # same name.
+    return f"{leaf} Overworld" if world_map else leaf
+
+
+def _dataset_name(targets, zone_sig, world_map=None):
+    """Name a finished encounter: who took the most damage, and where.
+
+    `targets` is {unit kind: damage}. The kind goes through the cdb's unit
+    sheet exactly as a boss kill does — a kind is a backend id and routinely
+    not the name on the nameplate ('Cleodora' displays as 'Queen
+    Honeyzabeth'), so naming a dataset off the raw kind would file the fight
+    under a name the player never saw.
+
+    A dataset with no named target — every hit landed on something that isn't
+    an ent.Unit, or the offsets file predates unitClasses — is named for its
+    zone alone rather than for a guess.
+    """
+    where = _zone_label(zone_sig, world_map)
+    if not targets:
+        return where
+    kind = max(targets.items(), key=lambda kv: kv[1])[0]
+    who = _unit_names().get(kind) or _pretty_id(kind)
+    return f"{who} — {where}" if who else where
+
+
+_SLUG_STRIP = re.compile(r"[^A-Za-z0-9]+")
+
+
+def _slug(text, limit=48):
+    """A filename-safe stub of a dataset name. Only used to make a file
+    recognisable in Explorer — the real name is inside the JSON, so this is
+    allowed to be lossy."""
+    s = _SLUG_STRIP.sub("-", str(text or "")).strip("-")
+    return (s[:limit].rstrip("-") or "encounter").lower()
+
+
 # ---------------------------------------------------------------------------
 # Aggregation
 # ---------------------------------------------------------------------------
+def _skill_ident(ev):
+    """(breakdown key, display name) for one hit or heal event.
+
+    A summon's hit carries `pet` — its raw Unit.kind. The damage already
+    merged into the owner's row upstream, so the breakdown is the only place
+    left that can show a pet was responsible for part of it.
+
+    The KEY is prefixed with the raw kind (stable, and the same on a
+    non-English client), which also keeps a pet's ability separate from an
+    identically named one of the player's own. The NAME gets the sheet's
+    display name — "Nightling Terror: Attack".
+
+    Module-level because the rift recorder now keeps its own per-skill tables
+    for the history dataset, and two copies of this rule is two places for a
+    pet's damage to end up filed under the player's own ability.
+    """
+    sid = ev.get("skill", "?")
+    nm = ev.get("name")
+    pet = ev.get("pet")
+    if pet:
+        sid = f"{pet}:{sid}"
+        label = _summon_label(pet)
+        nm = f"{label}: {nm}" if nm else label
+    return sid, nm
+
+
 def _stamp_report_classes(report, world):
     """Freeze each player's class acronym into a finished rift report.
 
@@ -1558,6 +1678,29 @@ def _overheal_note(d, fmt=" ({:.0f}% over)"):
     if landed is None or heal <= 0.5:
         return ""
     return fmt.format(_overheal_pct(heal, landed))
+
+
+# A window shorter than this has no rate worth showing. The boss-phase
+# rewind can leave a phase a few milliseconds long, and dividing by that
+# produces a seven-figure DPS that is not a number about anything.
+RATE_MIN_SECS = 0.5
+
+
+def _rate(amount, duration):
+    """`amount` per second, or None when the window is too short to divide by.
+
+    None rather than 0.0, because "no rate" and "a rate of zero" are different
+    facts and the card renders them differently — one shows the total instead,
+    the other shows a real zero."""
+    if not duration or duration < RATE_MIN_SECS:
+        return None
+    return (amount or 0.0) / duration
+
+
+def _rate_text(amount, duration, unit):
+    """"12,345 DPS", or None when there is no rate to state."""
+    r = _rate(amount, duration)
+    return None if r is None else f"{r:,.0f} {unit}"
 
 
 def _overheal_pct(total, landed):
@@ -1747,10 +1890,15 @@ class PlayerAgg:
     heals: dict[str, list] = field(default_factory=lambda: defaultdict(lambda: [0, 0.0, 0, 0.0]))
     # element -> [hits, total]
     elements: dict[str, list] = field(default_factory=lambda: defaultdict(lambda: [0, 0.0]))
+    # unit kind -> damage THIS player dealt to it. Per player rather than per
+    # session because a history dataset can be filtered down to your party,
+    # and a session-wide tally would then claim the whole shard's damage on a
+    # boss above rows that only add up to your group's share.
+    targets: dict[str, float] = field(default_factory=lambda: defaultdict(float))
     first_time: float = 0.0
     last_time: float = 0.0
 
-    def record(self, skill, element, amount, crit, kill, now):
+    def record(self, skill, element, amount, crit, kill, now, target=None):
         if self.first_time == 0.0:
             self.first_time = now
         self.last_time = now
@@ -1764,6 +1912,10 @@ class PlayerAgg:
         s[0] += 1; s[1] += amount; s[2] += crit
         e = self.elements[element]
         e[0] += 1; e[1] += amount
+        # Absent on a hit whose target wasn't a unit the hook could name; the
+        # dataset then falls back to its zone name, which is still true.
+        if target:
+            self.targets[target] += amount
 
     def record_heal(self, skill, amount, crit, landed=0.0, is_self=False):
         self.heal_total += amount
@@ -1813,6 +1965,18 @@ class PartySession:
         # recorded goes in here — anything the capture window rejected was never
         # part of the encounter and must not reappear.
         self._recent: deque = deque(maxlen=RECENT_EVENT_MAX)
+        # Called with the finished encounter, as plain data, every time one is
+        # thrown away. Set by the overlay when combat history is on; None means
+        # a reset is exactly what it always was. Never called under the lock —
+        # the receiver writes a file, and holding the data path open across
+        # disk IO would stall the damage hook.
+        self.archive_hook = None
+        # Which players belong in an archived dataset — the meter's party/all
+        # mode, supplied by the overlay. Applied inside _freeze, BEFORE any
+        # total is summed, so a party dataset's totals, event count, target
+        # tally and minimum-size floor all describe the same set of people.
+        # None keeps everyone (which is what a rift report does deliberately).
+        self.archive_filter = None
 
     def set_capture_window(self, seconds):
         """Parse mode: take data for exactly `seconds` from now, then stop.
@@ -1859,21 +2023,7 @@ class PartySession:
         return p
 
     def _skill_of(self, ev):
-        sid = ev.get("skill", "?")
-        nm = ev.get("name")
-        # A summon's hit carries `pet` — its raw Unit.kind. The damage already
-        # merged into the owner's row upstream, so the breakdown is the only
-        # place left that can show a pet was responsible for part of it.
-        #
-        # The KEY is prefixed with the raw kind (stable, and the same on a
-        # non-English client), which also keeps a pet's ability separate from
-        # an identically named one of the player's own. The NAME gets the
-        # sheet's display name — "Nightling Terror: Attack".
-        pet = ev.get("pet")
-        if pet:
-            sid = f"{pet}:{sid}"
-            label = _summon_label(pet)
-            nm = f"{label}: {nm}" if nm else label
+        sid, nm = _skill_ident(ev)
         if nm and sid not in self.skill_names:
             self.skill_names[sid] = nm
         return sid
@@ -1900,7 +2050,7 @@ class PartySession:
         lands exactly where the live one did."""
         p.record(self._skill_of(ev), ev.get("element", "?"),
                  float(ev.get("amount", 0.0)), int(ev.get("crit", 0)),
-                 int(ev.get("kill", 0)), ts)
+                 int(ev.get("kill", 0)), ts, ev.get("target"))
 
     def record_heal(self, ev: dict):
         # Heals are recorded but never drive encounter boundaries: an
@@ -1936,15 +2086,97 @@ class PartySession:
                 self.active_since = None
             self.in_combat = active
 
+    def _freeze(self, now):
+        """The live encounter as plain, JSON-safe data — or None when there
+        isn't enough of one to be worth keeping.
+
+        Called with the lock held and returning nothing but built-ins, so the
+        caller can hand it to a disk writer on another thread without the
+        aggregates moving underneath it.
+        """
+        if not self.players:
+            return None
+        # Filter FIRST. Every number below is summed over `rows`, so a party
+        # dataset is internally consistent — including the floor, which then
+        # asks "did YOUR GROUP fight for long enough", not "did anything
+        # happen on this shard".
+        rows = sorted(self.players.values(), key=lambda p: -p.total)
+        if self.archive_filter is not None:
+            try:
+                rows = list(self.archive_filter(rows))
+            except Exception as e:
+                print(f"[meter] archive filter failed ({e}); keeping every "
+                      "player", file=sys.stderr)
+        if not rows:
+            return None
+        duration = self._effective_duration(now)
+        events = sum(p.hits + p.heal_hits for p in rows)
+        if duration < HISTORY_MIN_SECS or events < HISTORY_MIN_EVENTS:
+            return None
+        targets: dict[str, float] = defaultdict(float)
+        for p in rows:
+            for kind, amt in p.targets.items():
+                targets[kind] += amt
+        return {
+            "at": now,
+            "start": self.enc_start or now,
+            "duration": duration,
+            "events": events,
+            "total": sum(p.total for p in rows),
+            "heal": sum(p.heal_total for p in rows),
+            "heal_landed": sum(p.heal_landed for p in rows),
+            "targets": {k: v for k, v in targets.items() if v > 0.5},
+            # Only the names this encounter actually used: skill_names is
+            # never cleared (a display name is a fact about the game, not
+            # about the fight), and shipping the whole session's table with
+            # every dataset would grow every file for nothing.
+            "skill_names": {
+                sid: nm for sid, nm in self.skill_names.items()
+                if any(sid in p.skills or sid in p.heals for p in rows)},
+            "players": [{
+                "name": p.name,
+                "is_me": bool(p.is_me),
+                "in_party": bool(p.in_party),
+                "total": p.total, "hits": p.hits, "crits": p.crits,
+                "kills": p.kills,
+                "heal": p.heal_total, "heal_landed": p.heal_landed,
+                "heal_self": p.heal_self, "heal_hits": p.heal_hits,
+                "first": p.first_time, "last": p.last_time,
+                "skills": {k: list(v) for k, v in p.skills.items()},
+                "heals": {k: list(v) for k, v in p.heals.items()},
+                "elements": {k: list(v) for k, v in p.elements.items()},
+                # Per player as well as summed above: it answers who was on
+                # the boss and who was on the adds, and it makes the file
+                # self-checking — the dataset's `targets` must be the sum of
+                # these, whatever filter produced it.
+                "targets": dict(p.targets),
+            } for p in rows],
+        }
+
+    def _emit_archive(self, frozen):
+        """Hand a finished encounter to the archive, outside the lock. A
+        broken hook costs the dataset, never the reset that was asked for."""
+        if frozen is None or self.archive_hook is None:
+            return
+        try:
+            self.archive_hook(frozen)
+        except Exception as e:
+            print(f"[meter] couldn't archive the encounter: {e}",
+                  file=sys.stderr)
+
     def reset(self):
+        frozen = None
         with self.lock:
-            self._reset(time.time())
+            now = time.time()
+            frozen = self._freeze(now)
+            self._reset(now)
             self.last_hit = 0.0
             self.in_combat = False
             # A reset always returns to live capture — and so to in-combat DPS.
             self.capture_until = self.capture_start = None
             self._recent.clear()
             self.epoch += 1
+        self._emit_archive(frozen)
 
     def reset_keeping_recent(self, backlag=BOSS_PULL_BACKLAG_SECS):
         """Reset the encounter but carry the last `backlag` seconds forward.
@@ -1958,10 +2190,21 @@ class PartySession:
         a burst that took four seconds as instantaneous.
 
         Returns how many events were carried over, for the log."""
+        frozen = None
         with self.lock:
             now = time.time()
             cutoff = now - backlag
             keep = [e for e in self._recent if e[0] >= cutoff]
+            # The trash phase, archived before the pull takes the meter. The
+            # carried events are counted in BOTH this dataset and the next
+            # one: they are already in these aggregates and there is no exact
+            # way to subtract them back out of a PlayerAgg. `carried` says so
+            # in the file rather than leaving a few seconds of overlap for
+            # someone to discover by adding two datasets up.
+            frozen = self._freeze(now)
+            if frozen is not None:
+                frozen["carried"] = len(keep)
+                frozen["carried_secs"] = backlag
             self._reset(now)
             self.last_hit = 0.0
             self.in_combat = False
@@ -1989,7 +2232,8 @@ class PartySession:
             if self.enc_start:
                 self.active_since = self.enc_start
                 self.in_combat = True
-            return len(keep)
+        self._emit_archive(frozen)
+        return len(keep)
 
     def _duration(self, now):
         d = self.active_accum
@@ -2044,37 +2288,66 @@ class RiftRecorder:
         # edge can move the opening burst across the phase boundary, same
         # trick (and same measured bar lag) as reset_keeping_recent().
         self._recent: deque = deque(maxlen=RECENT_EVENT_MAX)
+        # skill key -> display name, for the per-skill tables below. Kept
+        # across the whole rift rather than per phase: a name is a fact about
+        # the game, and the boss phase should not have to re-learn one the
+        # trash phase already saw.
+        self.skill_names: dict[str, str] = {}
 
     @staticmethod
     def _new_phase():
+        # `skills`/`heals` are per player (below); `elements` and `targets`
+        # are per phase, because "what did this phase consist of" is a
+        # question about the phase and not about any one player.
         return {"players": {}, "elements": defaultdict(float),
-                "start": 0.0, "end": 0.0}
+                "targets": defaultdict(float), "start": 0.0, "end": 0.0}
 
     @staticmethod
     def _player_of(ph, name):
         p = ph["players"].get(name)
         if p is None:
+            # The per-skill tables carry the same [hits, total, crits] (plus
+            # the healing self-share) shape PlayerAgg uses, so a rift dataset
+            # and an ordinary encounter dataset render through one code path.
             p = {"name": name, "total": 0.0, "hits": 0, "crits": 0,
                  "kills": 0, "heal": 0.0, "heal_landed": 0.0,
-                 "heal_hits": 0}
+                 "heal_hits": 0,
+                 "skills": defaultdict(lambda: [0, 0.0, 0]),
+                 "heals": defaultdict(lambda: [0, 0.0, 0, 0.0]),
+                 "elements": defaultdict(lambda: [0, 0.0])}
             ph["players"][name] = p
         return p
 
     def _apply(self, ph, kind, ev, sign):
         """Add (or, for the phase-boundary rewind, subtract) one event. Every
-        stat is a plain sum, which is what makes the rewind exact."""
+        stat is a plain sum, which is what makes the rewind exact — including
+        the per-skill tables, which is why they are sums and not counters."""
         p = self._player_of(ph, ev.get("player") or "?")
         amount = sign * float(ev.get("amount", 0.0))
+        sid, nm = _skill_ident(ev)
+        if nm and sid not in self.skill_names:
+            self.skill_names[sid] = nm
         if kind == "hit":
             p["total"] += amount
             p["hits"] += sign
             p["crits"] += sign * int(ev.get("crit", 0))
             p["kills"] += sign * int(ev.get("kill", 0))
-            ph["elements"][ev.get("element") or "?"] += amount
+            el = ev.get("element") or "?"
+            ph["elements"][el] += amount
+            s = p["skills"][sid]
+            s[0] += sign; s[1] += amount; s[2] += sign * int(ev.get("crit", 0))
+            e = p["elements"][el]
+            e[0] += sign; e[1] += amount
+            tk = ev.get("target")
+            if tk:
+                ph["targets"][tk] += amount
         else:
             p["heal"] += amount
             p["heal_landed"] += sign * float(ev.get("landed", 0.0))
             p["heal_hits"] += sign
+            h = p["heals"][sid]
+            h[0] += sign; h[1] += amount; h[2] += sign * int(ev.get("crit", 0))
+            h[3] += amount if ev.get("self") else 0.0
 
     def set_rift(self, state: bool):
         with self.lock:
@@ -2140,6 +2413,7 @@ class RiftRecorder:
             now = time.time()
             self._phases[self.phase]["end"] = now
             phases = []
+            used_skills = set()
             for label, ph in zip(self.PHASE_LABELS, self._phases):
                 players = sorted((dict(p) for p in ph["players"].values()),
                                  key=lambda p: -p["total"])
@@ -2148,6 +2422,14 @@ class RiftRecorder:
                 # than showing "0" lines.
                 players = [p for p in players
                            if p["total"] > 0.5 or p["heal"] > 0.5]
+                # The rewind subtracts, so a skill moved wholesale to the next
+                # phase is left behind as a zero row. Same dust, same rule.
+                for p in players:
+                    for key in ("skills", "heals", "elements"):
+                        p[key] = {k: list(v) for k, v in p[key].items()
+                                  if abs(v[1]) > 0.5}
+                    used_skills.update(p["skills"])
+                    used_skills.update(p["heals"])
                 total = sum(p["total"] for p in players)
                 heal = sum(p["heal"] for p in players)
                 heal_landed = sum(p["heal_landed"] for p in players)
@@ -2159,8 +2441,190 @@ class RiftRecorder:
                                "duration": max(0.0, end - start),
                                "players": players, "total": total,
                                "heal": heal, "heal_landed": heal_landed,
-                               "elements": elements})
-            return {"at": now, "phases": phases}
+                               "elements": elements,
+                               "targets": {k: v for k, v
+                                           in ph["targets"].items()
+                                           if v > 0.5}})
+            # `skill_names` outlives one rift, so only the names this report
+            # can actually use are written into it — see PartySession._freeze.
+            return {"at": now, "phases": phases,
+                    "skill_names": {sid: nm for sid, nm
+                                    in self.skill_names.items()
+                                    if sid in used_skills}}
+
+
+class HistoryStore:
+    """Every finished encounter, kept as data until you delete it yourself.
+
+    The meter's primary combat store lives exactly as long as the encounter
+    does — a reset, a zone change or a boss pull throws it away and there has
+    never been anywhere for it to go. This is that somewhere: one JSON file
+    per finished encounter, named for what you were fighting and where.
+
+    Three deliberate non-features:
+
+    * Nothing here ever deletes anything. No age limit, no count limit, no
+      "tidy up" pass. A meter that prunes a folder is a meter that can prune
+      the WRONG folder — one bad path and it is deleting somebody's
+      documents — and the cost of not pruning is disk space the player can
+      see and manage in Explorer.
+    * Writes go through a worker thread. save() is called from the damage
+      hook's thread by way of PartySession's archive hook, and that thread is
+      inside the game's own call stack; it must never wait on a disk.
+    * The session id is generated once per meter launch and written into
+      every file, so which launch produced a dataset is a fact in the data
+      rather than a guess from timestamps. It carries the pid because two
+      meters can be started inside the same second (a relaunch). The browser
+      does not filter on it — it lists every session — but the id is what any
+      later grouping would have to be built on, and it costs one string per
+      file to keep.
+    """
+
+    VERSION = 1
+
+    def __init__(self, directory=HISTORY_DIR):
+        self.dir = Path(directory)
+        self.session = f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
+        self._q: queue.Queue = queue.Queue()
+        self._thread = None
+        self._lock = threading.Lock()
+        # path -> (mtime, size, summary). Listing re-reads only what changed,
+        # so opening the tab on a session with hundreds of datasets costs one
+        # directory scan rather than hundreds of file reads.
+        self._summaries: dict[str, tuple] = {}
+        self._failed = False        # a write has failed; say so once, not per file
+
+    # ---- writing ----
+    def _ensure_writer(self):
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._thread = threading.Thread(target=self._run, daemon=True,
+                                            name="history-writer")
+            self._thread.start()
+
+    def _run(self):
+        while True:
+            entry = self._q.get()
+            if entry is None:
+                return
+            try:
+                self._write(entry)
+            except Exception as e:
+                if not self._failed:
+                    self._failed = True
+                    print(f"[meter] combat history is not being saved: {e}",
+                          file=sys.stderr)
+
+    def _write(self, entry):
+        self.dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(entry["at"]))
+        base = f"{entry['kind']}-{stamp}-{_slug(entry['name'])}"
+        path = self.dir / f"{base}.json"
+        # Two encounters can finish inside the same second — a rift's report
+        # and the reset that follows it, most obviously.
+        n = 2
+        while path.exists():
+            path = self.dir / f"{base}-{n}.json"
+            n += 1
+        path.write_text(json.dumps(entry), encoding="utf-8")
+        # The FILENAME, not the dataset name: names carry an em dash (and
+        # whatever the cdb calls a boss), and a source run's stderr is the
+        # Windows console, which is cp1252. Encoding that raises — inside the
+        # worker's try, after the file is already on disk — and the meter would
+        # report a failure for a dataset it had just saved. `path.name` is
+        # ASCII by construction, and the slug still says what it is.
+        print(f"[meter] history saved: {path.name}", file=sys.stderr)
+
+    def save(self, kind, name, data, **extra):
+        """Queue one dataset. Returns immediately; the write happens on the
+        worker thread."""
+        entry = dict(extra)
+        entry.update({"v": self.VERSION, "kind": kind, "name": name,
+                      "session": self.session, "meter": VERSION,
+                      "at": data.get("at") or time.time(), "data": data})
+        self._ensure_writer()
+        self._q.put(entry)
+
+    # ---- reading ----
+    @staticmethod
+    def _summarise(path, entry):
+        """The one line the browser needs, without keeping the dataset in
+        memory. Totals are recomputed from a rift's phases so both kinds of
+        dataset answer the same questions."""
+        data = entry.get("data") or {}
+        kind = entry.get("kind") or "combat"
+        if kind == "rift":
+            phases = data.get("phases") or []
+            duration = sum(float(ph.get("duration") or 0.0) for ph in phases)
+            total = sum(float(ph.get("total") or 0.0) for ph in phases)
+            heal = sum(float(ph.get("heal") or 0.0) for ph in phases)
+            players = len({p.get("name") for ph in phases
+                           for p in (ph.get("players") or [])})
+        else:
+            duration = float(data.get("duration") or 0.0)
+            total = float(data.get("total") or 0.0)
+            heal = float(data.get("heal") or 0.0)
+            players = len(data.get("players") or [])
+        return {"path": str(path), "kind": kind,
+                "name": entry.get("name") or "Encounter",
+                "at": float(entry.get("at") or 0.0),
+                "session": entry.get("session") or "",
+                "zone": (entry.get("zone") or {}).get("label") or "",
+                "duration": duration, "total": total, "heal": heal,
+                "players": players}
+
+    def entries(self):
+        """Every dataset on disk, newest first — all of them, every session.
+
+        There is deliberately no filter here. The session id is still written
+        into every file (it is the one thing that reliably groups a night's
+        datasets, since timestamps alone can't tell one launch from the next),
+        but hiding earlier sessions only ever meant a browser that looked
+        empty for a feature that had been recording for weeks.
+
+        A file that won't parse is skipped rather than raised: hand-edited,
+        half-written by a meter that was killed mid-save, or from a future
+        format — none of those should cost you the list."""
+        out = []
+        try:
+            paths = sorted(self.dir.glob("*.json"))
+        except OSError:
+            return out
+        fresh = {}
+        for p in paths:
+            key = str(p)
+            try:
+                st = p.stat()
+                sig = (st.st_mtime, st.st_size)
+            except OSError:
+                continue
+            cached = self._summaries.get(key)
+            if cached is not None and cached[:2] == sig:
+                summary = cached[2]
+            else:
+                try:
+                    entry = json.loads(p.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                summary = self._summarise(p, entry)
+            fresh[key] = (sig[0], sig[1], summary)
+            out.append(summary)
+        self._summaries = fresh
+        out.sort(key=lambda s: -s["at"])
+        return out
+
+    @staticmethod
+    def load(path):
+        """One dataset in full, or None. Same tolerance as entries()."""
+        try:
+            entry = json.loads(Path(path).read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"[meter] couldn't read {path}: {e}", file=sys.stderr)
+            return None
+        return entry if isinstance(entry, dict) else None
 
 
 # The constant every SteamID64 is built on: the individual-account block.
@@ -2510,35 +2974,34 @@ class GameUIState:
         self._unlock_at = None         # when the game's escape menu opened
         self._boss_bar = 0
         self._zone_sig = None
-        self._mounts: list[str] = []   # unlocked mount kinds, from the hook
-        self._gliders: list[str] = []  # unlocked glider kinds, same shape
+        # The game's own `World._isWorldMap`. None until a zone message has
+        # carried it — which is not the same as False, and a history dataset
+        # would otherwise call an unknown zone a dungeon.
+        self._zone_world_map = None
 
-    def set_mounts(self, kinds):
-        with self._lock:
-            self._mounts = list(kinds)
-
-    def mounts(self):
-        with self._lock:
-            return list(self._mounts)
-
-    def set_gliders(self, kinds):
-        with self._lock:
-            self._gliders = list(kinds)
-
-    def gliders(self):
-        with self._lock:
-            return list(self._gliders)
-
-    def set_zone(self, sig):
+    def set_zone(self, sig, world_map=None):
         """layer.world.level from the hook — the loaded level's name, sent
         once at attach and then on every change. (Its predecessor,
-        Main.getMapId(), turned out to return the machine hostname.)"""
+        Main.getMapId(), turned out to return the machine hostname.)
+
+        `world_map` is the same message's `_isWorldMap`: 1 in an overworld
+        region, 0 in a dungeon or a rift. It is what lets a history dataset
+        say "Siagarta Overworld" without pattern-matching the path."""
         with self._lock:
             self._zone_sig = sig or None
+            self._zone_world_map = (None if world_map is None
+                                    else bool(world_map))
 
     def zone_sig(self):
         with self._lock:
             return self._zone_sig
+
+    def zone(self):
+        """(sig, world_map) together — read as a pair because a history
+        dataset names itself from both, and reading them one lock at a time
+        could straddle a loading screen."""
+        with self._lock:
+            return self._zone_sig, self._zone_world_map
 
     def set_rift(self, state: bool):
         with self._lock:
@@ -3501,14 +3964,13 @@ class Overlay:
         # stays a plain on/off rather than gaining a mode it can't honour.
         self._show_heal = True
         self._sort_heal = False        # rows ordered by healing, not damage
-        self._mount_random = False     # random favorite mount on each summon
-        self._mount_mode = "Random"    # how the pick is made (MOUNT_MODES)
-        self._mount_favs: set[str] = set()   # mount kinds the swap may pick
-        self._mounts_shown = None      # unlock list the checkboxes were built from
-        self._glider_random = False    # re-equip a random favorite per glide
-        self._glider_mode = "Random"   # how the pick is made (MOUNT_MODES)
-        self._glider_favs: set[str] = set()  # glider kinds the equip may pick
-        self._gliders_shown = None     # unlock list the checkboxes were built from
+        # The previous encounter, kept on screen across a reset until the next
+        # one starts landing hits — see _hold_last.
+        self._held_rows = []
+        self._held_duration = 0.0
+        # Widget path -> the canvas the wheel should scroll while the cursor
+        # is anywhere inside it. Filled in by scroll_list — see _on_wheel.
+        self._scroll_areas: dict[str, tk.Canvas] = {}
         self._shown = {k: True for k, _ in TOGGLEABLE_ELEMENTS}
         # healing, as last pushed to the widgets — see _apply_heal_columns
         self._cols_shown = (True,)
@@ -3600,11 +4062,29 @@ class Overlay:
         self._report_data = self._load_last_rift_report()
         self._report_flash_job = None
 
+        # ---- combat history ----
+        # Off until asked for: this writes a file for every fight you finish,
+        # and that is not a thing to start doing to someone's disk on their
+        # behalf. The store exists either way — it is what holds the session
+        # id, and the browser needs it to read the folder even while the
+        # recording is off.
+        self._history = HistoryStore()
+        self._history_on = False
+        self._history_entries = []
+        self._history_sig = None
+        self._history_row_widgets = []
+        self._history_detail = None     # the dataset the detail page is showing
+
         # Before any widget exists: the dropdowns and Show/hide ticks are built
         # from these, so loading afterwards would leave the menu disagreeing
         # with the state it is supposed to be showing.
         self._pending_scales = None
         self._load_settings()
+        # The setting decides whether the primary store has anywhere to put a
+        # finished encounter. Applied here rather than checked inside the hook
+        # so that "history is off" costs the damage path nothing at all — the
+        # hook is simply not installed.
+        self._apply_history_setting()
 
         pos = self._load_positions()
         self.root = tk.Tk()
@@ -3972,6 +4452,8 @@ class Overlay:
             self._auto_reset_boss = data["auto_reset_boss"]
         if isinstance(data.get("rift_auto_view"), bool):
             self._rift_auto_view = data["rift_auto_view"]
+        if isinstance(data.get("history_on"), bool):
+            self._history_on = data["history_on"]
         if data.get("social_sort") in SOCIAL_SORTS:
             self._social_sort = data["social_sort"]
         if data.get("session_sort") in SESSION_SORTS:
@@ -4006,20 +4488,10 @@ class Overlay:
         # that invariant; this covers a hand-edited file).
         if isinstance(data.get("sort_heal"), bool):
             self._sort_heal = data["sort_heal"] and self._show_heal
-        if isinstance(data.get("mount_random"), bool):
-            self._mount_random = data["mount_random"]
-        if data.get("mount_mode") in MOUNT_MODES:
-            self._mount_mode = data["mount_mode"]
-        favs = data.get("mount_favorites")
-        if isinstance(favs, list):
-            self._mount_favs = {k for k in favs if isinstance(k, str)}
-        if isinstance(data.get("glider_random"), bool):
-            self._glider_random = data["glider_random"]
-        if data.get("glider_mode") in MOUNT_MODES:
-            self._glider_mode = data["glider_mode"]
-        gfavs = data.get("glider_favorites")
-        if isinstance(gfavs, list):
-            self._glider_favs = {k for k in gfavs if isinstance(k, str)}
+        # `mount_*` and `glider_*` keys from before 3.5 are simply not read.
+        # A settings file is a record of what you chose, not a schema — an
+        # upgrade that erased unknown keys would take your window positions
+        # with it the first time someone ran an older build afterwards.
         show = data.get("show")
         if isinstance(show, dict):
             for key, _label in TOGGLEABLE_ELEMENTS:
@@ -4067,14 +4539,9 @@ class Overlay:
                          for k, _label in TOGGLEABLE_ELEMENTS},
                 "show_heal": bool(self._show_heal),
                 "sort_heal": bool(self._sort_heal),
-                "mount_random": bool(self._mount_random),
-                "mount_mode": self._mount_mode,
-                "mount_favorites": sorted(self._mount_favs),
-                "glider_random": bool(self._glider_random),
-                "glider_mode": self._glider_mode,
-                "glider_favorites": sorted(self._glider_favs),
                 "social_sort": self._social_sort,
                 "session_sort": self._session_sort,
+                "history_on": bool(self._history_on),
             }, indent=2))
         except OSError as e:
             print(f"[meter] couldn't save settings: {e}", file=sys.stderr)
@@ -4382,11 +4849,13 @@ class Overlay:
         self._menu_tab_btns = {}
         self._menu_tab_frames = {}
         # General stays the landing page — it is what you open the menu for
-        # most of the time. Social sits directly under it because it is the
-        # other page you open to READ rather than to change something; the
-        # configuration pages follow.
-        for name in ("General", "Social", "Actions", "Windows", "Map",
-                     "Mounts", "Gliders"):
+        # most of the time. History and Social sit directly under it because
+        # they are the pages you open to READ rather than to change something;
+        # the configuration pages follow. History is above Social because it
+        # is about the fight you just finished, which is the more common
+        # reason to be looking.
+        for name in ("General", "History", "Social", "Actions", "Windows",
+                     "Map"):
             b = tk.Button(navbar, text=name, anchor="w",
                           command=self._enqueue(
                               lambda n=name: self._set_menu_tab(n)),
@@ -4400,10 +4869,9 @@ class Overlay:
             self._menu_tab_frames[name] = f
         soc = self._menu_tab_frames["Social"]
         gen = self._menu_tab_frames["General"]
+        hist = self._menu_tab_frames["History"]
         winb = self._menu_tab_frames["Windows"]
         mp = self._menu_tab_frames["Map"]
-        mnt = self._menu_tab_frames["Mounts"]
-        gld = self._menu_tab_frames["Gliders"]
         act = self._menu_tab_frames["Actions"]
 
         def section(parent, text, first=False):
@@ -4550,7 +5018,7 @@ class Overlay:
             count.pack(side="right")
             return row, count
 
-        def scroll_list(parent):
+        def scroll_list(parent, height=SOCIAL_LIST_H):
             """A scrolling viewport of real widgets.
 
             Canvas + inner frame is the only way tk gives you a scrollable
@@ -4561,7 +5029,7 @@ class Overlay:
             wrap.pack(fill="both", expand=True)
             canvas = tk.Canvas(
                 wrap, bg=BG_BODY, highlightthickness=0, bd=0,
-                height=int(SOCIAL_LIST_H * self._scales["menu"]))
+                height=int(height * self._scales["menu"]))
             vsb = tk.Scrollbar(wrap, orient="vertical", command=canvas.yview)
             canvas.configure(yscrollcommand=vsb.set)
             vsb.pack(side="right", fill="y")
@@ -4577,15 +5045,10 @@ class Overlay:
             canvas.bind("<Configure>",
                         lambda e: canvas.itemconfigure(sw, width=e.width))
 
-            def wheel(e):
-                # Only scroll when there is somewhere to scroll to, or tk
-                # clamps and the list twitches under the cursor on a short one.
-                first, last = canvas.yview()
-                if first <= 0.0 and last >= 1.0:
-                    return
-                canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
-            for w in (canvas, inner):
-                w.bind("<MouseWheel>", wheel)
+            # Registered for the app-wide wheel dispatcher rather than bound
+            # here — see _on_wheel. `wrap` and not `canvas`, so the scrollbar
+            # (a sibling of the canvas, not a child) scrolls the list too.
+            self._scroll_areas[str(wrap)] = canvas
             return canvas, inner
 
         # -- Current Shard --
@@ -4695,6 +5158,114 @@ class Overlay:
                lambda _e: self._on_transparency_pick()).pack(
             side="right", expand=True, fill="x", padx=(8, 0))
 
+        # ---- History: every finished encounter, kept as data ----
+        # The whole tab is one opt-in and what it unlocks. Off, the page is
+        # the checkbox and the paragraph explaining it — showing a folder path
+        # and an empty browser for a feature that isn't recording anything
+        # would read as a broken feature rather than an unused one.
+        section(hist, "COMBAT HISTORY", first=True)
+        self.btn_history = button(hist, self._enqueue(self._toggle_history))
+        tk.Label(hist,
+                 text=("The meter keeps one encounter at a time — a reset, a "
+                       "zone change or a boss pull throws it away. With this "
+                       "on, each finished encounter is saved to disk first, "
+                       "named for whatever took the most damage and where. "
+                       "Rift reports are saved here too, with the per-skill "
+                       "detail the card has no room for."),
+                 bg=BG_BODY, fg=FG_DIM, font=self.fonts_m["ui_tiny_i"],
+                 anchor="w", justify="left",
+                 wraplength=WARN_WRAP).pack(fill="x", pady=(0, 2))
+        # Everything below is packed and unpacked as one unit — see
+        # _apply_history_visibility.
+        self.history_body = tk.Frame(hist, bg=BG_BODY)
+
+        section(self.history_body, "WHERE IT IS SAVED")
+        # A path you can click, not a path you have to retype. Styled as a
+        # link rather than a button because that is what it is: the folder is
+        # the feature's real interface, and nothing in the meter can delete
+        # from it.
+        self.btn_history_path = tk.Label(
+            self.history_body, text=str(self._history.dir), bg=BG_BODY,
+            fg=ACCENT, font=self.fonts_m["ui_sm_b"], anchor="w",
+            justify="left", cursor="hand2", wraplength=WARN_WRAP)
+        self.btn_history_path.pack(fill="x", pady=(0, 1))
+        self.btn_history_path.bind(
+            "<Button-1>", lambda _e: self._enqueue(
+                self._open_history_folder)())
+        tk.Label(self.history_body,
+                 text=("Nothing in the meter ever deletes from this folder. "
+                       "Tidy it up yourself when you want the space back."),
+                 bg=BG_BODY, fg=FG_DIM, font=self.fonts_m["ui_tiny_i"],
+                 anchor="w", justify="left",
+                 wraplength=WARN_WRAP).pack(fill="x", pady=(0, 2))
+
+        section(self.history_body, "DATASETS")
+        # Two pages in one grid cell, same lift-don't-relayout trick the main
+        # tabs use: the list, and one dataset opened out of it.
+        hist_holder = tk.Frame(self.history_body, bg=BG_BODY)
+        hist_holder.pack(fill="both", expand=True)
+        hist_holder.grid_rowconfigure(0, weight=1)
+        hist_holder.grid_columnconfigure(0, weight=1)
+        self._history_page = "list"
+        self._history_page_frames = {}
+        for key, _label in HISTORY_PAGES:
+            f = tk.Frame(hist_holder, bg=BG_BODY)
+            f.grid(row=0, column=0, sticky="nsew")
+            self._history_page_frames[key] = f
+        hist_list_pg = self._history_page_frames["list"]
+        hist_detail_pg = self._history_page_frames["detail"]
+
+        self._history_query = tk.StringVar()
+        hrow, self.history_count = search_row(hist_list_pg,
+                                              self._history_query)
+        self.btn_history_reload = tk.Button(
+            hrow, text="Refresh",
+            command=self._enqueue(self._reload_history),
+            font=self.fonts_m["ui"], bg=BG_BODY_SOFT, fg=FG_TEXT,
+            activebackground=BG_BAR_TRACK, activeforeground=FG_VALUE,
+            relief="flat", bd=0, padx=10, pady=2, highlightthickness=1,
+            highlightbackground=BG_BAR_TRACK, cursor="hand2")
+        self.btn_history_reload.pack(side="right", padx=(0, 4))
+        self.history_canvas, self.history_list = scroll_list(
+            hist_list_pg, HISTORY_LIST_H)
+        self._history_query.trace_add(
+            "write", lambda *_a: self._rebuild_history())
+
+        # -- one dataset, opened --
+        drow = tk.Frame(hist_detail_pg, bg=BG_BODY)
+        drow.pack(fill="x", pady=(0, 6))
+        self.btn_history_back = tk.Button(
+            drow, text="‹  Back to datasets",
+            command=self._enqueue(lambda: self._set_history_page("list")),
+            font=self.fonts_m["ui"], bg=BG_BODY_SOFT, fg=FG_TEXT,
+            activebackground=BG_BAR_TRACK, activeforeground=FG_VALUE,
+            relief="flat", bd=0, padx=10, pady=2, highlightthickness=1,
+            highlightbackground=BG_BAR_TRACK, cursor="hand2")
+        self.btn_history_back.pack(side="left")
+        self.btn_history_copy = tk.Button(
+            drow, text="Copy", command=self._enqueue(self._copy_history),
+            font=self.fonts_m["ui"], bg=BG_BODY_SOFT, fg=FG_TEXT,
+            activebackground=BG_BAR_TRACK, activeforeground=FG_VALUE,
+            relief="flat", bd=0, padx=10, pady=2, highlightthickness=1,
+            highlightbackground=BG_BAR_TRACK, cursor="hand2")
+        self.btn_history_copy.pack(side="right")
+        self.history_detail_title = tk.Label(
+            hist_detail_pg, text="", bg=BG_BODY, fg=FG_VALUE,
+            font=self.fonts_m["ui_b"], anchor="w", justify="left",
+            wraplength=WARN_WRAP)
+        self.history_detail_title.pack(fill="x")
+        self.history_detail_canvas, self.history_detail_list = scroll_list(
+            hist_detail_pg, HISTORY_LIST_H)
+
+        self.history_note = tk.Label(
+            self.history_body, text="", bg=BG_BODY, fg=FG_DIM,
+            font=self.fonts_m["ui_sm_b"], anchor="w", justify="left",
+            wraplength=WARN_WRAP)
+        self.history_note.pack(fill="x", pady=(6, 0))
+        self._history_note_job = None
+        self._set_history_page("list")
+        self._apply_history_visibility()
+
         # ---- Windows: one row per window — visibility and size together ----
         # The old menu split these across SCALING and SHOW / HIDE, which meant
         # the same five windows were listed twice, a screen apart. A window is
@@ -4799,79 +5370,6 @@ class Overlay:
                 mp,
                 self._enqueue(lambda k=key: self._toggle_compass_filter(k)))
 
-        # ---- Mounts: the random favorite mount ----
-        section(mnt, "RANDOM FAVORITE MOUNT", first=True)
-        # One row: the on/off toggle with the pick-mode dropdown to its
-        # right — the dropdown modifies what the toggle turns on, so they
-        # read as one control rather than two settings.
-        row = tk.Frame(mnt, bg=BG_BODY)
-        row.pack(fill="x")
-        self.btn_mount_random = button(
-            row, self._enqueue(self._toggle_mount_random))
-        self.btn_mount_random.pack_configure(side="left", expand=True,
-                                             padx=(0, 8))
-        self._mount_mode_var = tk.StringVar(value=self._mount_mode)
-        self.opt_mount_mode = dropdown(row, self._mount_mode_var,
-                                       MOUNT_MODES, self._on_mount_mode_pick)
-        self.opt_mount_mode.pack(side="right")
-        tk.Label(mnt,
-                 text=("Every summon becomes a pick from the favorites below "
-                       "— rolled fresh each time, or cycled through in order. "
-                       "Your equipped mount is never changed — only which one "
-                       "actually appears."),
-                 bg=BG_BODY, fg=FG_DIM, font=self.fonts_m["ui_tiny_i"],
-                 anchor="w", justify="left",
-                 wraplength=WARN_WRAP).pack(fill="x", pady=(0, 2))
-        section(mnt, "FAVORITES")
-        # Rebuilt from the hook's unlock list — see _rebuild_mounts.
-        self.mounts_box = tk.Frame(mnt, bg=BG_BODY)
-        self.mounts_box.pack(fill="x", pady=(2, 0))
-        self._mount_vars = {}
-        self._rebuild_mounts([])
-
-        # ---- Gliders: the random favorite glider ----
-        # Same layout as Mounts, but the mechanism is honest about being
-        # different: gliders have no summon call to swap, so the meter
-        # genuinely re-equips (the same call the collection UI makes).
-        section(gld, "RANDOM FAVORITE GLIDER", first=True)
-        row = tk.Frame(gld, bg=BG_BODY)
-        row.pack(fill="x")
-        self.btn_glider_random = button(
-            row, self._enqueue(self._toggle_glider_random))
-        self.btn_glider_random.pack_configure(side="left", expand=True,
-                                              padx=(0, 8))
-        self._glider_mode_var = tk.StringVar(value=self._glider_mode)
-        self.opt_glider_mode = dropdown(row, self._glider_mode_var,
-                                        MOUNT_MODES, self._on_glider_mode_pick)
-        self.opt_glider_mode.pack(side="right")
-        tk.Label(gld,
-                 text=("The swap happens WHEN YOU LAND: a pick from the "
-                       "favorites below is equipped for your next glide — "
-                       "rolled fresh each time, or cycled through in order. "
-                       "Unlike mounts this DOES change your equipped glider "
-                       "(it's the same equip the collection screen performs), "
-                       "so other players see it too."),
-                 bg=BG_BODY, fg=FG_DIM, font=self.fonts_m["ui_tiny_i"],
-                 anchor="w", justify="left",
-                 wraplength=WARN_WRAP).pack(fill="x", pady=(0, 2))
-        # Cosmetic side-effect, called out so it doesn't read as a bug: the
-        # equip rebuilds the glider model, and that cuts the put-away
-        # animation short. Nothing to fix on our side — the game does the
-        # same thing when you change gliders from the collection screen.
-        tk.Label(gld,
-                 text=("Heads up: swapping mid-landing cuts the glider's "
-                       "put-away animation short. Cosmetic only, and not "
-                       "something the meter can smooth over."),
-                 bg=BG_BODY, fg=FG_DIM, font=self.fonts_m["ui_tiny_i"],
-                 anchor="w", justify="left",
-                 wraplength=WARN_WRAP).pack(fill="x", pady=(0, 2))
-        section(gld, "FAVORITES")
-        # Rebuilt from the hook's unlock list — see _rebuild_gliders.
-        self.gliders_box = tk.Frame(gld, bg=BG_BODY)
-        self.gliders_box.pack(fill="x", pady=(2, 0))
-        self._glider_vars = {}
-        self._rebuild_gliders([])
-
         # ---- Actions: the things you came here to press ----
         section(act, "PARSE", first=True)
         self.btn_parse = button(act, self._enqueue(self._toggle_parse))
@@ -4909,6 +5407,12 @@ class Overlay:
         self.btn_quit = button(body, self._enqueue(self._quit_clicked))
         self.btn_quit.config(text=QUIT_LABEL, fg=FG_WARN)
         self.menu.minsize(MIN_W["menu"], 0)
+        # One wheel binding for the whole application, installed after every
+        # scroll list has registered itself. bind_all rather than per-widget
+        # because the content of these lists is rebuilt constantly and a
+        # binding you have to remember to re-apply is a binding that will be
+        # forgotten — which is exactly how this broke. See _on_wheel.
+        self.root.bind_all("<MouseWheel>", self._on_wheel)
         self._set_menu_tab("General")
 
     def _set_menu_tab(self, name):
@@ -4917,11 +5421,12 @@ class Overlay:
         re-layout."""
         if name not in self._menu_tab_frames:
             return
-        # Leaving Social means you're done typing. Tk focus survives a raise —
-        # the search box is only hidden, not destroyed — so without this the
-        # keyboard would still be pointed at an off-screen Entry, and a key
-        # pressed over on Windows while rebinding would land in it too.
-        if name != "Social":
+        # Leaving a page with a search box means you're done typing. Tk focus
+        # survives a raise — the box is only hidden, not destroyed — so
+        # without this the keyboard would still be pointed at an off-screen
+        # Entry, and a key pressed over on Windows while rebinding would land
+        # in it too.
+        if name not in ("Social", "History"):
             self._stop_typing()
         self._menu_tab = name
         self._menu_tab_frames[name].tkraise()
@@ -4931,6 +5436,11 @@ class Overlay:
         # so arriving at the tab is what fetches the current picture.
         if name == "Social":
             self._reload_social()
+        # Same for History: the folder is re-read on arrival rather than
+        # polled, so the list is current whenever you are looking at it and
+        # costs nothing whenever you aren't.
+        if name == "History" and self._history_on:
+            self._reload_history()
         # A dropdown posted from the page on the way out would float over the
         # one arriving.
         self._unpost_menus()
@@ -6336,6 +6846,12 @@ class Overlay:
             """One leaderboard entry. Ranks 1-3 wear medal colours and the
             bigger font; 4-5 are body text — the tiering IS the design.
 
+            Three numbers, in three weights, because they answer three
+            different questions and only the first one is the headline: the
+            RATE is what the card is for, the total is what it came from, and
+            the share is how it compares. Packed right-to-left, so they end up
+            rate, total, share.
+
             The class acronym is a label of its own in the dim colour, not part
             of the name string: it must not be eaten by the name's elision, and
             it is not part of who anyone is."""
@@ -6357,15 +6873,24 @@ class Overlay:
                      font=self.fonts["mono_sm"], anchor="e",
                      width=5).pack(side="right")
             tk.Label(row, text=f"{int(amount):,}", bg=RIFT_BODY,
-                     fg=RIFT_TIME, font=self.fonts["mono_10"],
-                     anchor="e").pack(side="right", padx=(0, 6))
+                     fg=RIFT_TITLE, font=self.fonts["mono_sm"],
+                     anchor="e", width=10).pack(side="right", padx=(0, 4))
+            rate = _rate(amount, ph["duration"])
+            tk.Label(row, text="—" if rate is None else f"{rate:,.0f}",
+                     bg=RIFT_BODY, fg=RIFT_TIME, font=self.fonts["mono_10"],
+                     anchor="e", width=8).pack(side="right", padx=(0, 6))
 
-        # The phase title is the column's headline; the totals sit under it.
+        # The phase title is the column's headline. Under it the RATES, which
+        # are what the report is now built around, and under those the totals
+        # they were computed from — the same primary/subtext pairing every
+        # block on this card uses.
         line(ph["label"].upper(), font="ui_b", fg=RIFT_PEAK)
-        line(f"{self._mmss(ph['duration'])}   ·   "
-             f"{int(ph['total']):,} dmg   ·   {int(ph['heal']):,} heal"
-             + _overheal_note(ph),
-             fg=RIFT_TITLE)
+        dps = _rate_text(ph["total"], ph["duration"], "DPS")
+        hps = _rate_text(ph["heal"], ph["duration"], "HPS")
+        line(f"{self._mmss(ph['duration'])}   ·   {dps or '— DPS'}"
+             f"   ·   {hps or '— HPS'}", fg=RIFT_TIME)
+        line(f"{int(ph['total']):,} dmg   ·   {int(ph['heal']):,} heal"
+             + _overheal_note(ph), font="ui_sm_b", fg=RIFT_TITLE)
 
         players = ph["players"]
         if not players:
@@ -6387,18 +6912,44 @@ class Overlay:
             tk.Label(mvp_row, text=mvp["cls"], bg=RIFT_BODY, fg=RIFT_TITLE,
                      font=self.fonts["ui_sm_b"], anchor="s").pack(
                 side="left", padx=(5, 0), pady=(0, 4))
-        line(f"{int(mvp['total']):,} damage", fg=RIFT_TIME)
+        mvp_dps = _rate_text(mvp["total"], ph["duration"], "DPS")
+        line(mvp_dps or f"{int(mvp['total']):,} damage", fg=RIFT_TIME)
+        if mvp_dps:
+            line(f"{int(mvp['total']):,} damage", font="ui_sm_b",
+                 fg=RIFT_TITLE)
         healer = max(players, key=lambda p: p["heal"])
         if healer["heal"] > 0.5:
-            tk.Label(col, text=f"✚ {self._elide_name(healer['name'])}"
-                     + (f" ({healer['cls']})" if healer.get("cls") else "")
-                     + f"   {int(healer['heal']):,} heal"
-                     + _overheal_note(healer, "   {:.0f}% over"),
+            hps_txt = _rate_text(healer["heal"], ph["duration"], "HPS")
+            heal_total = f"{int(healer['heal']):,} heal"
+            who = self._elide_name(healer["name"])
+            if healer.get("cls"):
+                who += f" ({healer['cls']})"
+            tk.Label(col, text=f"✚ {who}   {hps_txt or heal_total}",
                      bg=RIFT_BODY, fg=REPORT_HEAL,
                      font=self.fonts["ui_rank_b"], anchor="w").pack(
                 fill="x", pady=(2, 0))
+            if hps_txt:
+                line(heal_total + _overheal_note(healer, "   {:.0f}% over"),
+                     font="ui_sm_b", fg=RIFT_TITLE)
+
+        def rank_header(rate_label):
+            """Names the three columns once, so the rows don't have to repeat
+            a unit five times to be readable. Widths and packing order match
+            rank_row exactly — they are read as one table."""
+            row = tk.Frame(col, bg=RIFT_BODY)
+            row.pack(fill="x")
+            tk.Label(row, text="SHARE", bg=RIFT_BODY, fg=RIFT_TITLE,
+                     font=self.fonts["mono_sm"], anchor="e",
+                     width=5).pack(side="right")
+            tk.Label(row, text="TOTAL", bg=RIFT_BODY, fg=RIFT_TITLE,
+                     font=self.fonts["mono_sm"], anchor="e",
+                     width=10).pack(side="right", padx=(0, 4))
+            tk.Label(row, text=rate_label, bg=RIFT_BODY, fg=RIFT_TITLE,
+                     font=self.fonts["mono_sm"], anchor="e",
+                     width=10).pack(side="right", padx=(0, 6))
 
         heading("DAMAGE — TOP 5")
+        rank_header("DPS")
         for i, p in enumerate(players[:5], 1):
             pct = p["total"] / ph["total"] * 100 if ph["total"] else 0.0
             rank_row(i, p, p["total"], pct)
@@ -6408,6 +6959,8 @@ class Overlay:
         heading("HEALING — TOP 5")
         if not healers:
             line("no healing recorded", font="ui_idle_i", fg=RIFT_TITLE)
+        else:
+            rank_header("HPS")
         for i, p in enumerate(healers[:5], 1):
             pct = p["heal"] / ph["heal"] * 100 if ph["heal"] else 0.0
             rank_row(i, p, p["heal"], pct)
@@ -6443,6 +6996,7 @@ class Overlay:
         def open_():
             self._report_data = report
             self._save_rift_report(report)
+            self._archive_rift_report(report)
             self._open_report_card()
         self._enqueue(open_)()
 
@@ -6474,6 +7028,423 @@ class Overlay:
         a no-op until the first rift of the session produces one."""
         if self._report_data is not None:
             self._open_report_card()
+
+    # ---- combat history ----
+    def _apply_history_setting(self):
+        """Install or remove the primary store's archive hook.
+
+        The filter goes on at the same time and stays on: it reads
+        `self.mode` when it runs, so switching party/all needs no re-wiring
+        (and switching resets the encounter anyway, so no dataset can ever
+        straddle both)."""
+        self.session.archive_hook = (self._archive_encounter
+                                     if self._history_on else None)
+        self.session.archive_filter = self._apply_mode
+
+    def _toggle_history(self):
+        self._history_on = not self._history_on
+        self._apply_history_setting()
+        self._save_settings()
+        self._refresh_menu()
+        self._apply_history_visibility()
+        if self._history_on:
+            self._reload_history()
+
+    def _archive_encounter(self, frozen):
+        """PartySession handing over a finished encounter.
+
+        Called on whichever thread performed the reset — the hook's thread on
+        a zone change or a boss pull, the Tk thread on a hotkey — so it does
+        no Tk work and no disk work: it stamps on the context only the overlay
+        knows (where you were, which view you were on) and queues the write.
+        """
+        sig, world_map = self.ui_state.zone()
+        name = _dataset_name(frozen.get("targets") or {}, sig, world_map)
+        self._history.save(
+            "combat", name, frozen,
+            zone={"sig": sig, "label": _zone_label(sig, world_map),
+                  "world_map": world_map},
+            # Which rows the dataset holds, not just which view was up: the
+            # mode is applied as a filter in _freeze, so a party dataset
+            # contains your group and nobody else. Recorded because the
+            # numbers can't be read honestly without it — "100%" in a party
+            # dataset means 100% of the party.
+            mode=self.mode)
+
+    def _archive_rift_report(self, report):
+        """A finished rift, into the same folder as everything else.
+
+        The report keeps going to parses/ as .json/.txt/.png — that is what
+        'Last Rift Report' reads back and what people paste into chat, and
+        this must not disturb it. What this adds is the per-skill and
+        per-element detail the card has no room for, so a rift in the history
+        list opens as a report AND as a breakdown."""
+        if not self._history_on:
+            return
+        sig, world_map = self.ui_state.zone()
+        # Named off the BOSS phase's targets when it has any: a rift's trash
+        # phase is a hundred small things and its boss phase is the one that
+        # gives the run its name. Falls back to everything seen.
+        phases = report.get("phases") or []
+        targets = {}
+        for ph in reversed(phases):        # boss phase last, so it wins
+            targets = ph.get("targets") or targets
+            if targets:
+                break
+        name = _dataset_name(targets, sig, world_map)
+        self._history.save(
+            "rift", name, report,
+            zone={"sig": sig, "label": _zone_label(sig, world_map),
+                  "world_map": world_map})
+
+    def _open_history_folder(self):
+        """Open the history folder in Explorer. Created on demand so the path
+        is a real place to click even before the first dataset lands."""
+        try:
+            self._history.dir.mkdir(parents=True, exist_ok=True)
+            os.startfile(self._history.dir)
+        except Exception as e:
+            print(f"[meter] couldn't open {self._history.dir}: {e}",
+                  file=sys.stderr)
+
+    def _apply_history_visibility(self):
+        """Show the folder path and the browser only once recording is on."""
+        if self._history_on:
+            if not self.history_body.winfo_manager():
+                self.history_body.pack(fill="both", expand=True)
+        elif self.history_body.winfo_manager():
+            self.history_body.pack_forget()
+
+    def _set_history_page(self, key):
+        """Raise the list or the opened dataset. Same lift as the tabs."""
+        if key not in self._history_page_frames:
+            return
+        # The list page owns a search box, and it keeps Tk's focus through a
+        # raise — same trap as _set_menu_tab and _set_social_page.
+        self._stop_typing()
+        self._history_page = key
+        self._history_page_frames[key].tkraise()
+
+    def _history_note(self, text, transient=False):
+        """The line under the browser. Same two jobs as Social's: explain an
+        empty list, or confirm a copy that is otherwise invisible."""
+        if self._history_note_job is not None:
+            try:
+                self.root.after_cancel(self._history_note_job)
+            except Exception:
+                pass
+            self._history_note_job = None
+        self.history_note.config(text=text,
+                                 fg=ACCENT if transient else FG_DIM)
+        if transient:
+            def restore():
+                self._history_note_job = None
+                self._history_note(self._history_idle_note())
+            self._history_note_job = self.root.after(2500, restore)
+
+    def _history_idle_note(self):
+        if not self._history_entries:
+            return ("Nothing saved yet. A finished encounter appears here "
+                    f"once it has run {HISTORY_MIN_SECS:.0f}s and landed "
+                    f"{HISTORY_MIN_EVENTS} hits or heals.")
+        return ""
+
+    def _reload_history(self):
+        """Re-read the folder. The browser does not poll: a dataset lands when
+        an encounter ends, and re-reading a folder four times a second to
+        catch that would be the most expensive thing the menu does."""
+        self._history_entries = self._history.entries()
+        self._history_sig = None
+        self._rebuild_history()
+
+    def _rebuild_history(self, *_a):
+        """Redraw the dataset rows, gated on an actual change like Social's."""
+        q = self._history_query.get().strip().lower()
+        rows = self._history_entries
+        sig = (q, tuple(r["path"] for r in rows))
+        if sig == self._history_sig:
+            return
+        self._history_sig = sig
+        for w in self._history_row_widgets:
+            w.destroy()
+        self._history_row_widgets = []
+        # Name or zone, so "manfish" finds a dungeon's fights and "honey"
+        # finds a boss's.
+        shown = [r for r in rows
+                 if not q or q in r["name"].lower() or q in r["zone"].lower()]
+        for r in shown[:HISTORY_PAGE]:
+            self._history_row_widgets.append(
+                self._build_history_row(self.history_list, r))
+        total = len(rows)
+        if q:
+            text = f"{len(shown)} / {total}"
+        else:
+            text = f"{total} dataset{'' if total == 1 else 's'}"
+        # Said out loud rather than left as a short list: a browser that
+        # quietly stops at 200 looks like a browser that has seen everything.
+        if len(shown) > HISTORY_PAGE:
+            text += f"  ·  showing {HISTORY_PAGE}"
+        self.history_count.config(text=text)
+        if rows and not shown:
+            self._history_note("Nothing here matches that.")
+        else:
+            self._history_note(self._history_idle_note())
+        self._resize_scroll(self.history_canvas, self.history_list)
+
+    @staticmethod
+    def _when_text(at):
+        """A dataset's timestamp, with the date only when it isn't today.
+
+        Same rule as the rift report card's title, and for the same reason:
+        "17:30" on a dataset from last Tuesday reads as this evening."""
+        lt = time.localtime(at)
+        fmt = ("%H:%M" if time.strftime("%Y%m%d", lt) == time.strftime("%Y%m%d")
+               else "%b %d %H:%M")
+        return time.strftime(fmt, lt)
+
+    def _build_history_row(self, parent, r):
+        """One dataset line: what it was, when, and how big."""
+        row = tk.Frame(parent, bg=BG_BODY)
+        row.pack(fill="x", pady=1)
+        rift = r["kind"] == "rift"
+        # A rift is the one dataset that opens two ways, so it is marked. The
+        # colour is the report card's own, which is where clicking it goes.
+        tk.Label(row, text="◆" if rift else " ", bg=BG_BODY,
+                 fg=RIFT_GLOW if rift else FG_DIM,
+                 font=self.fonts_m["mono"], width=1).pack(side="left")
+        tk.Label(row, text=r["name"][:HISTORY_NAME_CELLS], bg=BG_BODY,
+                 fg=FG_VALUE if rift else FG_TEXT, font=self.fonts_m["mono"],
+                 width=HISTORY_NAME_CELLS, anchor="w").pack(side="left")
+        tk.Label(row, text=self._when_text(r["at"]), bg=BG_BODY, fg=FG_DIM,
+                 font=self.fonts_m["mono"], width=HISTORY_WHEN_CELLS,
+                 anchor="w").pack(side="left")
+        tk.Label(row, text=f"{self._mmss(r['duration'])}  {int(r['total']):,}",
+                 bg=BG_BODY, fg=FG_DIM, font=self.fonts_m["mono"],
+                 width=HISTORY_META_CELLS, anchor="w").pack(side="left")
+
+        def mini(text, cmd):
+            b = tk.Button(row, text=text, command=cmd,
+                          font=self.fonts_m["ui"], bg=BG_BODY_SOFT,
+                          fg=FG_TEXT, activebackground=BG_BAR_TRACK,
+                          activeforeground=FG_VALUE, relief="flat", bd=0,
+                          padx=8, pady=1, highlightthickness=1,
+                          highlightbackground=BG_BAR_TRACK, cursor="hand2")
+            b.pack(side="right", padx=(4, 0))
+            return b
+
+        # Packed right-to-left, so Details ends up left of Report.
+        mini("Details", self._enqueue(
+            lambda s=r: self._open_history_entry(s)))
+        if rift:
+            mini("Report", self._enqueue(
+                lambda s=r: self._open_history_report(s)))
+        return row
+
+    def _open_history_entry(self, summary):
+        """Open one dataset's breakdown — the page the card has no room for."""
+        entry = self._history.load(summary["path"])
+        if entry is None:
+            self._history_note("That dataset couldn't be read.",
+                               transient=True)
+            return
+        self._history_detail = entry
+        self._render_history_detail()
+        self._set_history_page("detail")
+
+    def _open_history_report(self, summary):
+        """A saved rift, back on screen AS a rift report.
+
+        This replaces what 'Last Rift Report' will show, deliberately: the
+        card you are looking at is the last report you opened, and having the
+        button re-open a different one would be the surprise."""
+        entry = self._history.load(summary["path"])
+        data = (entry or {}).get("data") or {}
+        if not isinstance(data.get("phases"), list):
+            self._history_note("That dataset isn't a rift report.",
+                               transient=True)
+            return
+        self._report_data = data
+        self._open_report_card()
+
+    @staticmethod
+    def _merge_history_skills(table, names, limit=HISTORY_DETAIL_SKILLS):
+        """A saved per-skill table, merged by display name.
+
+        The same rule as the live breakdown's _merge_named — all weapons'
+        base "Attack" is one row — but reading the names the DATASET was
+        saved with rather than the running session's. A dataset opened from
+        another session must not be renamed by whatever this session happens
+        to have learned."""
+        merged: dict[str, list] = defaultdict(lambda: [0, 0.0, 0])
+        for sid, vals in (table or {}).items():
+            label = (names or {}).get(sid) or _pretty_id(sid)
+            m = merged[label]
+            m[0] += vals[0]; m[1] += vals[1]; m[2] += vals[2]
+        out = sorted(((label, v[1], v[0], v[2]) for label, v in merged.items()),
+                     key=lambda t: -t[1])
+        return out[:limit]
+
+    def _render_history_detail(self):
+        """Draw the opened dataset. Rift and ordinary encounters differ only
+        in that a rift has two phases; everything below the phase heading is
+        the same code, which is the point of storing them the same way."""
+        entry = self._history_detail
+        if entry is None:
+            return
+        for w in self.history_detail_list.winfo_children():
+            w.destroy()
+        data = entry.get("data") or {}
+        names = data.get("skill_names") or {}
+        lt = time.localtime(float(entry.get("at") or 0.0))
+        where = (entry.get("zone") or {}).get("label") or ""
+        self.history_detail_title.config(
+            text=f"{entry.get('name') or 'Encounter'}"
+                 f"   ·   {time.strftime('%b %d, %H:%M', lt)}"
+                 + (f"   ·   {where}" if where else ""))
+
+        parent = self.history_detail_list
+
+        def line(text, font="mono_sm", fg=FG_TEXT, pady=0, indent=0):
+            tk.Label(parent, text=(" " * indent) + text, bg=BG_BODY, fg=fg,
+                     font=self.fonts_m[font], anchor="w", justify="left",
+                     pady=pady).pack(fill="x")
+
+        def heading(text):
+            row = tk.Frame(parent, bg=BG_BODY)
+            row.pack(fill="x", pady=(8, 3))
+            tk.Label(row, text=text, bg=BG_BODY, fg=ACCENT,
+                     font=self.fonts_m["ui_sm_b"], anchor="w").pack(side="left")
+            tk.Frame(row, bg=BG_BAR_TRACK, height=1).pack(
+                side="left", fill="x", expand=True, padx=(8, 0))
+
+        def section_for(label, duration, players, total, heal, targets):
+            heading(label.upper())
+            line(f"{self._mmss(duration)}   ·   {int(total):,} dmg   ·   "
+                 f"{int(heal):,} heal", fg=FG_DIM)
+            if targets:
+                top = sorted(targets.items(), key=lambda kv: -kv[1])[:4]
+                line("hit: " + " · ".join(
+                    f"{_boss_label(k)} {int(v):,}" for k, v in top),
+                    fg=FG_DIM)
+            if not players:
+                line("nothing was recorded", fg=FG_DIM, pady=6)
+                return
+            for p in players:
+                dmg = float(p.get("total") or 0.0)
+                hits = int(p.get("hits") or 0)
+                pct = dmg / total * 100 if total else 0.0
+                crit = (int(p.get("crits") or 0) / hits * 100) if hits else 0.0
+                # Rate first, then the total it came from — the same order
+                # the rift card uses, through the same helper, so a phase too
+                # short to have a rate is silent about it in both places.
+                bits = [b for b in (_rate_text(dmg, duration, "dps"),
+                                    f"{int(dmg):,} dmg") if b]
+                bits += [f"{pct:.0f}%", f"{hits} hits", f"{crit:.0f}% crit"]
+                if (p.get("heal") or 0.0) > 0.5:
+                    bits.append(f"{int(p['heal']):,} heal"
+                                + _overheal_note(p, " ({:.0f}% over)"))
+                if p.get("kills"):
+                    bits.append(f"{p['kills']} kills")
+                tk.Label(parent, text=("* " if p.get("is_me") else "  ")
+                         + (p.get("name") or "?"),
+                         bg=BG_BODY, fg=FG_VALUE if p.get("is_me") else FG_TEXT,
+                         font=self.fonts_m["ui_b"], anchor="w").pack(
+                    fill="x", pady=(6, 0))
+                line(" · ".join(bits), fg=FG_DIM, indent=2)
+                for label_, tot, n, crits in self._merge_history_skills(
+                        p.get("skills"), names):
+                    share = tot / dmg * 100 if dmg else 0.0
+                    line(f"{label_[:26]:<26} {int(tot):>10,} "
+                         f"{share:>5.1f}%  {n:>5} hits", indent=4)
+                for label_, tot, n, _c in self._merge_history_skills(
+                        p.get("heals"), names):
+                    # HEAL_BAR, not the report card's REPORT_HEAL: that green
+                    # is picked to read on the card's near-black body and is
+                    # nearly invisible on the menu's parchment.
+                    line(f"{('+ ' + label_)[:26]:<26} {int(tot):>10,} "
+                         f"{'':>6}  {n:>5} casts", indent=4,
+                         fg=HEAL_BAR)
+
+        if isinstance(data.get("phases"), list):
+            for ph in data["phases"]:
+                section_for(ph.get("label") or "Phase",
+                            float(ph.get("duration") or 0.0),
+                            ph.get("players") or [],
+                            float(ph.get("total") or 0.0),
+                            float(ph.get("heal") or 0.0),
+                            ph.get("targets") or {})
+        else:
+            # The mode is not decoration here: it says who is missing. A
+            # party dataset's percentages are shares of the party, and
+            # reading them as shares of the fight would be wrong.
+            mode = entry.get("mode")
+            label = "Encounter" + ({"party": " — party only",
+                                    "all": " — all players"}.get(mode, ""))
+            section_for(label, float(data.get("duration") or 0.0),
+                        data.get("players") or [],
+                        float(data.get("total") or 0.0),
+                        float(data.get("heal") or 0.0),
+                        data.get("targets") or {})
+            if data.get("carried"):
+                line("")
+                line(f"the last {data.get('carried_secs', 0):.0f}s "
+                     f"({data['carried']} events) also open the dataset that "
+                     "follows this one — a boss pull moves them, it does not "
+                     "split them.", fg=FG_DIM, font="ui_tiny_i")
+        self._resize_scroll(self.history_detail_canvas,
+                            self.history_detail_list)
+
+    def _history_text(self, entry):
+        """The opened dataset as chat-pasteable lines."""
+        data = entry.get("data") or {}
+        names = data.get("skill_names") or {}
+        out = [f"Farever+ — {entry.get('name') or 'Encounter'}"]
+        where = (entry.get("zone") or {}).get("label")
+        if where:
+            out.append(f"({where}, "
+                       + time.strftime("%Y-%m-%d %H:%M",
+                                       time.localtime(entry.get("at") or 0))
+                       + ")")
+
+        def block(label, duration, players, total, heal):
+            out.append(f"== {label} — {self._mmss(duration)}, "
+                       f"{int(total):,} dmg, {int(heal):,} heal ==")
+            for p in players[:10]:
+                dmg = float(p.get("total") or 0.0)
+                pct = dmg / total * 100 if total else 0.0
+                rate = _rate_text(dmg, duration, "dps")
+                out.append(f"  {p.get('name') or '?'}: "
+                           + (f"{rate} " if rate else "")
+                           + f"({int(dmg):,}, {pct:.1f}%)")
+                for lbl, tot, n, _c in self._merge_history_skills(
+                        p.get("skills"), names, 5):
+                    out.append(f"     {lbl}: {int(tot):,} ({n} hits)")
+
+        if isinstance(data.get("phases"), list):
+            for ph in data["phases"]:
+                block(ph.get("label") or "Phase",
+                      float(ph.get("duration") or 0.0),
+                      ph.get("players") or [],
+                      float(ph.get("total") or 0.0),
+                      float(ph.get("heal") or 0.0))
+        else:
+            block("Encounter", float(data.get("duration") or 0.0),
+                  data.get("players") or [],
+                  float(data.get("total") or 0.0),
+                  float(data.get("heal") or 0.0))
+        return "\n".join(out)
+
+    def _copy_history(self):
+        if self._history_detail is None:
+            return
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(
+                self._history_text(self._history_detail))
+        except tk.TclError as e:
+            print(f"[meter] couldn't copy the dataset: {e}", file=sys.stderr)
+            return
+        self._history_note("Copied to clipboard.", transient=True)
 
     def _save_rift_report(self, report):
         """The report into parses/, three ways: .json is the full metrics —
@@ -6575,24 +7546,34 @@ class Overlay:
         """The plaintext version — chat-pasteable lines, no box drawing."""
         out = ["Farever+ Rift Report"]
         for ph in data["phases"]:
-            out.append(f"== {ph['label']} — {self._mmss(ph['duration'])}, "
-                       f"{int(ph['total']):,} dmg, {int(ph['heal']):,} heal"
-                       + _overheal_note(ph, " ({:.0f}% overheal)")
-                       + " ==")
+            dur = ph["duration"]
+            # Rate first here too. The card, the image and this line are three
+            # renderings of one report, and a paste that ranked people by a
+            # different number than the picture would be its own bug report.
+            dps = _rate_text(ph["total"], dur, "DPS")
+            hps = _rate_text(ph["heal"], dur, "HPS")
+            out.append(f"== {ph['label']} — {self._mmss(dur)}, "
+                       f"{dps or '— DPS'}, {hps or '— HPS'} "
+                       f"({int(ph['total']):,} dmg, {int(ph['heal']):,} heal"
+                       + _overheal_note(ph, ", {:.0f}% overheal") + ") ==")
             players = ph["players"]
             if not players:
                 out.append("  (nothing recorded)")
                 continue
             for i, p in enumerate(players[:5], 1):
                 pct = p["total"] / ph["total"] * 100 if ph["total"] else 0.0
+                rate = _rate_text(p["total"], dur, "dps")
                 out.append(f"  dmg {i}. {_report_name(p)} "
-                           f"{int(p['total']):,} ({pct:.1f}%)")
+                           + (f"{rate} " if rate else "")
+                           + f"({int(p['total']):,}, {pct:.1f}%)")
             healers = sorted((p for p in players if p["heal"] > 0.5),
                              key=lambda p: -p["heal"])
             for i, p in enumerate(healers[:5], 1):
                 pct = p["heal"] / ph["heal"] * 100 if ph["heal"] else 0.0
+                rate = _rate_text(p["heal"], dur, "hps")
                 out.append(f"  heal {i}. {_report_name(p)} "
-                           f"{int(p['heal']):,} ({pct:.1f}%"
+                           + (f"{rate} " if rate else "")
+                           + f"({int(p['heal']):,}, {pct:.1f}%"
                            + _overheal_note(p, ", {:.0f}% over") + ")")
             if ph["elements"]:
                 out.append("  types: " + " · ".join(
@@ -7733,143 +8714,6 @@ class Overlay:
         self._save_settings()
         self._refresh_visibility()
 
-    def _rebuild_mounts(self, kinds):
-        """The favorites checklist, rebuilt whenever the hook's unlock list
-        changes (including from empty, at attach). Three columns keep ~30
-        mounts to ~10 rows, so the Mounts tab stays in the same size class as
-        the other pages."""
-        for w in self.mounts_box.winfo_children():
-            w.destroy()
-        self._mount_vars = {}
-        if not kinds:
-            tk.Label(self.mounts_box,
-                     text=("Waiting for the game — the list fills in once "
-                           "the meter is attached and your hero has loaded."),
-                     bg=BG_BODY, fg=FG_DIM, font=self.fonts_m["ui_tiny_i"],
-                     anchor="w", justify="left",
-                     wraplength=WARN_WRAP).grid(row=0, column=0, sticky="w")
-            return
-        # Two columns, ordered by what the labels SAY: real display names are
-        # longer than the old ids (three columns overflowed the panel), and a
-        # list sorted by backend id looks shuffled once the labels don't
-        # start with the same words.
-        cols = 2
-        kinds = sorted(kinds, key=lambda k: _mount_label(k).lower())
-        for i, kind in enumerate(kinds):
-            var = tk.BooleanVar(value=kind in self._mount_favs)
-            cb = tk.Checkbutton(
-                self.mounts_box, text=_mount_label(kind), variable=var,
-                command=self._enqueue(lambda k=kind: self._toggle_mount_fav(k)),
-                bg=BG_BODY, fg=FG_TEXT, activebackground=BG_BODY,
-                activeforeground=FG_VALUE, selectcolor=BG_BODY_SOFT,
-                font=self.fonts_m["ui"], anchor="w",
-                highlightthickness=0, bd=0, cursor="hand2")
-            cb.grid(row=i // cols, column=i % cols, sticky="w", padx=(0, 10))
-            self._mount_vars[kind] = var
-
-    def _toggle_mount_random(self):
-        self._mount_random = not self._mount_random
-        self._save_settings()
-        self._push_mount_cfg()
-
-    def _on_mount_mode_pick(self, value):
-        # Queued like every other dropdown: it mutates state the refresh
-        # loop reads, and Tk isn't thread-safe.
-        self._enqueue(lambda: self._set_mount_mode(value))()
-
-    def _set_mount_mode(self, value):
-        if value not in MOUNT_MODES:
-            return
-        self._mount_mode = value
-        self._save_settings()
-        self._push_mount_cfg()
-
-    def _toggle_mount_fav(self, kind):
-        # The Checkbutton's var has already flipped by the time this runs on
-        # the queue — sync the set from it rather than toggling blind.
-        var = self._mount_vars.get(kind)
-        if var is None:
-            return
-        if var.get():
-            self._mount_favs.add(kind)
-        else:
-            self._mount_favs.discard(kind)
-        self._save_settings()
-        self._push_mount_cfg()
-
-    def _push_mount_cfg(self):
-        """Hand the standing mount config to the hook. Also called once at
-        startup (main), because the agent boots with the feature off."""
-        self._configure(mounts={"enabled": bool(self._mount_random),
-                                "mode": self._mount_mode.lower(),
-                                "favorites": sorted(self._mount_favs)})
-
-    def _rebuild_gliders(self, kinds):
-        """The glider favorites checklist — same layout rules as
-        _rebuild_mounts (two columns, sorted by display name)."""
-        for w in self.gliders_box.winfo_children():
-            w.destroy()
-        self._glider_vars = {}
-        if not kinds:
-            tk.Label(self.gliders_box,
-                     text=("Waiting for the game — the list fills in once "
-                           "the meter is attached and your hero has loaded."),
-                     bg=BG_BODY, fg=FG_DIM, font=self.fonts_m["ui_tiny_i"],
-                     anchor="w", justify="left",
-                     wraplength=WARN_WRAP).grid(row=0, column=0, sticky="w")
-            return
-        cols = 2
-        kinds = sorted(kinds, key=lambda k: _glider_label(k).lower())
-        for i, kind in enumerate(kinds):
-            var = tk.BooleanVar(value=kind in self._glider_favs)
-            cb = tk.Checkbutton(
-                self.gliders_box, text=_glider_label(kind), variable=var,
-                command=self._enqueue(
-                    lambda k=kind: self._toggle_glider_fav(k)),
-                bg=BG_BODY, fg=FG_TEXT, activebackground=BG_BODY,
-                activeforeground=FG_VALUE, selectcolor=BG_BODY_SOFT,
-                font=self.fonts_m["ui"], anchor="w",
-                highlightthickness=0, bd=0, cursor="hand2")
-            cb.grid(row=i // cols, column=i % cols, sticky="w", padx=(0, 10))
-            self._glider_vars[kind] = var
-
-    def _toggle_glider_random(self):
-        self._glider_random = not self._glider_random
-        self._save_settings()
-        self._push_glider_cfg()
-
-    def _on_glider_mode_pick(self, value):
-        # Queued like every other dropdown: it mutates state the refresh
-        # loop reads, and Tk isn't thread-safe.
-        self._enqueue(lambda: self._set_glider_mode(value))()
-
-    def _set_glider_mode(self, value):
-        if value not in MOUNT_MODES:
-            return
-        self._glider_mode = value
-        self._save_settings()
-        self._push_glider_cfg()
-
-    def _toggle_glider_fav(self, kind):
-        # The Checkbutton's var has already flipped by the time this runs on
-        # the queue — sync the set from it rather than toggling blind.
-        var = self._glider_vars.get(kind)
-        if var is None:
-            return
-        if var.get():
-            self._glider_favs.add(kind)
-        else:
-            self._glider_favs.discard(kind)
-        self._save_settings()
-        self._push_glider_cfg()
-
-    def _push_glider_cfg(self):
-        """Hand the standing glider config to the hook. Also called once at
-        startup (main), because the agent boots with the feature off."""
-        self._configure(gliders={"enabled": bool(self._glider_random),
-                                 "mode": self._glider_mode.lower(),
-                                 "favorites": sorted(self._glider_favs)})
-
     def _sort_btn_text(self):
         return "▼ Healing" if self._sort_heal else "▼ Damage"
 
@@ -7933,6 +8777,8 @@ class Overlay:
         self.menu_nav.config(width=int(MENU_NAV_W * self._scales["menu"]))
         for c in (self.social_canvas, self.session_canvas):
             c.config(height=int(SOCIAL_LIST_H * self._scales["menu"]))
+        for c in (self.history_canvas, self.history_detail_canvas):
+            c.config(height=int(HISTORY_LIST_H * self._scales["menu"]))
         self.social_note.config(
             wraplength=int(WARN_WRAP * self._scales["menu"]))
         self.root.update_idletasks()
@@ -8004,6 +8850,19 @@ class Overlay:
     def on_boss_kill(self):
         """A boss died: its bar went down with its last health reading at 0."""
         self._enqueue(lambda: self.sounds.play("victory"))()
+
+    def on_boss_giveup(self):
+        """The fight ended without a kill — the boss reset, or the group
+        wiped — and the meter was cleared for the next attempt.
+
+        No cue. The victory sound is a reward and the pull sound is a
+        starting gun; there is nothing to announce about a fight that just
+        stopped, and the player already knows. What they need is to see that
+        the meter did something, which the toast says — the same line the kill
+        time uses, in its plain colour rather than the record gold."""
+        self._enqueue(
+            lambda: self._show_kill_toast("FIGHT RESET — METER CLEARED",
+                                          best=False))()
 
     def on_boss_timed_kill(self, kinds, secs):
         """The LAST boss bar went down killed — the fight is formally over and
@@ -8903,6 +9762,54 @@ class Overlay:
             self._social_note(self._social_idle_note())
         self._resize_scroll(self.session_canvas, self.session_list)
 
+    def _on_wheel(self, e):
+        """Scroll whichever list the cursor is over, wherever inside it.
+
+        Tk delivers <MouseWheel> to ONE widget, and it does not bubble to that
+        widget's parents. A canvas-and-inner-frame scroll list is entirely
+        covered by its own content, so binding the wheel to the canvas means
+        binding it to the one surface the cursor is never actually over — every
+        label and every button on top of it swallows the event instead.
+
+        Binding each child individually is what this replaces, and it failed
+        three ways: buttons were deliberately skipped (so the wheel died over
+        the Details/Report column of every row), the breakdown page built its
+        labels in a different function and bound none of them, and any content
+        rebuilt later came back unbound.
+
+        So there is one binding for the whole application, and it resolves the
+        target by geometry: find the widget under the pointer, then walk up its
+        widget PATH — a descendant's path is always its ancestor's path plus a
+        dot — until it lands in a registered scroll area. Nothing to keep in
+        sync, and content that appears later works without being told to.
+        """
+        try:
+            w = self.root.winfo_containing(e.x_root, e.y_root)
+        except (tk.TclError, KeyError):
+            return
+        if w is None:
+            return
+        path = str(w)
+        canvas, best = None, -1
+        for base, cv in self._scroll_areas.items():
+            if path == base or path.startswith(base + "."):
+                # The most deeply nested match wins, so a scroll list inside
+                # another one would still resolve to the inner list.
+                if len(base) > best:
+                    canvas, best = cv, len(base)
+        if canvas is None:
+            return
+        try:
+            # Only scroll when there is somewhere to scroll to, or tk clamps
+            # and the list twitches under the cursor on a short one.
+            first, last = canvas.yview()
+            if first <= 0.0 and last >= 1.0:
+                return
+            canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
+        except tk.TclError:
+            pass        # the list was destroyed between the event and here
+        return "break"
+
     @staticmethod
     def _resize_scroll(canvas, inner):
         """A rebuild changes the stack's height; without this the scrollregion
@@ -8968,15 +9875,6 @@ class Overlay:
             lambda s=steam64: self._open_url(STEAM_PROFILE_URL.format(s))), ok)
         mini("Copy ID", self._enqueue(
             lambda s=steam64, n=name: self._copy_steamid(n, s)), ok)
-        # Mouse wheel over a row must scroll the list it is IN, not stall on
-        # the child — and not scroll the other page's list either.
-        canvas = (self.session_canvas if parent is self.session_list
-                  else self.social_canvas)
-        for w in (row,) + tuple(row.winfo_children()):
-            if not isinstance(w, tk.Button):
-                w.bind("<MouseWheel>",
-                       lambda e, c=canvas: c.event_generate(
-                           "<MouseWheel>", delta=e.delta))
         return row
 
     def _copy_steamid(self, name, steam64):
@@ -9020,20 +9918,10 @@ class Overlay:
         self.btn_sounds.config(
             text=("☑  Enable sounds" if self._sounds_on
                   else "☐  Enable sounds"))
-        self.btn_mount_random.config(
-            text=("☑  Random favorite mount" if self._mount_random
-                  else "☐  Random favorite mount"))
-        mounts = self.ui_state.mounts()
-        if mounts != self._mounts_shown:
-            self._mounts_shown = mounts
-            self._rebuild_mounts(mounts)
-        self.btn_glider_random.config(
-            text=("☑  Random favorite glider" if self._glider_random
-                  else "☐  Random favorite glider"))
-        gliders = self.ui_state.gliders()
-        if gliders != self._gliders_shown:
-            self._gliders_shown = gliders
-            self._rebuild_gliders(gliders)
+        self.btn_history.config(
+            text=("☑  Keep a history of finished encounters"
+                  if self._history_on
+                  else "☐  Keep a history of finished encounters"))
         self.btn_auto_reset.config(
             text=("☑  Auto reset on boss pull" if self._auto_reset_boss
                   else "☐  Auto reset on boss pull"))
@@ -9107,6 +9995,35 @@ class Overlay:
             self._refresh_visibility()
         self._sync_game_ui()
 
+    def _hold_last(self, rows, duration):
+        """Keep the previous encounter on screen until the next one starts.
+
+        A reset empties the store instantly, and the meter used to go blank
+        with it — which is the one moment you most want to read it. A boss
+        pull wipes the meter to measure the pull; a wipe or a zone change
+        wipes it because the fight is over. In every case the numbers you were
+        looking at vanish at the exact instant they became final.
+
+        So the last non-empty set of rows is held and re-shown while the live
+        one has nothing in it. Nothing is faked: the rows, the totals and the
+        duration are all the previous encounter's own, frozen together, and
+        the header says LAST so it can't be mistaken for a live fight. The
+        first hit of the next encounter replaces them.
+
+        Returns (rows, duration, holding).
+        """
+        if rows:
+            # Held as a snapshot, not a reference: PlayerAgg copies come out
+            # of session.snapshot() already detached, but the LIST is ours to
+            # keep, and the sort above has already ordered it the way it was
+            # displayed.
+            self._held_rows = rows
+            self._held_duration = duration
+            return rows, duration, False
+        if not self._held_rows:
+            return rows, duration, False
+        return self._held_rows, self._held_duration, True
+
     def _refresh(self):
         self._apply_update_notice()
         # Polled here rather than pushed by the checker: the check runs on its
@@ -9148,6 +10065,10 @@ class Overlay:
         duration, in_combat = self.session.current()
         if in_combat:
             self._combat_seen_at = time.time()
+        # Everything above this line reads the LIVE encounter — the capture
+        # clock and the combat state must never be driven by held rows, or a
+        # meter showing yesterday's fight would keep its clock running.
+        rows, duration, holding = self._hold_last(rows, duration)
         self._refresh_visibility()
 
         # The header BAR carries the state; the header TEXT never changes, so a
@@ -9187,7 +10108,7 @@ class Overlay:
 
         self.overview_title.config(
             text=("PARTY" if self.mode == "party" else "ALL PLAYERS")
-            + f"   ({len(rows)})")
+            + f"   ({len(rows)})" + ("   · LAST" if holding else ""))
 
         focus = self._resolve_focus(rows)
         # Bars scale against the biggest number of their own kind on screen.
@@ -9295,32 +10216,18 @@ class Overlay:
         self.root.mainloop()
 
 
-_ITEM_NAMES = None
-
-
-def _item_names():
-    """id -> display name, from analysis_out/item_names.json — the game's own
-    data.cdb rows, extracted by emit_offsets.py on the same self-heal cycle as
-    the offsets. Loaded once; {} when the file is absent (an old analysis_out
-    before its regeneration, or the extraction failed and logged why)."""
-    global _ITEM_NAMES
-    if _ITEM_NAMES is None:
-        try:
-            _ITEM_NAMES = json.loads(
-                (ANALYSIS / "item_names.json").read_text(encoding="utf-8"))
-        except Exception:
-            _ITEM_NAMES = {}
-    return _ITEM_NAMES
-
-
 _UNIT_NAMES = None
 
 
 def _unit_names():
-    """Same as _item_names, for the cdb's unit sheet. Names the boss kill
-    toast: a bar's unit kind is routinely NOT the name the game shows on it
-    (measured: 'Cleodora' displays as 'Queen Honeyzabeth', 'Phrixes' as
-    'High Inquisitor Chakram' — the kind often names the LAIR, not the boss)."""
+    """kind -> display name, from analysis_out/unit_names.json — the game's
+    own data.cdb rows, extracted by emit_offsets.py on the same self-heal
+    cycle as the offsets. Loaded once; {} when the file is absent.
+
+    Names the boss kill toast and every combat history dataset: a unit's kind
+    is routinely NOT the name the game shows (measured: 'Cleodora' displays as
+    'Queen Honeyzabeth', 'Phrixes' as 'High Inquisitor Chakram' — the kind
+    often names the LAIR, not the boss)."""
     global _UNIT_NAMES
     if _UNIT_NAMES is None:
         try:
@@ -9371,27 +10278,6 @@ def _summon_label(kind):
     reduces to a plausible "Imp" — but it is a guess that happens to read well,
     and it degenerates to a raw id on every summon not named that way."""
     return _unit_names().get(kind) or _pretty_id(kind)
-
-
-def _mount_label(kind):
-    """The item's real display name ('Mount_Aries_05' -> 'Aegis'), falling
-    back to the prettified id for anything the name table doesn't carry —
-    a kind a patch added is still tickable, just under its backend name."""
-    nm = _item_names().get(kind)
-    if nm:
-        return nm
-    base = kind[6:] if kind.startswith("Mount_") else kind
-    return base.replace("_", " ")
-
-
-def _glider_label(kind):
-    """Same as _mount_label for gliders ('Glider_FlyingFish_Demon' ->
-    'Niflelian Wingfish')."""
-    nm = _item_names().get(kind)
-    if nm:
-        return nm
-    base = kind[7:] if kind.startswith("Glider_") else kind
-    return base.replace("_", " ")
 
 
 def _lerp_hex(a, b, t):
@@ -9658,8 +10544,7 @@ DATA_STAMP = ANALYSIS / ".data_stamp.json"
 # `if (!OFF.Entity || !OFF.ArrayObj) return`, which fails silently forever.
 # Add to these lists whenever the hook starts reading something new.
 REQUIRED_RESOLVER_KEYS = ("anchors", "boss_fns", "boss_targets", "cam_targets",
-                          "count_targets", "funcs", "glider_targets",
-                          "mount_targets", "ui_targets")
+                          "count_targets", "funcs", "ui_targets")
 # The minimap's half of the offsets. The combat half (DamageResult, HitData,
 # ...) is deliberately not listed wholesale: it has been there since the first
 # release, so it can't be what an upgrade is missing, and a list that mentions
@@ -9693,12 +10578,12 @@ REQUIRED_OFFSET_KEYS = ("Activity", "ArrayObj", "BossInfo", "BossesInfo",
                         # hostname, see TESTING.md) and the backdrop never
                         # draws.
                         "GameLayer.world", "World.level",
-                        # The random-favorite mount. Player has existed since
-                        # the party meter; the collection walk is what a
-                        # pre-3.2 file is missing, and hookMountSwap refuses
-                        # to arm without it.
-                        "Player.accountProgress", "AccountProgress",
-                        "Collection", "ArrayProxyData", "ArrayDyn",
+                        # The party roster's array walk (Group.players is an
+                        # hxbit proxy, not a plain array). Arrived with the
+                        # retired mount feature's collection walk and stayed
+                        # when that went: the roster reads through the same
+                        # two hops.
+                        "ArrayProxyData", "ArrayDyn",
                         # Ore/herb nodes. A pre-3.2.1 file lacks the group and
                         # sweepArray quietly draws no nodes at all.
                         "Gatherable",
@@ -9708,11 +10593,6 @@ REQUIRED_OFFSET_KEYS = ("Activity", "ArrayObj", "BossInfo", "BossesInfo",
                         # every pet's damage silently vanishes from the parse
                         # exactly as it did before the feature existed.
                         "foeClasses",
-                        # The random-favorite glider. Collection has existed
-                        # since 3.2; the gliders list is what a pre-3.2.2 file
-                        # is missing, and hookGliderEquip refuses to arm
-                        # without it.
-                        "Collection.gliders",
                         # The Social tab's shard roster. Player, Hero and
                         # GameLayer have all existed for releases, so their
                         # presence proves nothing — these five subkeys are what
@@ -9722,7 +10602,15 @@ REQUIRED_OFFSET_KEYS = ("Activity", "ArrayObj", "BossInfo", "BossesInfo",
                         # like a stale data directory: exactly the silent
                         # upgrade failure this list exists to prevent.
                         "Player.uid", "Player.hero", "GameLayer.players",
-                        "Hero.kind", "Hero.level")
+                        "Hero.kind", "Hero.level",
+                        # Naming a hit's target, which is what names a combat
+                        # history dataset. A pre-3.5 file has no unit class
+                        # list, and without it the hook refuses to read
+                        # `Unit.kind` off a DamageResult.target (typed
+                        # ent.GameObject, so the field may not be there at
+                        # all) — every dataset would fall back to its zone
+                        # name alone.
+                        "DamageResult.target", "unitClasses")
 
 
 def _data_is_current():
@@ -9756,16 +10644,11 @@ def _data_is_current():
             print(f"[meter] {name} predates this build — missing "
                   f"{', '.join(missing)}; regenerating.", file=sys.stderr)
             return False
-    # item_names.json arrived with the Mounts tab (3.2). The generators only
-    # re-run when this returns False, so an upgrade over an older analysis_out
-    # has to fail here once or the tab shows backend ids until the next game
-    # patch. Existence only — its content is cosmetic and self-describing.
-    if not (ANALYSIS / "item_names.json").exists():
-        print("[meter] item_names.json absent — regenerating for the mount "
-              "labels.", file=sys.stderr)
-        return False
-    # unit_names.json arrived with the boss kill timer (3.4) — same upgrade
-    # trap, same fix.
+    # unit_names.json arrived with the boss kill timer (3.4). The generators
+    # only re-run when this returns False, so an upgrade over an older
+    # analysis_out has to fail here once or bosses and history datasets show
+    # backend ids until the next game patch. Existence only — its content is
+    # cosmetic and self-describing.
     if not (ANALYSIS / "unit_names.json").exists():
         print("[meter] unit_names.json absent — regenerating for the boss "
               "names.", file=sys.stderr)
@@ -10088,6 +10971,12 @@ def render_parse_image(data, path):
 # any window opacity and works with the card closed. Same two-column layout,
 # same tiering, same palette, so a paste reads as the card it came from.
 RIFT_IMG_COL_W = 350
+# The leaderboard's right-hand gutters, measured back from the column edge:
+# the share sits in the first, the total in the second, and the rate — the
+# headline — takes whatever is left before the name. Named because the rows
+# and their column heading both align to them and must not drift apart.
+RIFT_IMG_PCT_W = 40
+RIFT_IMG_TOT_W = 72
 RIFT_IMG_PAD = 20
 RIFT_IMG_GAP = 26
 
@@ -10140,11 +11029,19 @@ def render_rift_report_image(data, path=None):
         y = 52
         d.text((cx, y), ph["label"].upper(), font=ui, fill=RIFT_PEAK)
         y += 24
+        # Rates first, totals under them — the same primary/subtext pairing
+        # the on-screen card uses, because this image IS that card to anyone
+        # it gets pasted to.
+        dps = _rate_text(ph["total"], ph["duration"], "DPS")
+        hps = _rate_text(ph["heal"], ph["duration"], "HPS")
         d.text((cx, y), f"{Overlay._mmss(ph['duration'])}  ·  "
-               f"{int(ph['total']):,} dmg  ·  {int(ph['heal']):,} heal"
-               + _overheal_note(ph),
+               f"{dps or '— DPS'}  ·  {hps or '— HPS'}",
+               font=ui, fill=RIFT_TIME)
+        y += 20
+        d.text((cx, y), f"{int(ph['total']):,} dmg  ·  "
+               f"{int(ph['heal']):,} heal" + _overheal_note(ph),
                font=ui_small, fill=RIFT_TITLE)
-        y += 24
+        y += 22
         players = ph["players"]
         if not players:
             d.text((cx, y), "nothing was recorded for this phase",
@@ -10161,18 +11058,29 @@ def render_rift_report_image(data, path=None):
                                            font=ui_mvp), y + 12),
                    mvp["cls"], font=ui_small, fill=RIFT_TITLE)
         y += 30
-        d.text((cx + 28, y), f"{int(mvp['total']):,} damage",
-               font=ui_small, fill=RIFT_TIME)
-        y += 18
+        mvp_dps = _rate_text(mvp["total"], ph["duration"], "DPS")
+        mvp_total = f"{int(mvp['total']):,} damage"
+        d.text((cx + 28, y), mvp_dps or mvp_total, font=ui, fill=RIFT_TIME)
+        y += 19
+        if mvp_dps:
+            d.text((cx + 28, y), mvp_total, font=ui_small, fill=RIFT_TITLE)
+            y += 17
         healer = max(players, key=lambda p: p["heal"])
         if healer["heal"] > 0.5:
+            hps_txt = _rate_text(healer["heal"], ph["duration"], "HPS")
+            heal_total = f"{int(healer['heal']):,} heal"
+            who = Overlay._elide_name(healer["name"])
+            if healer.get("cls"):
+                who += f" ({healer['cls']})"
             plus(cx + 8, y + 9, 7, REPORT_HEAL)
-            d.text((cx + 22, y), f"{Overlay._elide_name(healer['name'])}"
-                   + (f" ({healer['cls']})" if healer.get("cls") else "")
-                   + f"   {int(healer['heal']):,} heal"
-                   + _overheal_note(healer, "   {:.0f}% over"),
+            d.text((cx + 22, y), f"{who}   {hps_txt or heal_total}",
                    font=ui_rank, fill=REPORT_HEAL)
-            y += 22
+            y += 20
+            if hps_txt:
+                d.text((cx + 22, y),
+                       heal_total + _overheal_note(healer, "   {:.0f}% over"),
+                       font=ui_small, fill=RIFT_TITLE)
+                y += 17
 
         def rank_rows(y, entries, total, key):
             for i, p in enumerate(entries[:5], 1):
@@ -10192,23 +11100,45 @@ def render_rift_report_image(data, path=None):
                     d.text((cx + 22 + d.textlength(nm, font=nfont),
                             y + (5 if top3 else 2)),
                            p["cls"], font=mono_small, fill=RIFT_TITLE)
+                # Three numbers in two weights: the RATE is the headline, the
+                # total it came from and the share it represents are subtext.
+                # Right-aligned to fixed gutters so the columns line up down
+                # the card however wide the numbers run.
                 amt = f"{int(p[key]):,}"
-                pct = p[key] / total * 100 if total else 0.0
-                d.text((cx + RIFT_IMG_COL_W - 44
-                        - d.textlength(amt, font=mono), y + 2),
-                       amt, font=mono, fill=RIFT_TIME)
+                pct = f"{p[key] / total * 100 if total else 0.0:.0f}%"
+                rate = _rate(p[key], ph["duration"])
+                rate_s = "—" if rate is None else f"{rate:,.0f}"
                 d.text((cx + RIFT_IMG_COL_W
-                        - d.textlength(f"{pct:.0f}%", font=mono_small), y + 3),
-                       f"{pct:.0f}%", font=mono_small, fill=RIFT_TITLE)
+                        - d.textlength(pct, font=mono_small), y + 3),
+                       pct, font=mono_small, fill=RIFT_TITLE)
+                d.text((cx + RIFT_IMG_COL_W - RIFT_IMG_PCT_W
+                        - d.textlength(amt, font=mono_small), y + 3),
+                       amt, font=mono_small, fill=RIFT_TITLE)
+                d.text((cx + RIFT_IMG_COL_W - RIFT_IMG_PCT_W - RIFT_IMG_TOT_W
+                        - d.textlength(rate_s, font=mono), y + 2),
+                       rate_s, font=mono, fill=RIFT_TIME)
                 y += 22 if top3 else 19
             return y
 
+        def rank_header(y, rate_label):
+            """Names the three columns once. Same gutters as rank_rows, so the
+            heading sits directly over the numbers it names."""
+            for text, gutter in ((("SHARE"), 0),
+                                 (("TOTAL"), RIFT_IMG_PCT_W),
+                                 ((rate_label), RIFT_IMG_PCT_W + RIFT_IMG_TOT_W)):
+                d.text((cx + RIFT_IMG_COL_W - gutter
+                        - d.textlength(text, font=mono_small), y),
+                       text, font=mono_small, fill=RIFT_TITLE)
+            return y + 15
+
         y = heading(cx, y + 6, "DAMAGE — TOP 5")
+        y = rank_header(y, "DPS")
         y = rank_rows(y, players, ph["total"], "total")
         healers = sorted((p for p in players if p["heal"] > 0.5),
                          key=lambda p: -p["heal"])
         y = heading(cx, y + 4, "HEALING — TOP 5")
         if healers:
+            y = rank_header(y, "HPS")
             y = rank_rows(y, healers, ph["heal"], "heal")
         else:
             d.text((cx, y), "no healing recorded", font=ui_small,
@@ -10678,6 +11608,14 @@ def _run(tray, session, ui_state, world, rift_rec, heal_sizer):
     # only place that says out loud that pet attribution is working, and on
     # which summons. See "Summon and pet damage".
     pet_seen: set = set()
+    # Unit kinds seen as the TARGET of a hit. Combat history names a dataset
+    # after whichever of these took the most damage, and if the read were
+    # silently returning nothing the only symptom would be datasets named for
+    # their zone alone — which looks like a design choice, not a break. These
+    # lines are what make that measurable from ordinary play. Capped so a busy
+    # world zone reports its bestiary once and then goes quiet.
+    target_seen: set = set()
+    TARGET_LOG_MAX = 40
 
     heal_log_at = [0.0]
 
@@ -10723,6 +11661,15 @@ def _run(tray, session, ui_state, world, rift_rec, heal_sizer):
                     pet_seen.add(sig)
                     print(f"[meter] summon damage: pet={sig[0]!r} "
                           f"credited to {sig[1]!r}", file=sys.stderr)
+            tgt = p.get("target")
+            if tgt and tgt not in target_seen:
+                if len(target_seen) < TARGET_LOG_MAX:
+                    print(f"[meter] hit target: {tgt!r} -> "
+                          f"{_boss_label(tgt)!r}", file=sys.stderr)
+                elif len(target_seen) == TARGET_LOG_MAX:
+                    print(f"[meter] ({TARGET_LOG_MAX} distinct hit targets "
+                          "named; no longer listing them)", file=sys.stderr)
+                target_seen.add(tgt)
             if not dropped:
                 session.record(p)
                 rift_rec.record("hit", p)
@@ -10744,19 +11691,6 @@ def _run(tray, session, ui_state, world, rift_rec, heal_sizer):
                     print(line, file=sys.stderr)
         elif k == "combat":
             session.set_combat(p.get("state") or {})
-        elif k == "mounts":
-            # The unlocked-mount list for the Mounts tab. Sent once the hook
-            # can walk the collection, then only when the set changes.
-            kinds = p.get("list") or []
-            ui_state.set_mounts(kinds)
-            print(f"[meter] mount collection: {len(kinds)} unlocked",
-                  file=sys.stderr)
-        elif k == "gliders":
-            # Same for the Gliders tab.
-            kinds = p.get("list") or []
-            ui_state.set_gliders(kinds)
-            print(f"[meter] glider collection: {len(kinds)} unlocked",
-                  file=sys.stderr)
         elif k == "world":
             world.update(p)
         elif k == "rift":
@@ -10874,6 +11808,31 @@ def _run(tray, session, ui_state, world, rift_rec, heal_sizer):
                             ov.show_rift_report(report)
                     if ov is not None:
                         ov.on_boss_kill()
+        elif k == "bossgone":
+            # Every boss bar has been down for ~5 seconds. The hook reports
+            # the observation and this decides what it meant: a kill has
+            # already cleared boss_fight_on, so a fight STILL latched here is
+            # one that ended without one — the boss reset and healed up, or
+            # the group wiped without a loading screen to notice it by.
+            #
+            # (A wipe usually does bring a loading screen, and the zone
+            # handler catches that one. This is the case it can't see: nobody
+            # died, the boss just de-aggroed and went home.)
+            if boss_fight_on[0]:
+                boss_fight_on[0] = False
+                boss_clock["t0"] = None    # an abandoned fight is not a time
+                print("[meter] boss fight ended without a kill (no boss bar "
+                      f"for {p.get('polls', 0)} polls) — pull reset re-armed",
+                      file=sys.stderr)
+                # Same setting, same reasoning as the pull reset: if you want
+                # the next attempt measured on its own, you want the failed
+                # one cleared off the meter too. Nothing is lost by it — the
+                # numbers stay on screen until the re-pull lands its first
+                # hit (see _hold_last), and combat history has already
+                # archived the attempt if it is on.
+                if ov is not None and ov.auto_reset_boss():
+                    session.reset()
+                    ov.on_boss_giveup()
         elif k == "pickup":
             # The hook counts items by `kind` across inventory AND equipment,
             # so this only fires when the hero genuinely gained one — moving a
@@ -10893,7 +11852,6 @@ def _run(tray, session, ui_state, world, rift_rec, heal_sizer):
                 if ov is not None:
                     ov.on_legendary_pickup()
         elif k == "zone":
-            ui_state.set_zone(p.get("sig"))
             # The first report after attach says where we already are — it
             # keys the map background but is not a loading screen, so nothing
             # resets on it.
@@ -10904,12 +11862,19 @@ def _run(tray, session, ui_state, world, rift_rec, heal_sizer):
                               for k in ("name", "branch", "world_map")
                               if p.get(k) is not None)
             if p.get("initial"):
+                ui_state.set_zone(p.get("sig"), p.get("world_map"))
                 print(f"[meter] zone identified ({p.get('sig')!r}"
                       + (f"; {extra}" if extra else "") + ")",
                       file=sys.stderr)
                 return
             ui_state.clear()      # the UI is rebuilt across a loading screen
+            # Reset BEFORE the new zone is recorded. The encounter being
+            # thrown away happened in the zone we are LEAVING, and it is
+            # archived under the zone the ui_state currently names — set the
+            # new one first and every dataset would be filed under wherever
+            # the loading screen dropped you.
             session.reset()
+            ui_state.set_zone(p.get("sig"), p.get("world_map"))
             # A loading screen mid-rift is a wipe or a walk-out, not a finished
             # run — the recording is abandoned, not reported.
             rift_rec.on_zone()
@@ -11070,11 +12035,6 @@ def _run(tray, session, ui_state, world, rift_rec, heal_sizer):
     overlay = Overlay(session, pid, ui_state, world, configure=configure_hook)
     # Push the starting rate, since the agent boots on its own default.
     overlay._set_map_rate(overlay._map_rate)
-    # Same for the mount/glider configs: the agent boots with both features
-    # off, and a saved "on" that never reached it would be a checkbox that
-    # lies.
-    overlay._push_mount_cfg()
-    overlay._push_glider_cfg()
     # From here the overlay owns shutdown: it's the only thing that can return
     # from the mainloop and let the finally below unload the hook and detach.
     _OVERLAY["ref"] = overlay

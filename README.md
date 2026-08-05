@@ -254,9 +254,10 @@ again.
 | Show / hide | Healing columns | columns inside the meter rather than a window, so it stays a tick |
 | Show / hide | Hide out of combat | fades both windows away a few seconds after the fighting stops |
 | Controls | Reset data | the keybind for resetting the encounter, `Shift + \` by default. Click it and press the combination you want. It needs a modifier (or an F-key, or a mouse button) — the meter *swallows* what it fires on, so a bare letter would cost you that key in game. **Middle click, Mouse 4 and Mouse 5 can be bound**; left and right never can. Takes effect immediately |
-| Controls | Auto reset on boss pull | wipes the encounter at the **start of every boss fight**, so the parse you end up with is that fight and nothing else. It keeps the last few seconds rather than wiping flat — the game's healthbar is what the pull is detected from and it refreshes on a timer, so the opening burst has already landed by the time the meter hears about it. Bosses only: elites raise the same bar, and resetting for every elite on the way to a boss would be useless |
+| Controls | Auto reset on boss pull | wipes the encounter at the **start of every boss fight**, so the parse you end up with is that fight and nothing else. It keeps the last few seconds rather than wiping flat — the game's healthbar is what the pull is detected from and it refreshes on a timer, so the opening burst has already landed by the time the meter hears about it. Bosses only: elites raise the same bar, and resetting for every elite on the way to a boss would be useless. It also clears the meter when a fight **ends without a kill** — the boss resets, or the group wipes — so the next attempt starts clean; the attempt you just made stays on screen until you re-pull (see [The last encounter stays up](#the-last-encounter-stays-up)) |
 | Compass | Collectibles / Party Members | what the bearing strip carries. Separate from the minimap's ticks below — the two panels answer different questions, and wanting chests on one but not the other is ordinary. Soulstones have no tick and always show |
 | Minimap | Collectibles / Players / Enemies / Activities | what the map draws, by category — orbs and chests share one tick, since nobody wants one without the other. Obelisks, respawn points and soulstones have no tick and are always drawn: they're the landmarks you navigate *by*. The compass isn't affected |
+| History | Keep a history of finished encounters | saves every encounter to disk instead of throwing it away — see [Combat history](#combat-history). Off by default; ticking it reveals the folder path and the browser |
 | Actions | 60s Parse Mode | see below |
 | Actions | Parse Screenshots | opens `parses/` in Explorer (created on the spot if you haven't run one yet) |
 | Reset | Reset encounter data (`Shift+\`) | the same reset the hotkey fires — the label carries the keybind because that's the one you want mid-fight, when the escape menu isn't an option |
@@ -515,6 +516,99 @@ the game still owns the cursor when it appears, press `Esc` to free it — the
 control menu stays hidden while the prompt is up precisely so `Esc` does nothing
 but hand the mouse back.
 
+### The end-of-rift report
+
+Kill a rift's boss and a report card freezes over the game: two columns, the
+**Rift phase** (the trash clear) beside the **Boss phase**, because those are
+carried by different players on purpose.
+
+The card ranks on **DPS and HPS**. Each block leads with the rate and carries
+the total it came from underneath in a quieter colour, and the leaderboards
+show rate, total and share side by side under a labelled header. Each phase
+divides by its own length — the two run for very different times, and sharing a
+divisor would make the comparison the card exists for meaningless.
+
+A phase too short to have a meaningful rate (a boss pulled the instant the
+trash died) shows `—` rather than a made-up number, and falls back to showing
+its totals.
+
+**Copy** puts it on the clipboard as an image, so it pastes into chat looking
+like the card. It's rendered from the numbers rather than screenshotted, so
+whatever is behind the card can't bleed into it; if the clipboard or Pillow
+declines it falls back to plain text. Every report is also written to `parses/`
+as `.json`, `.txt` and `.png` the moment it exists — before the card is even up
+— so closing it by reflex can't be the only copy of a run you can't re-fight.
+**Last Rift Report** in the Actions tab brings back the most recent one, and it
+survives restarts.
+
+### The last encounter stays up
+
+The meter holds one encounter at a time, and a reset used to blank it
+instantly — at the exact moment the numbers became final and you most wanted
+to read them. Now the previous encounter **stays on screen** until the next one
+lands its first hit.
+
+The rows, the totals and the timer are all the previous encounter's own, frozen
+together, and the header reads `· LAST` so it can't be mistaken for a live
+fight. Nothing else changes: the clock is stopped, the header bar is its idle
+colour, and the first hit of the next pull replaces the lot.
+
+This applies to every reset — the hotkey, the menu button, a zone change, a
+boss pull, the end of a 60s parse. It pairs with the boss-pull auto-reset in
+particular: pull a boss and the meter clears for that fight, but you can still
+read the trash pull that got you there until the boss takes its first hit.
+
+### Combat history
+
+The meter holds **one encounter at a time**. A reset, a zone change, a mode
+switch or a boss pull throws it away, and until now there was nowhere for it to
+go — the numbers you were reading a moment ago were simply gone.
+
+Tick **Keep a history of finished encounters** on the History tab and each one
+is written to disk first, as data. The tab then shows you where they live and
+lets you read them back.
+
+**What a dataset is named.** Whatever took the most damage, and where you were:
+*Queen Honeyzabeth — Manfish Ruines*, *Sandworm — Siagarta Overworld*. The
+target comes from the hit itself — the game's internal unit id, put through the
+game's own name table, which is why it says *Queen Honeyzabeth* and not
+*Cleodora*. If nothing nameable was hit, the dataset is named for the zone
+alone rather than for a guess.
+
+**What's in one.** Everything the meter had for the players it was showing:
+their damage, healing, hits, crits, kills, overheal, and the full per-skill,
+per-element and per-target breakdown — not just the summary on screen. Click
+**Details** on a row to read it, or **Copy** to paste it somewhere.
+
+**It saves what the meter was showing.** In party mode a dataset holds your
+group and nobody else; in all-players mode it holds everyone on the shard. The
+mode is applied when the dataset is written and recorded inside it, so the
+totals, the percentages and the target tally all describe the same set of
+people — a party dataset's "100%" means 100% of your party. The Details view
+says which it was.
+
+**Rift reports are in here too.** A finished rift saves both ways: the shareable
+`.json`/`.txt`/`.png` still land in `parses/` exactly as before, and a fuller
+dataset lands in the history folder alongside everything else. A rift row has
+two buttons — **Report** puts the leaderboard card back on screen, and
+**Details** opens the per-skill breakdown the card has no room for. (Opening a
+saved report also becomes what **Last Rift Report** shows, since it is now the
+last report you opened.)
+
+**What it doesn't save.** An encounter has to have lasted 5 seconds and landed
+5 hits or heals. That floor is only there to keep mis-clicks and walk-bys out of
+the list — it is not a judgement about which fights were interesting.
+
+**Nothing is ever deleted.** No age limit, no count limit, no tidy-up pass. A
+program that prunes a folder is a program that can prune the wrong one, and the
+cost of not pruning is disk space you can see and manage yourself. Click the
+path on the History tab to open the folder in Explorer and clear it out
+whenever you like.
+
+The list shows **everything on disk**, newest first, whichever session it came
+from. Rows from today show a time; anything older shows the date too. The
+search box filters by name or zone.
+
 ### Also worth knowing
 
 **Click a player's line on the meter** while the escape menu is open to point the
@@ -578,10 +672,15 @@ read-only bundle that Windows unpacks somewhere different on every launch.
 | Log | `%LOCALAPPDATA%\FareverMeter\meter.log` | the console you ran it in |
 | Window positions | `%LOCALAPPDATA%\FareverMeter\.meter_position.json` | `.meter_position.json` in the project |
 | Parse screenshots | `%LOCALAPPDATA%\FareverMeter\parses\` | `parses/` in the project |
+| Combat history | `%LOCALAPPDATA%\FareverMeter\history\` | `history/` in the project |
 | Regenerated offsets | `%LOCALAPPDATA%\FareverMeter\analysis_out\` | `analysis_out/` in the project |
 
-Uninstalling leaves `%LOCALAPPDATA%\FareverMeter` alone — your parses and window
-positions survive it, and survive upgrades.
+Uninstalling leaves `%LOCALAPPDATA%\FareverMeter` alone — your parses, your
+combat history and your window positions survive it, and survive upgrades.
+
+The history folder is the only one that grows without bound: the meter never
+deletes from it. That is deliberate (see [Combat history](#combat-history)) —
+empty it yourself when you want the space back.
 
 ## Running from source
 

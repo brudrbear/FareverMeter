@@ -48,7 +48,6 @@
     "layer": 112,
     "loadout": 1232,
     "weaponInHand": 1344,
-    "mountId": 1376,
     "kind": 600,
     "level": 992
   },
@@ -147,16 +146,8 @@
     "group": 256,
     "isMe": 312,
     "lobbyId": 264,
-    "accountProgress": 224,
     "uid": 184,
     "hero": 304
-  },
-  "AccountProgress": {
-    "collection": 168
-  },
-  "Collection": {
-    "mounts": 128,
-    "gliders": 120
   },
   "ArrayProxyData": {
     "array": 40
@@ -183,6 +174,20 @@
     "ent.boss.MunsterChuck",
     "ent.boss.Phrixes",
     "ent.boss.Ratsar"
+  ],
+  "unitClasses": [
+    "ent.Unit",
+    "ent.Hero",
+    "ent.Foe",
+    "ent.vehicle.Vehicle",
+    "ent.vehicle.CannonPlant",
+    "ent.boss.Cleodora",
+    "ent.boss.Crabgantua",
+    "ent.boss.Mokshi",
+    "ent.boss.MunsterChuck",
+    "ent.boss.Phrixes",
+    "ent.boss.Ratsar",
+    "ent.vehicle.Cannon"
   ],
   "SkillRow": {
     "id_vidx": 7,

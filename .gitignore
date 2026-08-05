@@ -1,6 +1,12 @@
 # Parse screenshots written by 60s Parse Mode — yours, not the project's.
 parses/
 
+# Every encounter combat history has saved. Yours, and there can be thousands
+# of them — a source run writes here rather than to %LOCALAPPDATA%. The meter
+# never deletes from this folder, so it is the one place in the project that
+# grows without bound; empty it yourself when you want the space.
+history/
+
 # Byte-compiled cache. Regenerated on every run, and a binary blob in every
 # diff if it's tracked.
 __pycache__/

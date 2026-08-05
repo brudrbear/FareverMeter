@@ -418,7 +418,6 @@ function hookCamera(base) {
                 // HL calls like any other findex invocation.
                 drainUnitNames();
                 drainGatherKinds();
-                drainGliderEquip();
                 if (heroRefreshDue) { heroRefreshDue = false; refreshLocalHero(); }
             }
         });
@@ -447,6 +446,24 @@ const bossClass = {};            // unit kind -> {boss, elite}, classified once
 let bossBars = {};               // unit ptr string -> {kind, boss, elite, hp}
 let bossLast = "";               // last state signature, to send only on change
 let bossFnIsBoss = null, bossFnIsElite = null;
+
+// ---- the fight ending without a kill (boss reset / team wipe) ----
+// A dropped bar is NOT on its own the end of a fight: the Nightqueen replaces
+// herself with copies, and between her bar going down and theirs coming up
+// there is at least one poll seeing zero boss bars. Treating that as the end
+// is the bug that used to wipe the meter repeatedly through one fight.
+//
+// So "no boss bar" has to PERSIST before it means anything. fetchBosses is a
+// steady 2/s timer (measured), so this counts polls rather than needing a
+// timer of its own — and because it is the poll that decides, a frame hitch
+// cannot make a short gap look long.
+//
+// The observation is reported; the host decides what it means. It already
+// knows whether a kill ended the fight, so it can tell a reset from a victory
+// without the agent having to model either.
+const BOSS_GONE_POLLS = 10;      // 10 polls at 2/s = ~5s of no boss bar
+let bossGonePolls = 0;
+let bossWasUp = false;           // a boss bar has been up since the last report
 
 function bossUnitHealth(u) {
     try {
@@ -524,6 +541,23 @@ function pollBossBars(bi) {
         if (now[k].boss) anyBoss = true;
         if (now[k].elite) anyElite = true;
     }
+    // The fight-ended-without-a-kill watch. Runs on every poll, before the
+    // change gate below — the whole point is that it fires when NOTHING is
+    // changing, which is exactly when that gate is sending nothing.
+    if (anyBoss) {
+        if (bossGonePolls)
+            log("boss bar returned after " + bossGonePolls
+                + " empty poll(s) — the fight had not ended");
+        bossWasUp = true;
+        bossGonePolls = 0;
+    } else if (bossWasUp) {
+        if (++bossGonePolls >= BOSS_GONE_POLLS) {
+            bossWasUp = false;
+            bossGonePolls = 0;
+            send({ kind: "bossgone", polls: BOSS_GONE_POLLS });
+        }
+    }
+
     // Only talk when something changed. At 2/s an unconditional send would be
     // 2 messages a second forever, for a state that changes twice a pull.
     const sig = count + "|" + anyBoss + "|" + anyElite;
@@ -1249,268 +1283,6 @@ function refreshLocalHero() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Random favorite mount (measured 2026-08-01, mount_probe.js + swap probe)
-// ---------------------------------------------------------------------------
-// ent.Hero.setMount(id) is the LOCAL summon request; everything downstream
-// (setMount__impl, setupMount, the replicated set_mountId) inherits its
-// argument, so replacing args[1] in place is the whole feature. The
-// replacement String pointers come from the account collection's own mounts
-// array — GC-rooted by the collection, and HL's GC doesn't move objects, so
-// no allocation is ever needed. Nothing is called; the hook body is plain
-// reads plus one pointer swap.
-//
-// Two rules paid for in probe rounds:
-//   * NO cached hero pointers. Round 1 gated on a once-latched localHero and
-//     logged nothing — a re-replicated hero (any zone change) stales the
-//     pointer silently. Every check walks the hooked object itself.
-//   * The local test is this -> player -> isMe, plain reads.
-// mode "random" rolls per summon; "cycle" walks the favorites in the order
-// the host sent them, one step per summon. cycleIdx is session state and
-// resets whenever the config changes — a rotation that survived an edited
-// list would start mid-way through a different sequence.
-let mountCfg = { enabled: false, favorites: [], mode: "random", cycleIdx: 0 };
-let lastMountsSig = null;
-
-function mountOffsetsOk() {
-    return OFF.Player && OFF.Player.accountProgress !== undefined
-        && OFF.AccountProgress && OFF.Collection
-        && OFF.ArrayProxyData && OFF.ArrayDyn;
-}
-
-function heroIsMe(hero) {
-    try {
-        const player = hero.add(OFF.Hero.player).readPointer();
-        if (!player || player.isNull()) return false;
-        return player.add(OFF.Player.isMe).readU8() === 1;
-    } catch (e) { return false; }
-}
-
-// {kind -> String ptr} for the hero's unlocked mounts; empty on any failure.
-function readMountKinds(hero) {
-    const out = {};
-    if (!mountOffsetsOk()) return out;
-    try {
-        const player = hero.add(OFF.Hero.player).readPointer();
-        const acct = player.add(OFF.Player.accountProgress).readPointer();
-        const coll = acct.add(OFF.AccountProgress.collection).readPointer();
-        const proxy = coll.add(OFF.Collection.mounts).readPointer();
-        const dyn = proxy.add(OFF.ArrayProxyData.array).readPointer();
-        const inner = dyn.add(OFF.ArrayDyn.array).readPointer();
-        if (typeName(inner) !== "hl.types.ArrayObj") return out;
-        const n = inner.add(OFF.ArrayObj.length).readS32();
-        if (n < 0 || n > 4096) return out;
-        const data = inner.add(OFF.ArrayObj.array).readPointer();
-        for (let i = 0; i < n; i++) {
-            const s = data.add(OFF.ArrayObj.data + i * 8).readPointer();
-            const k = hlStr(s);
-            if (k) out[k] = s;
-        }
-    } catch (e) {}
-    return out;
-}
-
-function hookMountSwap(base) {
-    const fi = (DATA.mount_targets || {})["ent.Hero.setMount"];
-    if (fi === undefined) {
-        log("!! ent.Hero.setMount missing from resolver data — random mount "
-            + "disabled. The data file is older than this build; delete "
-            + "analysis_out and restart.");
-        return;
-    }
-    if (!mountOffsetsOk()) {
-        log("!! mount offsets missing — random mount disabled. The offsets "
-            + "file is older than this build; delete analysis_out and restart.");
-        return;
-    }
-    Interceptor.attach(base.add(fi * 8).readPointer(), {
-        onEnter: function (args) {
-            try {
-                if (!mountCfg.enabled || !mountCfg.favorites.length) return;
-                const orig = hlStr(args[1]);
-                if (orig === null) return;         // dismount — never touched
-                if (!heroIsMe(args[0])) return;    // replication traffic
-                const pool = readMountKinds(args[0]);
-                const owned = mountCfg.favorites.filter(
-                    function (k) { return k in pool; });
-                if (!owned.length) return;
-                let pick;
-                if (mountCfg.mode === "cycle") {
-                    // Strict rotation, one step per summon, in the host's
-                    // list order. The equipped mount is not excluded — a
-                    // cycle that skipped it would be a different sequence
-                    // than the checklist reads.
-                    pick = owned[mountCfg.cycleIdx % owned.length];
-                    mountCfg.cycleIdx = (mountCfg.cycleIdx + 1) % owned.length;
-                } else {
-                    // Random: prefer a different one than what was asked
-                    // for, so the swap always reads as random, but a single-
-                    // favorite list still wins over the selection.
-                    let picks = owned.filter(
-                        function (k) { return k !== orig; });
-                    if (!picks.length) picks = owned;
-                    pick = picks[Math.floor(Math.random() * picks.length)];
-                }
-                args[1] = pool[pick];
-                log("mount swap (" + mountCfg.mode + "): " + orig + " -> "
-                    + pick);
-            } catch (e) {}
-        }
-    });
-}
-
-// ---------------------------------------------------------------------------
-// Random favorite glider (measured 2026-08-02, glider probes 1-4)
-// ---------------------------------------------------------------------------
-// Gliders have NO setMount-style summon to arg-swap: the deploy chain is
-// bool-only (ent.Hero.toggleGlide -> UnitView.toggleGlider) and the model is
-// pre-spawned at equip time. Brudr chose the real-re-equip design instead:
-// at each glide end this performs the UI's own persistent equip —
-// st.player.Collection.equipItem(kind) — with a random favorite, so the
-// change replicates and other players see it. This is the meter's one
-// deliberate state-changing call; it is off until the host enables it.
-//
-// The call takes only the kind String, which the collection walk already
-// provides. Probe round 3 spent itself on the theory that args[2] was the
-// item's CDB row and built an index walk to produce one; round 3d's type
-// dump refuted it — args[2] is kind=10 (HFUN), a closure the UI allocates
-// per click (a different pointer for the same kind each time), i.e. the
-// optional result callback. args[3] (65535) is caller register leftover,
-// not a parameter — round 3c saw args[4] mirror args[2] the same way. So
-// null is passed for the callback and nothing else is needed: no CDB index,
-// no heap scan (an early background-thread scan raced the collection UI's
-// allocations and crashed the game — see TESTING.md).
-let gliderCfg = { enabled: false, favorites: [], mode: "random", cycleIdx: 0 };
-let lastGlidersSig = null;
-let gliderEquipAddr = null;       // Collection.equipItem entry, cached once
-let lastGliderKind = null;        // last kind seen through equipItem
-let pendingGliderEquip = null;    // {kind, str, hero} set at glide end
-let lastGliderEquipMs = 0;
-let localGlideUp = false;
-
-function readGliderKinds(hero) {
-    const out = {};
-    if (!mountOffsetsOk() || OFF.Collection.gliders === undefined) return out;
-    try {
-        const player = hero.add(OFF.Hero.player).readPointer();
-        const acct = player.add(OFF.Player.accountProgress).readPointer();
-        const coll = acct.add(OFF.AccountProgress.collection).readPointer();
-        const proxy = coll.add(OFF.Collection.gliders).readPointer();
-        const dyn = proxy.add(OFF.ArrayProxyData.array).readPointer();
-        const inner = dyn.add(OFF.ArrayDyn.array).readPointer();
-        if (typeName(inner) !== "hl.types.ArrayObj") return out;
-        const n = inner.add(OFF.ArrayObj.length).readS32();
-        if (n < 0 || n > 4096) return out;
-        const data = inner.add(OFF.ArrayObj.array).readPointer();
-        for (let i = 0; i < n; i++) {
-            const s = data.add(OFF.ArrayObj.data + i * 8).readPointer();
-            const k = hlStr(s);
-            if (k) out[k] = s;
-        }
-    } catch (e) {}
-    return out;
-}
-
-// Game thread (camera hook). Fires at most one queued equip per frame.
-function drainGliderEquip() {
-    if (!pendingGliderEquip) return;
-    const job = pendingGliderEquip;
-    pendingGliderEquip = null;
-    try {
-        if (!gliderEquipAddr) return;
-        if (!heroIsMe(job.hero)) return;
-        const player = job.hero.add(OFF.Hero.player).readPointer();
-        const acct = player.add(OFF.Player.accountProgress).readPointer();
-        const coll = acct.add(OFF.AccountProgress.collection).readPointer();
-        if (!coll || coll.isNull()) return;
-        // (collection, kind, onResult=null) — see the section header for why
-        // the third argument is a callback and why null is what the game's
-        // own generated code treats as "not passed".
-        new NativeFunction(gliderEquipAddr, "pointer",
-                           ["pointer", "pointer", "pointer"])(
-            coll, job.str, ptr(0));
-        // Frida routes a NativeFunction built from a hooked address through
-        // the original trampoline, so the equipItem hook above does NOT see
-        // our own call (measured: 5/5 auto-equips produced no hook line).
-        // Without this the "don't repeat the current one" filter would keep
-        // comparing against the last MANUAL equip forever.
-        lastGliderKind = job.kind;
-        log("glider equip (" + gliderCfg.mode + "): -> " + job.kind);
-    } catch (e) { log("glider equip failed: " + e); }
-}
-
-function hookGliderEquip(base) {
-    const gt = DATA.glider_targets || {};
-    const fiEquip = gt["st.player.Collection.equipItem"];
-    const fiToggle = gt["ent.Hero.toggleGlide"];
-    if (fiEquip === undefined || fiToggle === undefined) {
-        log("!! glider targets missing from resolver data — random glider "
-            + "disabled. The data file is older than this build; delete "
-            + "analysis_out and restart.");
-        return;
-    }
-    if (OFF.Collection.gliders === undefined) {
-        log("!! glider offsets missing — random glider disabled. The offsets "
-            + "file is older than this build; delete analysis_out and restart.");
-        return;
-    }
-    try { gliderEquipAddr = base.add(fiEquip * 8).readPointer(); }
-    catch (e) { log("!! equipItem unreadable: " + e.message); return; }
-    // Passive: remember the current glider through EVERY equip (manual or
-    // ours) so the random pick can avoid repeating it.
-    Interceptor.attach(gliderEquipAddr, {
-        onEnter: function (args) {
-            try {
-                const kind = hlStr(args[1]);
-                if (kind && kind.lastIndexOf("Glider_", 0) === 0)
-                    lastGliderKind = kind;
-            } catch (e) {}
-        }
-    });
-    // The trigger: local glide END (toggleGlide args[1] null after a start).
-    // Same no-cached-pointers rule as the mount swap: everything is walked
-    // from the hooked hero itself.
-    Interceptor.attach(base.add(fiToggle * 8).readPointer(), {
-        onEnter: function (args) {
-            try {
-                const up = args[1] && !args[1].isNull();
-                if (!heroIsMe(args[0])) return;
-                if (up) { localGlideUp = true; return; }
-                if (!localGlideUp) return;
-                localGlideUp = false;
-                if (!gliderCfg.enabled || !gliderCfg.favorites.length) return;
-                // Short cooldown, not a cap: gliding is often a rapid
-                // tap-on-tap-off, and every equip is a real server RPC. Long
-                // enough to swallow a double-tap, short enough that ordinary
-                // landings all count (the proof probe's 5s felt like the
-                // feature was misfiring — measured 2026-08-02).
-                const now = Date.now();
-                if (now - lastGliderEquipMs < 1500) return;
-                const pool = readGliderKinds(args[0]);
-                const owned = gliderCfg.favorites.filter(function (k) {
-                    return k in pool;
-                });
-                if (!owned.length) return;
-                let pick;
-                if (gliderCfg.mode === "cycle") {
-                    pick = owned[gliderCfg.cycleIdx % owned.length];
-                    gliderCfg.cycleIdx =
-                        (gliderCfg.cycleIdx + 1) % owned.length;
-                } else {
-                    let picks = owned.filter(function (k) {
-                        return k !== lastGliderKind;
-                    });
-                    if (!picks.length) picks = owned;
-                    pick = picks[Math.floor(Math.random() * picks.length)];
-                }
-                pendingGliderEquip = { kind: pick, str: pool[pick],
-                                       hero: args[0] };
-                lastGliderEquipMs = now;
-            } catch (e) {}
-        }
-    });
-}
-
 function main() {
     const resolved = resolveAnchors();
     const t0 = Date.now();
@@ -1586,32 +1358,6 @@ function main() {
     // setting as soon as it connects.
     hookCamera(base);
     hookBossBar(base);
-    hookMountSwap(base);
-    hookGliderEquip(base);
-    // The unlocked mount/glider lists, for the menus' favorites checklists.
-    // Plain reads on a slow timer; re-sent only when a set changes (a new
-    // unlock mid-session shows up within a tick).
-    setInterval(function () {
-        try {
-            if (!localHero || localHero.isNull()) return;
-            const kinds = Object.keys(readMountKinds(localHero)).sort();
-            if (kinds.length) {
-                const sig = kinds.join(",");
-                if (sig !== lastMountsSig) {
-                    lastMountsSig = sig;
-                    send({ kind: "mounts", list: kinds });
-                }
-            }
-            const gkinds = Object.keys(readGliderKinds(localHero)).sort();
-            if (gkinds.length) {
-                const gsig = gkinds.join(",");
-                if (gsig !== lastGlidersSig) {
-                    lastGlidersSig = gsig;
-                    send({ kind: "gliders", list: gkinds });
-                }
-            }
-        } catch (e) {}
-    }, 5000);
     // Say so if the sweep can't run. sweepWorld bails on its first line when
     // an offset it needs is absent, and it does that inside a try/catch on a
     // timer — so without this the minimap simply stays on "waiting for the
@@ -1632,27 +1378,6 @@ function main() {
     function onConfig(msg) {
         try {
             if (msg && msg.worldTick) setWorldTick(msg.worldTick);
-            if (msg && msg.mounts) {
-                mountCfg.enabled = !!msg.mounts.enabled;
-                mountCfg.favorites = Array.isArray(msg.mounts.favorites)
-                    ? msg.mounts.favorites : [];
-                mountCfg.mode = msg.mounts.mode === "cycle" ? "cycle" : "random";
-                mountCfg.cycleIdx = 0;
-                log("mount config: " + (mountCfg.enabled ? "on" : "off")
-                    + " (" + mountCfg.mode + "), "
-                    + mountCfg.favorites.length + " favorites");
-            }
-            if (msg && msg.gliders) {
-                gliderCfg.enabled = !!msg.gliders.enabled;
-                gliderCfg.favorites = Array.isArray(msg.gliders.favorites)
-                    ? msg.gliders.favorites : [];
-                gliderCfg.mode = msg.gliders.mode === "cycle" ? "cycle"
-                                                              : "random";
-                gliderCfg.cycleIdx = 0;
-                log("glider config: " + (gliderCfg.enabled ? "on" : "off")
-                    + " (" + gliderCfg.mode + "), "
-                    + gliderCfg.favorites.length + " favorites");
-            }
         }
         catch (e) { log("config failed: " + e); }
         recv("config", onConfig);
@@ -1662,6 +1387,36 @@ function main() {
     const fi = DATA.count_targets["ent.Unit.onInflictDamage"];
     const daddr = base.add(fi * 8).readPointer();
     const DR = OFF.DamageResult, BS = OFF.BaseSkill;
+
+    // Who the hit landed ON. `DamageResult.target` is typed ent.GameObject,
+    // which is two levels above ent.Unit — so `Unit.kind`@600 is only a field
+    // at all when the object really is a unit, and reading it off anything
+    // else is a read past the end of the object. The type check against the
+    // shipped unitClasses set is what makes it safe, exactly as FOE_CLASS
+    // gates `Foe.summonOwner` for summon attribution.
+    //
+    // The raw kind goes to the host, not a display name: naming it would mean
+    // an HL call (inf -> texts -> name) inside the damage hook, and the host
+    // already maps kinds through the cdb's own unit sheet — which is where
+    // "Cleodora" becomes "Queen Honeyzabeth".
+    const UNIT_CLASS = {};
+    (OFF.unitClasses || []).forEach(function (c) { UNIT_CLASS[c] = 1; });
+    const canNameTargets = Object.keys(UNIT_CLASS).length > 0
+        && OFF.Unit && OFF.Unit.kind != null && DR.target != null;
+    if (!canNameTargets)
+        log("!! hit targets will not be named (offsets file predates "
+            + "unitClasses) — combat history datasets fall back to the zone "
+            + "name alone. Delete analysis_out and restart to regenerate it.");
+
+    function targetKindOf(dr) {
+        if (!canNameTargets) return "";
+        try {
+            const t = dr.add(DR.target).readPointer();
+            if (!t || t.isNull() || t.compare(ptr("0x10000")) <= 0) return "";
+            if (!UNIT_CLASS[typeName(t)]) return "";
+            return hlStr(t.add(OFF.Unit.kind).readPointer()) || "";
+        } catch (e) { return ""; }
+    }
 
     // Read the common hit fields off a st.skill.DamageResult* (heals reuse the
     // same struct — evalHeal/onInflictHealEval mirror the damage pipeline).
@@ -1681,6 +1436,11 @@ function main() {
             crit: dr.add(DR._critical).readU8() ? 1 : 0,
             kill: dr.add(DR._kill).readU8() ? 1 : 0,
         };
+        // Only when there is one to give: a hit whose target reads back as
+        // something other than a unit sends no field at all, so the host can
+        // tell "not a unit" from "a unit named empty string".
+        const tk = targetKindOf(dr);
+        if (tk) out.target = tk;
         // Nullified-hit diagnostic. The meter counts `amount` whether or not
         // the target took it, so a boss in an immunity phase inflates the
         // parse. These three fields are the candidates for marking that, and

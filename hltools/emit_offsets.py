@@ -84,8 +84,6 @@ def main():
     weapon = offs("st.item.Weapon")
     world = offs("world.World")
     gath = offs("ent.interactible.Gatherable")
-    acct = offs("st.player.AccountProgress")
-    coll = offs("st.player.Collection")
     aproxy = offs("hxbit.ArrayProxyData")
     adyn = offs("hl.types.ArrayDyn")
 
@@ -149,9 +147,6 @@ def main():
                  # the equipment slot holds — measured).
                  "loadout": hero["loadout"][0],
                  "weaponInHand": hero["weaponInHand"][0],
-                 # The live summoned mount (null while dismounted) — the
-                 # random-mount hook logs it; the swap itself rides setMount.
-                 "mountId": hero["mountId"][0],
                  # The class ("Warrior"/"Priest"/"Rogue"/"Mage") and level, for
                  # the Social tab's roster. st.player.HeroData would be the
                  # tidier home for both, but it is null on the client for every
@@ -279,15 +274,10 @@ def main():
         # tab show a class for everyone rather than only for people nearby.
         "Player": {"name": player["name"][0], "group": player["group"][0],
                    "isMe": player["isMe"][0], "lobbyId": player["lobbyId"][0],
-                   "accountProgress": player["accountProgress"][0],
                    "uid": player["uid"][0], "hero": player["hero"][0]},
-        # The account-wide unlock collection (mount walk measured 2026-08-01,
-        # gliders 2026-08-02 — same shape): player -> accountProgress ->
-        # collection -> mounts/gliders, an ArrayProxyData whose ArrayDyn wraps
-        # an ArrayObj of kind Strings.
-        "AccountProgress": {"collection": acct["collection"][0]},
-        "Collection": {"mounts": coll["mounts"][0],
-                       "gliders": coll["gliders"][0]},
+        # hxbit wraps a replicated array in a proxy: Group.players is an
+        # ArrayProxyData whose ArrayDyn wraps an ArrayObj. Two hops, and the
+        # party roster is the reason they are here.
         "ArrayProxyData": {"array": aproxy["array"][0]},
         "ArrayDyn": {"array": adyn["array"][0]},
         "Group": {"groupId": group["groupId"][0], "players": group["players"][0]},
@@ -304,6 +294,13 @@ def main():
         # only 7 classes descend from ent.Foe, so this is a small closed set,
         # and a summon's class is not reliably the literal "ent.Foe".
         "foeClasses": descendants("ent.Foe"),
+        # Which runtime classes are units — the set a DamageResult.target must
+        # belong to before `Unit.kind` may be read off it. `target` is typed
+        # ent.GameObject, which is two levels above ent.Unit, so `kind`@600 is
+        # past the end of the object on a GameObject that isn't a unit. 12
+        # classes descend from ent.Unit (heroes, foes, bosses and the two
+        # vehicles), so this is the same small closed set foeClasses is.
+        "unitClasses": descendants("ent.Unit"),
         # HL virtual field indices for the skill display name
         "SkillRow": {"id_vidx": vidx(row, "id"), "texts_vidx": vidx(row, "texts")},
         "Texts": {"name_vidx": vidx(texts, "name"), "desc_vidx": vidx(texts, "desc")},
@@ -313,19 +310,15 @@ def main():
 
     # Display names, from the game's own data.cdb (res.light.pak, found
     # 2026-08-01 — NOT res.pak, which only carries assets and the non-English
-    # lang exports). Items name the Mounts/Gliders tabs; units name the boss
-    # kill toast — a bar's unit kind is routinely NOT the name on the bar
-    # (measured 2026-08-02: unit 'Cleodora' displays 'Queen Honeyzabeth',
-    # 'Phrixes' displays 'High Inquisitor Chakram').
+    # lang exports). Units name the boss kill toast and every combat history
+    # dataset — a unit's kind is routinely NOT the name on the bar (measured
+    # 2026-08-02: 'Cleodora' displays 'Queen Honeyzabeth', 'Phrixes' displays
+    # 'High Inquisitor Chakram').
     # Cosmetic, so a failure costs the labels and nothing else — but it is
-    # still reported, because "the tab shows ids again" should be explainable
-    # from the log.
+    # still reported, because "it shows ids again" should be explainable from
+    # the log.
     try:
-        item_names, unit_names = extract_display_names(Path(hlboot).parent)
-        out_names = _OUT_DIR / "item_names.json"
-        out_names.write_text(json.dumps(item_names, ensure_ascii=False,
-                                        indent=0), encoding="utf-8")
-        print(f"[written] {out_names} ({len(item_names)} items)")
+        unit_names = extract_display_names(Path(hlboot).parent)
         out_units = _OUT_DIR / "unit_names.json"
         out_units.write_text(json.dumps(unit_names, ensure_ascii=False,
                                         indent=0), encoding="utf-8")
@@ -335,8 +328,8 @@ def main():
         out_heal.write_text(json.dumps(specs, indent=0), encoding="utf-8")
         print(f"[written] {out_heal} ({len(specs)} heal skills)")
     except Exception as e:
-        print(f"[!] display names skipped ({e}) — mount labels and boss "
-              f"toasts fall back to ids")
+        print(f"[!] display names skipped ({e}) — boss toasts and history "
+              f"dataset names fall back to ids")
 
     print(json.dumps(meta, indent=2))
 
@@ -414,8 +407,9 @@ def extract_heal_specs(game_dir):
 
 
 def extract_display_names(game_dir):
-    """(items, units): id -> texts.name for the two sheets the meter labels
-    things from, in one read of the pak."""
+    """id -> texts.name for the cdb's unit sheet — what names a boss toast
+    and a combat history dataset. The item sheet was read here too until
+    the mount and glider features were removed; nothing labels items now."""
     import pak_extract
     data, entries, data_off = pak_extract.load(Path(game_dir) / "res.light.pak")
     e = next(x for x in entries if x.path.endswith("data.cdb"))
@@ -430,7 +424,7 @@ def extract_display_names(game_dir):
                 out[iid] = nm
         return out
 
-    return sheet_names("item"), sheet_names("unit")
+    return sheet_names("unit")
 
 
 if __name__ == "__main__":
