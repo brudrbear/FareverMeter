@@ -68,6 +68,7 @@
   },
   "GameLayer": {
     "isRift": 248,
+    "serverName": 184,
     "mainActivity": 240,
     "worldEvents": 288,
     "time": 200,

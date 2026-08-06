@@ -284,6 +284,21 @@ SPARKLY_PAD = 9
 # rather than a directive.
 SPARKLY_TRACK_CATS = ("critter",)
 
+# Sparkling critters the tracker stays quiet about, by unit kind rather than by
+# display name — the id is what the game replicates, and a name is a localized
+# string that can change under us.
+#
+# Sheep_Spark ("Sparkling Woolybell") is a fixed-point respawn: it comes back on
+# a timer in the same spot, so it is free rather than found. The tracker points
+# at the NEAREST sparkling critter, and a guaranteed one sitting in a known
+# place wins that contest more or less permanently — which is how one farmable
+# sheep ends up hiding the nine that are actually worth crossing a zone for.
+#
+# Deliberately not applied to the map: the halo there is information about what
+# is around you, and this list is about what deserves to interrupt you. Same
+# split SPARKLY_TRACK_CATS already draws.
+SPARKLY_TRACK_SKIP = ("Sheep_Spark",)
+
 # Once a sparkly leaves the sweep the panel lingers this long before going.
 # The client streams entities in and out (see WorldSnapshot), so a sparkling
 # critter at range drops out for a second or two at a time — without this the
@@ -3074,6 +3089,11 @@ class GameUIState:
         # carried it — which is not the same as False, and a history dataset
         # would otherwise call an unknown zone a dungeon.
         self._zone_world_map = None
+        # Which shard the character is on — st.GameLayer.serverName, sent by
+        # the hook once at attach and then on every change. None until it
+        # arrives, which is a real state worth distinguishing from "no shard":
+        # the settings panel says "..." rather than claiming to know.
+        self._server = None
         # unit kind -> codex rank, mirrored from the replicated store. Empty
         # until the first `codex` message; the map filter treats "no mirror
         # yet" as "show everything" rather than hiding the world, because an
@@ -3093,6 +3113,25 @@ class GameUIState:
             self._zone_sig = sig or None
             self._zone_world_map = (None if world_map is None
                                     else bool(world_map))
+
+    def set_server(self, name):
+        """st.GameLayer.serverName from the hook — which shard you are on.
+
+        Measured 2026-08-05: reads "Sfojuxa3386_6601_na", and a relog to
+        character select and back moved it to "Snitura2642_6306_na" while the
+        zone stayed "World/W1_Siagarta" throughout. So it names the shard, not
+        the zone, and the trailing "_na" is the server region.
+
+        Stored raw. Prettifying it would risk two genuinely different shards
+        rendering the same, and the whole use of this string is comparing it
+        with somebody else's."""
+        with self._lock:
+            self._server = name or None
+
+    def server(self):
+        """The shard name, or None if the hook hasn't reported one yet."""
+        with self._lock:
+            return self._server
 
     def set_codex_ranks(self, entries):
         """The whole kind -> [killCount, rank] mirror from the hook, replacing
@@ -5740,8 +5779,32 @@ class Overlay:
         # Windows 11 has filed into the overflow flyout is not somewhere you
         # can count on them finding.
         tk.Frame(body, bg=BG_BAR_TRACK, height=1).pack(fill="x", pady=(10, 6))
-        self.btn_quit = button(body, self._enqueue(self._quit_clicked))
+        footer = tk.Frame(body, bg=BG_BODY)
+        footer.pack(fill="x")
+        self.btn_quit = button(footer, self._enqueue(self._quit_clicked))
         self.btn_quit.config(text=QUIT_LABEL, fg=FG_WARN)
+        # button() packs itself full-width, which is what every other button on
+        # the panel wants. This one shares its row, so it is re-packed to take
+        # only the width it needs and leave the rest to the shard label.
+        self.btn_quit.pack_forget()
+        self.btn_quit.pack(side="left", pady=2)
+        # Which shard the character is on, at the far end of the row it shares.
+        # Split into a quiet caption and a loud value: the caption only has to
+        # say what the string is, while the string itself is the thing you read
+        # off the screen to somebody trying to land on the same shard as you.
+        #
+        # Monospaced and at full contrast for that reason. It is a generated
+        # id ("Spajoda5202_9541_na") with no words in it to recover from a
+        # misread glyph, and Consolas is what tells an l from a 1 and an O from
+        # a 0. Packed value-first so the id sits hard against the right edge
+        # and the caption falls in beside it.
+        self.lbl_shard = tk.Label(footer, text="", bg=BG_BODY, fg=FG_VALUE,
+                                  font=self.fonts_m["mono"], anchor="e")
+        self.lbl_shard.pack(side="right", padx=(0, 2))
+        self.lbl_shard_cap = tk.Label(footer, text="Shard", bg=BG_BODY,
+                                      fg=FG_DIM, font=self.fonts_m["ui_sm_b"],
+                                      anchor="e")
+        self.lbl_shard_cap.pack(side="right", padx=(8, 6))
         self.menu.minsize(MIN_W["menu"], 0)
         # One wheel binding for the whole application, installed after every
         # scroll list has registered itself. bind_all rather than per-widget
@@ -8140,7 +8203,8 @@ class Overlay:
         """Find the nearest sparkling CRITTER and point at it.
 
         Critters only — see SPARKLY_TRACK_CATS for why a sparkling bee is not
-        something this should announce.
+        something this should announce, and SPARKLY_TRACK_SKIP for the
+        fixed-respawn ones it stays quiet about.
 
         Reads the same snapshot the map does but stands apart from it: the
         tracker has to keep working with the minimap hidden, and it deliberately
@@ -8158,6 +8222,8 @@ class Overlay:
         if self.world.fresh():
             for e in ents:
                 if not e.get("sp") or e.get("c") not in SPARKLY_TRACK_CATS:
+                    continue
+                if e.get("k") in SPARKLY_TRACK_SKIP:
                     continue
                 dx = e.get("x", 0) - me.get("x", 0)
                 dy = e.get("y", 0) - me.get("y", 0)
@@ -10665,6 +10731,12 @@ class Overlay:
             activeforeground=FG_HEADER if parsing else FG_VALUE,
             highlightbackground=BTN_ON_BG_ACTIVE if parsing else BG_BAR_TRACK)
 
+        # Which shard, beside the button that ends the session. "…" rather than
+        # blank before the hook has reported one: an empty slot reads as a
+        # feature that isn't working, where the ellipsis reads as waiting.
+        shard = self.ui_state.server()
+        self.lbl_shard.config(text=shard or "…")
+
         all_players = self.mode == "all"
         self.btn_mode.config(
             text=("Show party only" if all_players else "Show all players")
@@ -11485,7 +11557,16 @@ REQUIRED_OFFSET_KEYS = ("Activity", "ArrayObj", "BossInfo", "BossesInfo",
                         # groups. Absent, the popups never fire and the map
                         # filter has no ranks to filter on.
                         "Player.progress", "Progress", "MapData", "StringMap",
-                        "CodexProxy")
+                        "CodexProxy",
+                        # Which shard you are on (3.7.1). GameLayer is listed
+                        # above and has existed forever, so its presence proves
+                        # nothing — `serverName` is the subkey a pre-3.7.1 file
+                        # lacks. checkRift() guards on it being non-null and so
+                        # simply never sends the shard, leaving the settings
+                        # footer reading "…" for good with nothing anywhere
+                        # saying why. Same silent-upgrade shape as the roster
+                        # subkeys above.
+                        "GameLayer.serverName")
 
 
 def _data_is_current():
@@ -12813,6 +12894,17 @@ def _run(tray, session, ui_state, world, rift_rec, heal_sizer):
             # release. Throttled and self-silencing inside — this costs
             # nothing on the zone changes it declines to act on.
             check_for_update()
+        elif k == "server":
+            # Which shard. Sent on its own rather than folded into `zone`
+            # because the two move independently — a relog can land you on a
+            # different shard in the same zone, which is exactly how this was
+            # measured (Sfojuxa3386_6601_na -> Snitura2642_6306_na, zone
+            # unchanged). Nothing resets on it: a shard change without a
+            # loading screen is not a thing, and when there IS one the zone
+            # handler has already done the resetting.
+            ui_state.set_server(p.get("name"))
+            print(f"[meter] shard {'identified' if p.get('initial') else 'change'}"
+                  f" ({p.get('name')!r})", file=sys.stderr)
         elif k == "hero":
             # The hook re-reports the local hero every 3s so it survives a
             # respawn or zone change, so only the first identification and a

@@ -241,14 +241,16 @@ function windowClosed(win) {
     } catch (e) {}
 }
 
-// ---- rift + zone detection ----
+// ---- rift + zone + shard detection ----
 // hero -> st.State.layer -> st.GameLayer: isRift for rifts, .world.level for
-// where you are. Pure pointer + byte reads, no HL calls, so it's safe from the
-// heartbeat timer rather than having to ride along inside a game-thread hook —
-// which matters, because you can enter a rift (or start the meter mid-session)
-// long before you hit anything. Reported on change only.
+// where you are, .serverName for WHICH SHARD you are on. Pure pointer + byte
+// reads, no HL calls, so it's safe from the heartbeat timer rather than having
+// to ride along inside a game-thread hook — which matters, because you can
+// enter a rift (or start the meter mid-session) long before you hit anything.
+// Reported on change only.
 let lastRift = null;
 let lastLevel = null;
+let lastServer = null;
 function checkRift() {
     try {
         if (!localHero || localHero.isNull() || !OFF.GameLayer) return;
@@ -289,6 +291,19 @@ function checkRift() {
                     }
                     send(out);
                 }
+            }
+        }
+        // Which shard. Deliberately NOT folded into the zone message above:
+        // the two move independently — a relog can drop you on a different
+        // shard in the same zone (no zone message), and walking into a dungeon
+        // changes the zone while the shard string may not follow. Sending it
+        // separately means neither can mask the other going stale.
+        if (OFF.GameLayer.serverName != null) {
+            const srv = hlStr(layer.add(OFF.GameLayer.serverName).readPointer());
+            if (srv !== lastServer) {
+                const initial = lastServer === null;
+                lastServer = srv;
+                send({ kind: "server", name: srv, initial: initial ? 1 : 0 });
             }
         }
         const state = layer.add(OFF.GameLayer.isRift).readU8() !== 0;

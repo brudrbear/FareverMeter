@@ -181,6 +181,13 @@ def main():
         # capitalised: Legendary, Epic, Rare.
         "Weapon": {"rarity": weapon["rarity"][0], "level": weapon["level"][0]},
         "GameLayer": {"isRift": layer["isRift"][0],
+                      # Which shard you are on. hxbit-replicated (the class
+                      # carries __net_mark_serverName), so this is the SERVER's
+                      # own name for itself pushed to the client — measured
+                      # 2026-08-05 as "Sfojuxa3386_6601_na": a generated server
+                      # name, an instance number, and the region code. Distinct
+                      # from the zone, which is layer.world.level below.
+                      "serverName": layer["serverName"][0],
                       "mainActivity": layer["mainActivity"][0],
                       "worldEvents": layer["worldEvents"][0],
                       "time": layer["_time"][0],
