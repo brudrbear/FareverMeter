@@ -37,3 +37,10 @@ analysis_out/codex_progress_dump.json
 # the tray icon without needing Pillow to draw it first.)
 /build/
 /dist/
+
+# The engineering notebook — how the game was measured, which probes proved
+# what, and the field names that mean the opposite of what they say. Kept
+# locally and deliberately not published: it was purged from the history
+# rather than merely deleted, so an ignore rule is what keeps it from being
+# committed back by accident.
+/TESTING.md
