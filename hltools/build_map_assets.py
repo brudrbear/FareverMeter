@@ -18,7 +18,7 @@ tile grid itself. The game names each tile <tx>_<ty>_1024.png where tile
 viewer config (gameMinX = -4*576 for tile x -4, lat = -y), which places
 markers with raw in-game coordinates on these very tiles. The +y-down
 orientation also agrees with the compass measurement that the world's +y is
-SOUTH (see TESTING.md, Geometry).
+SOUTH.
 """
 from __future__ import annotations
 
@@ -58,8 +58,8 @@ def build(pak_path: Path, world: str, scale: float):
     print(f"[*] {world}: {len(tiles)} tiles, x {x0}..{x1}, y {y0}..{y1} "
           f"-> {w}x{h} at scale {scale}", file=sys.stderr)
 
-    # +y DOWN: tile row = ty - y0. The game's +y is south (measured; see
-    # TESTING.md Geometry), so south is down, i.e. an ordinary map.
+    # +y DOWN: tile row = ty - y0. The game's +y is south (measured), so south
+    # is down, i.e. an ordinary map.
     out = Image.new("RGB", (w, h), (16, 16, 16))
     for (tx, ty), e in sorted(tiles.items()):
         blob = data[data_off + e.pos: data_off + e.pos + e.size]

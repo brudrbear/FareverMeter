@@ -171,8 +171,8 @@ NULLIFIED_BLOCKERS = frozenset({"InvulnerableHit"})
 # That is gone, because the damage turned out to be attributable after all. The
 # blessing is a status instantiated PER ALLY, and the hook now credits the hit
 # to `DamageResult.baseSkill.owner` — the ally carrying the status, i.e. the
-# player who actually swung. Measured 2026-08-04 with frida/boost_probe.js; see
-# TESTING.md "Swarmstrike Accord". The fix lives in the agent, so by the time a
+# player who actually swung. Measured 2026-08-04 with frida/boost_probe.js.
+# The fix lives in the agent, so by the time a
 # hit reaches this file it already carries the right player and nothing here
 # needs to know the skill exists.
 #
@@ -428,7 +428,7 @@ MINIMAP_BG_TINT = 0.45
 #
 # What this DOESN'T buy is a treasure map. Chests stream — measured, four or
 # five loaded in a zone that holds 47 — so zooming out shows the ones the
-# client knows about, not the ones that are there. See TESTING.md.
+# client knows about, not the ones that are there.
 MINIMAP_RANGE_MIN, MINIMAP_RANGE_MAX = 80, 1750
 
 # Zoom is a percentage because that is what it looks like on screen: 100% is
@@ -2963,7 +2963,7 @@ class MapBackdrop:
 
     Loads assets/maps/<world>.webp plus the transform its builder wrote next
     to it: image_px = (world - origin) * px_per_unit, +y DOWN (the world's +y
-    is south — TESTING.md, Geometry). The transform comes from the game's own
+    is south, measured). The transform comes from the game's own
     tile grid (576 world units per tile), cross-checked against questlog.gg's
     markers, so there is nothing here to calibrate — only to crop.
 
@@ -10994,8 +10994,7 @@ def _codex_data():
       elite   - elite/boss, one kill masters the entry
       big     - inherits a *_Big base, so 1/4/10 rather than 1/8/20
 
-    Anything not listed is an ordinary foe. See "The codex" in TESTING.md for
-    how the buckets were measured."""
+    Anything not listed is an ordinary foe."""
     global _CODEX_DATA
     if _CODEX_DATA is None:
         try:
@@ -11443,7 +11442,7 @@ REQUIRED_OFFSET_KEYS = ("Activity", "ArrayObj", "BossInfo", "BossesInfo",
                         # has existed forever; these subkeys are what a
                         # pre-3.0.4 file is missing — without them the hook
                         # falls back to no zone identity at all (getMapId is a
-                        # hostname, see TESTING.md) and the backdrop never
+                        # hostname) and the backdrop never
                         # draws.
                         "GameLayer.world", "World.level",
                         # The party roster's array walk (Group.players is an
@@ -12769,7 +12768,7 @@ def _run(tray, session, ui_state, world, rift_rec, heal_sizer):
         elif k == "codexnotify":
             # CodexDiscovered = rank 1, CodexCompleted = an INTERMEDIATE
             # rank-up, CodexMastered = the entry is finished. The names do not
-            # mean what they look like; see TESTING.md.
+            # mean what they look like.
             ov = _OVERLAY["ref"]
             if ov is not None:
                 ov.on_codex_notify(p.get("n"), p.get("u"))

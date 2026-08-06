@@ -836,9 +836,7 @@ empty it yourself when you want the space back.
 ## Running from source
 
 You don't need this to *use* the meter; the installer is the supported route.
-It's here for hacking on it — see **[TESTING.md](TESTING.md)** for how the
-pieces fit together, how to probe the running game, and the field names that
-mean the opposite of what they say.
+It's here for hacking on it.
 
 ```
 pip install frida pillow
@@ -924,12 +922,11 @@ live. Solo (no group) shows just you in party mode.
   off — in a rift, a dozen people's damage arriving under one name. The blessing
   turns out to be a status instantiated per ally, so the hook credits the hit to
   the ally carrying it and the damage lands on the right row as ordinary damage.
-  The `BOOST` column that 3.3.3 used to quarantine it is gone. Measured — see
-  TESTING.md "Patch quirks, and Swarmstrike Accord".
+  The `BOOST` column that 3.3.3 used to quarantine it is gone. Measured.
 - Healing is *raw* healing — every heal counts at its full size whether or not
   the target had health to restore, and `OVER` says how much of it was wasted.
-  No client is ever told how much a heal healed for (measured — see
-  TESTING.md), so the size is computed the way the game computes it, from
+  No client is ever told how much a heal healed for (measured), so the size is
+  computed the way the game computes it, from
   `data.cdb`: most heal skills carry their amount in `BaseSkill.dynVal1-3`
   (which the server replicates) and the rest are a ratio on the caster's Faith,
   Intellect, Strength or Dexterity. That covers 39 of the game's 44 heal

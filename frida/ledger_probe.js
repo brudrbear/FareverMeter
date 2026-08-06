@@ -22,7 +22,7 @@
 // computed offline from hlboot.dat by name. One round trip, no guessing.
 //
 // Everything runs inside the damage hook — game thread, so the recordsDamage
-// call is legal. See TESTING.md "Thread safety".
+// call is legal.
 //
 // DATA + OFF + B are prepended by run_ledger.py.
 

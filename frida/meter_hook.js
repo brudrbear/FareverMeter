@@ -1359,7 +1359,7 @@ function sweepInventory() {
 }
 
 // ---- the codex (hunting log) ----
-// Measured 2026-08-05, see "The codex" in TESTING.md. The per-character store
+// Measured 2026-08-05. The per-character store
 // is REPLICATED, so the whole thing is plain pointer reads from the hero plus
 // one native map call — nothing is asked of the game:
 //
@@ -1747,7 +1747,7 @@ function main() {
     // A summon's damage is a player's damage. It arrives on this same hook
     // with an ent.Foe dealer, and until 3.3.4 it was dropped on the floor —
     // worth ~13% of a bee build's total (measured 2026-07-30, 10,204 of
-    // 80,299 damage in one session; see TESTING.md "Summon and pet damage").
+    // 80,299 damage in one session).
     //
     // `ent.Foe.summonOwner`, type-checked to ent.Hero, is the attribution.
     // Two things that look like they'd work and don't:

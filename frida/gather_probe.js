@@ -24,7 +24,7 @@
 //      requiredTool / texts.type say per kind.
 //
 // The probe: a 2s timer censuses all Gatherables in the layer (plain pointer
-// reads only — TIMER-SAFE, see the thread rule in TESTING.md) and logs any
+// reads only — TIMER-SAFE per the thread rule) and logs any
 // field that CHANGES on a tracked node. Event hooks on hit / set_hitPoints /
 // consume / respawn / tryRequestInteraction / getNoActionReason catch the
 // transitions the 2s sampling would blur. CDB rows (display name, required

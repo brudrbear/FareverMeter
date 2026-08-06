@@ -34,7 +34,7 @@
 //      (Wolf_Z1W_Alpha -> Wolf) into one entry? getUnitNode returns an ARRAY,
 //      which is a strong hint it's not 1:1.
 //
-// THREAD RULE (paid for twice — see TESTING.md): timers do plain reads only.
+// THREAD RULE (paid for twice): timers do plain reads only.
 // Every HL call and every allocation rides client.BaseCamera.postUpdate.
 //
 // DATA + OFF + B are prepended by run_codex.py.

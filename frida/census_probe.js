@@ -128,7 +128,7 @@ function noteConservation(dealer, dcls, dr) {
         const amount = dr.add(OFF.DamageResult._amount).readDouble();
         // InvulnerableHit is damage the target never takes — counting it here
         // would make every ratio look inflated. Measured on Ratsar's immune
-        // phase; see TESTING.md.
+        // phase.
         let nulled = false;
         try {
             const blk = hlStr(dr.add(OFF.DamageResult.blocker).readPointer());

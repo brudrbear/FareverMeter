@@ -129,7 +129,7 @@ def main():
         # a scaling ratio, and these three f64s are hxbit-replicated, so the
         # number the server computed is sitting here on the client. That is the
         # only reason healing can be counted at all — nothing else on a client
-        # knows what a heal was worth (TESTING.md, "Healing is estimated").
+        # knows what a heal was worth.
         "BaseSkill": {"kind": base["kind"][0], "inf": base["inf"][0],
                       "owner": base["owner"][0],
                       "ownerPlayer": base["ownerPlayer"][0],
@@ -293,7 +293,7 @@ def main():
         "ArrayProxyData": {"array": aproxy["array"][0]},
         "ArrayDyn": {"array": adyn["array"][0]},
         "Group": {"groupId": group["groupId"][0], "players": group["players"][0]},
-        # The codex (hunting log), measured 2026-08-05 — see TESTING.md. The
+        # The codex (hunting log), measured 2026-08-05. The
         # whole thing is replicated to the client and reachable by plain
         # pointer reads from the hero:
         #   Hero.player -> Player.progress -> Progress.unitsProgress
@@ -467,7 +467,7 @@ def extract_display_names(game_dir):
 
 
 # Which rank-threshold set a unit's codex entry uses. Measured 2026-08-05 on a
-# fresh character, 11/11 samples agreeing — see "The codex" in TESTING.md.
+# fresh character, 11/11 samples agreeing.
 # The bucket names are ours; the numbers are the cdb's own constants.
 CODEX_SETS = {
     "elite": "EliteAndBossProgressThresholds",

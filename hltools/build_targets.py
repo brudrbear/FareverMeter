@@ -119,7 +119,7 @@ BOSS_FNS = ["ent.Unit.isBoss", "ent.Unit.isElite"]
 boss_fns = {nm: fi for fi, nm in names.items() if nm in BOSS_FNS}
 
 # ---- the codex (hunting log) ----
-# Measured 2026-08-05 (see "The codex" in TESTING.md): these three fire
+# Measured 2026-08-05: these three fire
 # CLIENT-side on a kill, in this order, and the codex pair lands BEFORE the kill
 # event — so a toast hung on notifyUnitKilled can quote the already-incremented
 # count without waiting a frame.

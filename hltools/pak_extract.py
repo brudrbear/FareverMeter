@@ -2,8 +2,7 @@
 
 Maintainer tool, not part of the meter: run it here when the game's world map
 changes (rarely), commit the extracted image, and the meter ships with a
-stable asset instead of reading anything at runtime. See TESTING.md,
-"The minimap's map background".
+stable asset instead of reading anything at runtime.
 
 Format (hxd.fmt.pak.Data, verified against res.map.pak's own bytes — the
 directory tree Level/World/W1_Siagarta.dat parses cleanly and file data lands

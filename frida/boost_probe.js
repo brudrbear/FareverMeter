@@ -52,7 +52,7 @@
 //     ent.Foe answers this; it is reported separately rather than folded in.
 //
 // READ-ONLY. No HL calls at all — plain pointer reads inside the damage hook,
-// which is already on the game thread. See TESTING.md "Thread safety".
+// which is already on the game thread.
 //
 // DATA + OFF + B are prepended by run_boost.py.
 
@@ -214,8 +214,7 @@ function onInflict(dealer, dr) {
 }
 
 // Called only from the postUpdate hook — these are HL calls and belong on the
-// game thread. See TESTING.md "Thread safety": the same calls from a
-// setInterval killed the game.
+// game thread: the same calls from a setInterval killed the game.
 function refreshLocalHero() {
     if (!base) return;
     for (const nm in DATA.funcs) {

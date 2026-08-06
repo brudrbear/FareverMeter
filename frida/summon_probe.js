@@ -34,8 +34,8 @@
 // receive side sees the hits, that is where the feature has to be built.
 //
 // HL calls (isSummon / get_summonHero) happen ONLY inside the damage hooks and
-// postUpdate — all game thread. See TESTING.md "Thread safety": the same calls
-// from a setInterval killed the game.
+// postUpdate — all game thread: the same calls from a setInterval killed the
+// game.
 //
 // DATA + OFF + B are prepended by run_summon.py.
 
@@ -277,7 +277,7 @@ function report() {
 }
 
 // Runs on the GAME thread (inside client.BaseCamera.postUpdate) — the only
-// legal place for the getHero calls. See TESTING.md "Thread safety".
+// legal place for the getHero calls.
 function refreshLocalHero() {
     if (!base) return;
     for (const nm in DATA.funcs) {
