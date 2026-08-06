@@ -245,7 +245,7 @@ again.
 | Options | Auto 'View All Players' in rifts | presses the button above for you at both rift boundaries — all-players going in, party-only coming out — and retires the [rift prompt](#rifts) that would otherwise ask. Same setting as that prompt's **Do this every time** tick. Off by default. Applies from your next crossing, not the rift you're already in |
 | Options | Codex alerts | the two [codex popups](#codex-popups) — the running count on each kill and the fanfare when an entry fills. On by default. The minimap's *only missing from codex* filter is separate and unaffected |
 | Options | Sparkly Tracker | a pointer to the nearest sparkling **critter**, with its distance and how far up or down it is. On by default; the panel only appears when there's one to point at. See [Sparkly Tracker](#sparkly-tracker) |
-| Options | Theme | Five choices — see [Themes](#themes). `Dark Dynamic` is the default. |
+| Options | Theme | Seven choices — see [Themes](#themes). `Dark Dynamic` is the default. |
 | Options | Transparency | how see-through the overlay is, 0-80%. It covers the meter, breakdown, minimap, compass and rift timer — panel, header bar and text together, since window opacity is the only kind Windows offers. The control menu and the rift prompt are exempt: one is what you're reading while you drag the slider, the other is a question that has to be answered |
 | Options | Minimap | `Rotating` (default) turns the map with the camera, so the top of the map is whatever you're looking at. `Fixed` keeps north up and turns the arrow instead. |
 | Options | Map refresh | how often the minimap is updated — `Ultra` (~30/sec), `High` (~16/sec, default), `Medium` (~9/sec), `Low` (~4/sec). Lower costs less CPU in the game; below about 8/sec the dots visibly step. |
@@ -390,10 +390,10 @@ you can read which way a group is heading; group members get a blue ring.
 The map turns with the **camera**, and so does the marker in the middle — a
 cone and centre line show where you're looking.
 
-The panel is dark on the `Dark` themes so the markers are the bright thing on
-it, which is easier to read at a glance than icons on a pale background; the
-`Farever` themes paint it parchment to match the meter and darken the markers to
-suit. See [Themes](#themes).
+The panel is dark on the `Dark` and `Sparkle` themes so the markers are the
+bright thing on it, which is easier to read at a glance than icons on a pale
+background; the `Farever` themes paint it parchment to match the meter and
+darken the markers to suit. See [Themes](#themes).
 
 **Anything on a different floor gets a small caret** above or below it for which
 way you'd have to go, and **players and enemies are dimmed** as well — a mob in the tunnel below you is not
@@ -462,17 +462,30 @@ entry under Scaling.
 
 ### Themes
 
-Five entries under **Theme** in the control menu. `Dark` re-skins the **whole
+Seven entries under **Theme** in the control menu. `Dark` re-skins the **whole
 overlay** — meter, breakdown, minimap and compass — into the map panel's navy;
-`Farever` is the parchment original.
+`Farever` is the parchment original; `Sparkle` is night-violet.
 
 | Theme | Outside a rift | Inside a rift |
 |---|---|---|
 | `Farever Dynamic` | parchment throughout | rift colours |
 | `Dark Dynamic` *(default)* | navy throughout | rift colours |
+| `Sparkle Dynamic` | violet throughout | rift colours |
 | `Farever` | parchment throughout | unchanged |
 | `Dark` | navy throughout | unchanged |
+| `Sparkle` | violet throughout | unchanged |
 | `Rift` | rift colours | rift colours |
+
+**`Sparkle`** is named for the [sparkling critters](#sparkly-tracker) the
+tracker points you at, and it's coloured off one: a deep violet panel from the
+tail, the critter's own violet on the header bar, its magenta glow when you're
+in combat, and gold headings for the sparkle. The gold is what keeps it clear
+of `Rift` — they're the two dark panels with warm highlights, and a pink accent
+put them uncomfortably close. It's the only theme that also
+changes the **typeface** — labels, names and headings go to a rounded face
+(Candara) instead of Segoe UI. The **number columns stay monospaced**, because
+that's what keeps them lined up. If the face isn't installed the overlay says
+so on stderr and stays on Segoe UI.
 
 `Rift` stays rift with the escape menu open, too — if you pinned it, you asked
 for it. The two `Dynamic` modes still show their own palette there, since in

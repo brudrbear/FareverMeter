@@ -1007,7 +1007,13 @@ RIFT_BOX_NEAR = {"glow": RIFT_GLOW, "edge": RIFT_EDGE, "body": RIFT_BODY,
 # There is deliberately no "Farever Rift" or "Dark Rift". A rift looks like a
 # rift, and inside one both Dynamic modes go there — which is the whole point of
 # them. Pinned Rift stays available for anyone who just likes the colours.
-THEME_MODES = ("Farever Dynamic", "Dark Dynamic", "Farever", "Dark", "Rift")
+#
+# Sparkle is the odd one out: the only theme that also changes the TYPEFACE.
+# It's named for the sparkling critters the tracker points you at, and it's the
+# one skin that isn't trying to look like part of the game — so the soft face
+# is the point of it rather than a decoration on top of the colours.
+THEME_MODES = ("Farever Dynamic", "Dark Dynamic", "Sparkle Dynamic",
+               "Farever", "Dark", "Sparkle", "Rift")
 # What a fresh install gets, and where an unrecognised saved value lands. Not
 # THEME_MODES[0]: the dark panels are what the meter has always shipped with,
 # and a new option shouldn't repaint anybody's overlay on upgrade.
@@ -1043,6 +1049,21 @@ FONT_SPECS = {
     # rather than a summary of them.
     "mono_stat_b": ("Consolas", 10, "bold"),
 }
+# The face everything wears unless a theme asks for another one.
+UI_FONT_DEFAULT = "Segoe UI"
+# Which of those a theme is allowed to swap. Derived from FONT_SPECS rather
+# than listed by hand, so a font added up there lands in the right camp on its
+# own: the Segoe UI entries are labels, names and captions and can wear
+# anything, while the Consolas entries are the number columns — a theme that
+# made THOSE proportional would unalign every table in the overlay, which is
+# the whole reason they're monospaced.
+THEME_FONT_KEYS = tuple(k for k, (family, *_rest) in FONT_SPECS.items()
+                        if family == UI_FONT_DEFAULT)
+# ...and on which windows. The control menu is deliberately absent: it is
+# Farever-styled whatever theme you're wearing (see _pick_theme), and a panel
+# that kept its own colours while changing its typeface would look broken
+# rather than themed.
+THEME_FONT_GROUPS = ("meter", "detail", "minimap", "compass")
 # The floor is where the fonts stop moving: sizes are clamped at 6pt inside
 # _set_group_scale, and every body font in FONT_SPECS has hit that clamp by
 # ~55%. A slider that goes lower would keep moving while the window stayed
@@ -1198,6 +1219,56 @@ THEME_DARK = dict(
     header_off="#2A3346",   # a header bar whose element is hidden
     map_body=MAP_BODY_DARK,
 )
+# Night-violet, taken off the sparkling critters themselves — the deep blue of
+# the tail, the violet fur, the magenta glow around it and the gold of the
+# sparkle. The fourth base, and the only one that is nobody's idea of
+# camouflage: Farever matches the game's parchment UI, Dark matches its map
+# panels, Rift matches the place you're standing in. This one matches a
+# squirrel.
+#
+# Two things make it more than a recolour:
+#
+#   * It swaps the proportional face to Candara — rounded and soft where Segoe
+#     UI is neutral. Measured before it was chosen: Candara is NARROWER than
+#     Segoe at every size the overlay uses ("OVER%" is 34px against 39px, and
+#     its linespace is a pixel shorter), so nothing here can push a window past
+#     the pixel minimums in MIN_W. The number columns stay Consolas.
+#   * The accent is GOLD rather than another pink, which is what keeps this
+#     theme and Rift apart. They are the only two dark panels with warm
+#     highlights, and a pale-pink accent put them 56 deltaE closer than is
+#     comfortable for two entries a player is meant to choose between.
+#
+# This started life as a pale lilac panel and was measured down to a dark one,
+# which is worth recording because the middle is NOT available: darkening a
+# light panel costs contrast on every ink row at once, and it also walks the
+# violet track toward the blue damage bar. A mid lilac fails both — the
+# darkest light version that still cleared the floors was #F2E8FC, which is
+# indistinguishable from where it started. Dark pays for itself the other way,
+# with the ink going light instead.
+#
+# Every ink/panel pair here was measured against the same pair on the three
+# shipping themes and clears the weakest of them: body text 11.6:1 (floor
+# 10.8), sidebar text 9.8 (floor 9.6, the tightest row), dim 5.5 (floor 4.9).
+# The bars were checked as colour rather than ratio, the way the SELF_HEAL_BAR
+# comment describes: the blue damage bar sits 28.3 deltaE off this track
+# (floor 26.5) and the self-heal green 61.4 off it. The body is also held 13.5
+# deltaE off Rift's and 11.1 off Dark's, so the three dark panels stay
+# tellable apart at a glance.
+THEME_SPARKLE = dict(
+    THEME_DEFAULT,
+    border="#150B28",       # near-black violet; the panel edge
+    body="#261747",         # deep violet — bluer than Rift's maroon, on purpose
+    soft="#362356",         # separators and the breakdown's column rule
+    header="#7A4FC0",       # the critter's violet
+    header_combat="#B32E72",  # ...and its magenta glow, for a fight
+    track="#3D2C60",        # bar troughs
+    fg_header="#FFFFFF", fg_header_dim="#E8D9FA",
+    fg_text="#E4D4F7", fg_value="#FFFFFF", fg_dim="#A48CC6",
+    accent="#FFD86B",       # headings; the gold of the sparkle
+    header_off="#3A3350",   # a header bar whose element is hidden
+    map_body="#1D1138",     # dark, so the markers stay the bright thing on it
+    font="Candara",
+)
 THEME_RIFT = {
     "border": RIFT_EDGE, "body": RIFT_BODY, "soft": "#3D0F28",
     "header": RIFT_GLOW, "header_combat": "#C41E6E",
@@ -1211,6 +1282,17 @@ THEME_RIFT = {
     "heal_self": SELF_HEAL_BAR,
     "header_off": "#3B3036",
     "map_body": RIFT_BODY,
+}
+
+# Which base each mode wears, pinned or Dynamic. A table rather than the chain
+# of conditionals this used to be: with three bases the chain had a default
+# arm that quietly meant "Farever", and adding a fourth would have meant
+# spotting that before it silently swallowed the new name.  Anything absent
+# here — "Farever", "Farever Dynamic", and "Rift", which is handled on its own
+# in _pick_theme — falls to THEME_DEFAULT.
+THEME_BASES = {
+    "Dark": THEME_DARK, "Dark Dynamic": THEME_DARK,
+    "Sparkle": THEME_SPARKLE, "Sparkle Dynamic": THEME_SPARKLE,
 }
 
 # The game's affinity vocabulary as it actually arrives off
@@ -4294,6 +4376,11 @@ class Overlay:
         self._header_bg = BG_HEADER    # last tint pushed to the header bars
         self._theme = THEME_DEFAULT    # what's painted right now
         self._theme_mode = THEME_MODE_DEFAULT   # what the player asked for
+        # The face currently configured on the themed font sets. Tracked rather
+        # than read back off a font object because reconfiguring a family
+        # relayouts four windows, and the theme is re-picked every tick.
+        self._theme_font = UI_FONT_DEFAULT
+        self._families = None          # installed fonts, filled on first ask
         self._action_q = []
         self._q_lock = threading.Lock()
         self._quit_armed = False       # the Quit button's second-click window
@@ -9934,8 +10021,7 @@ class Overlay:
         there the rift colours are something the game put you in rather than
         something you chose, so seeing the overlay's own palette while you're
         reading its settings is the more useful of the two."""
-        base = (THEME_DARK if self._theme_mode in ("Dark", "Dark Dynamic")
-                else THEME_DEFAULT)
+        base = THEME_BASES.get(self._theme_mode, THEME_DEFAULT)
         if self._theme_mode == "Rift":
             return THEME_RIFT
         if self._menu_unlock:
@@ -9949,10 +10035,47 @@ class Overlay:
         self._theme_mode = mode
         self._save_settings()
 
+    def _apply_theme_font(self, family):
+        """Put the themed windows in `family`, if they aren't already.
+
+        Guarded on the current face because this is reached from the draw pass:
+        _pick_theme runs every tick, and reconfiguring a named font relayouts
+        every window packed to it. The guard is what keeps that to the handful
+        of ticks where the theme actually changed.
+
+        A missing family is not an error to Tk — it silently substitutes, and
+        the overlay would come up in whatever it picked with no way to tell
+        that from a deliberate choice. So it's checked, and an absent face
+        falls back to the one every other theme uses.
+        """
+        if family != UI_FONT_DEFAULT and family not in self._font_families():
+            print(f"[meter] font {family!r} not installed; using "
+                  f"{UI_FONT_DEFAULT}", file=sys.stderr)
+            family = UI_FONT_DEFAULT
+        if family == self._theme_font:
+            return
+        self._theme_font = family
+        for group in THEME_FONT_GROUPS:
+            for key in THEME_FONT_KEYS:
+                self._font_sets[group][key].configure(family=family)
+        # The same two the scale slider has to poke, and for the same reason:
+        # both are drawn on a canvas and measure their own text, so neither
+        # notices that the text just changed width.
+        self._parse_text = None
+        self._draw_hint()
+
+    def _font_families(self):
+        """Installed font families, folded and cached. The Tk call walks the
+        system font list, which is not something to do on a draw pass."""
+        if self._families is None:
+            self._families = set(tkfont.families(root=self.root))
+        return self._families
+
     def _apply_theme(self, t):
         """Repaint the meter and breakdown into `t`. Same widget tree either
         way — nothing is rebuilt, so this is safe to call mid-combat."""
         self._theme = t
+        self._apply_theme_font(t.get("font") or UI_FONT_DEFAULT)
         for w in (self.m_border, self.d_border):
             w.config(bg=t["border"])
         for w in (self.m_body, self.rows_box, self.rows_keeper, self.d_body,
