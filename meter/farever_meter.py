@@ -7385,9 +7385,14 @@ class Overlay:
                   activebackground=RIFT_EDGE, activeforeground="#2C0A1E",
                   relief="flat", bd=0, padx=10, cursor="hand2",
                   highlightthickness=0).pack(side="right", fill="y")
-        # The header doubles as the drag handle, same as every other window —
-        # a card parked over the loot can be moved rather than dismissed.
-        self._bind_drag(self.reportwin, (header, title),
+        # The WHOLE card is the drag handle, not just the header. Every other
+        # window earns its header-only handle by being interactive inside;
+        # this one is a forced popup whose body is all labels, so anywhere
+        # you can grab should move it. Binding the Toplevel reaches every
+        # descendant through bindtags — including the body rows
+        # _render_report rebuilds later, which per-widget binding would miss —
+        # and _bind_drag's button guard keeps Copy/Close/✕ clickable.
+        self._bind_drag(self.reportwin, (self.reportwin,),
                         unlocked=self._mouse_available)
 
         body = tk.Frame(border, bg=RIFT_BODY, padx=16, pady=12)
@@ -7407,6 +7412,16 @@ class Overlay:
                   relief="flat", bd=0, padx=24, pady=5, cursor="hand2",
                   highlightthickness=1,
                   highlightbackground=RIFT_EDGE).pack(side="left")
+        # Close lives down here as well as the header ✕: on a forced popup
+        # the footer is where the hand already is after reading, and the ✕ is
+        # a small target parked over the game.
+        tk.Button(footer, text="Close",
+                  command=self._enqueue(self._close_report),
+                  font=self.fonts["ui_b"], bg=RIFT_EDGE, fg="#2C0A1E",
+                  activebackground=RIFT_TITLE, activeforeground="#2C0A1E",
+                  relief="flat", bd=0, padx=24, pady=5, cursor="hand2",
+                  highlightthickness=1,
+                  highlightbackground=RIFT_EDGE).pack(side="left", padx=(8, 0))
         # The copy feedback. Empty text rather than pack_forget when idle, so
         # the footer never changes height under the cursor.
         self._report_flash = tk.Label(footer, text="", bg=RIFT_BODY,
@@ -8623,6 +8638,12 @@ class Overlay:
         free = unlocked or (lambda: not self._is_locked())
 
         def start(e):
+            # A whole-window handle (the rift report binds its Toplevel, which
+            # catches every descendant through bindtags) must still leave its
+            # buttons as buttons: a press that starts a drag would swallow the
+            # click it was.
+            if isinstance(e.widget, tk.Button):
+                return
             if not free():
                 return
             state["dx"] = e.x_root - win.winfo_x()

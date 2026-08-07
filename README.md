@@ -596,11 +596,15 @@ its totals.
 **Copy** puts it on the clipboard as an image, so it pastes into chat looking
 like the card. It's rendered from the numbers rather than screenshotted, so
 whatever is behind the card can't bleed into it; if the clipboard or Pillow
-declines it falls back to plain text. Every report is also written to `parses/`
-as `.json`, `.txt` and `.png` the moment it exists — before the card is even up
-— so closing it by reflex can't be the only copy of a run you can't re-fight.
-**Last Rift Report** in the Actions tab brings back the most recent one, and it
-survives restarts.
+declines it falls back to plain text. **Close** sits right next to it — the
+card is a popup parked over your loot, so dismissing it shouldn't mean
+reaching for the small ✕ in the corner. And since nothing on the card is
+interactive besides its three buttons, **the whole card is a drag handle**:
+grab it anywhere to move it, not just by the header. Every report is also
+written to `parses/` as `.json`, `.txt` and `.png` the moment it exists —
+before the card is even up — so closing it by reflex can't be the only copy
+of a run you can't re-fight. **Last Rift Report** in the Actions tab brings
+back the most recent one, and it survives restarts.
 
 ### The last encounter stays up
 
