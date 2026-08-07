@@ -87,6 +87,8 @@ def main():
     aproxy = offs("hxbit.ArrayProxyData")
     adyn = offs("hl.types.ArrayDyn")
     progress = offs("st.player.Progress")
+    acct = offs("st.player.AccountProgress")
+    coll = offs("st.player.Collection")
     mapdata = offs("hxbit.MapData")
     smap = offs("haxe.ds.StringMap")
     # The codex counter proxy. hxbit generates one class per record shape and
@@ -293,7 +295,19 @@ def main():
                    "isMe": player["isMe"][0], "lobbyId": player["lobbyId"][0],
                    "uid": player["uid"][0], "hero": player["hero"][0],
                    # ...and the per-character codex/collection store.
-                   "progress": player["progress"][0]},
+                   "progress": player["progress"][0],
+                   # The ACCOUNT-wide store — collected companions, mounts,
+                   # gliders. Distinct from `progress`, which is per character.
+                   "accountProgress": player["accountProgress"][0]},
+        # Collected critters (companions), measured 2026-08-07
+        # (frida/critter_probe.js): Collection.pets is an hxbit proxy array of
+        # plain UNIT KINDS ("Turtle_Grey", "Frog_Demon") — the same string as
+        # ent.Unit.kind, which is what lets the map filter compare them at all.
+        # The game's own "already caught?" check is Collection.hasPet(kind),
+        # seen firing live with exactly these strings. NOT item ids: only two
+        # Critter_* items exist in the cdb and both are special grants.
+        "AccountProgress": {"collection": acct["collection"][0]},
+        "Collection": {"pets": coll["pets"][0]},
         # hxbit wraps a replicated array in a proxy: Group.players is an
         # ArrayProxyData whose ArrayDyn wraps an ArrayObj. Two hops, and the
         # party roster is the reason they are here.

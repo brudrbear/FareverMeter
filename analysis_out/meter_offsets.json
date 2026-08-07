@@ -149,7 +149,14 @@
     "lobbyId": 264,
     "uid": 184,
     "hero": 304,
-    "progress": 240
+    "progress": 240,
+    "accountProgress": 224
+  },
+  "AccountProgress": {
+    "collection": 168
+  },
+  "Collection": {
+    "pets": 160
   },
   "ArrayProxyData": {
     "array": 40

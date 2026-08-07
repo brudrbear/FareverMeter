@@ -638,6 +638,10 @@
     "st.Player.onUnitCodexRankProgress__impl": 3869,
     "st.Player.notifyUnitKilled__impl": 3871
   },
+  "pet_targets": {
+    "ent.Hero.notifyCaptureMiss__impl": 7583,
+    "ent.Hero.notifyCapture__impl": 7584
+  },
   "map_natives": {
     "hbkeys": 24780,
     "hbsize": 24783,

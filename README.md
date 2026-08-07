@@ -258,7 +258,7 @@ again.
 | Controls | Reset data | the keybind for resetting the encounter, `Shift + \` by default. Click it and press the combination you want. It needs a modifier (or an F-key, or a mouse button) — the meter *swallows* what it fires on, so a bare letter would cost you that key in game. **Middle click, Mouse 4 and Mouse 5 can be bound**; left and right never can. Takes effect immediately |
 | Controls | Auto reset on boss pull | wipes the encounter at the **start of every boss fight**, so the parse you end up with is that fight and nothing else. It keeps the last few seconds rather than wiping flat — the game's healthbar is what the pull is detected from and it refreshes on a timer, so the opening burst has already landed by the time the meter hears about it. Bosses only: elites raise the same bar, and resetting for every elite on the way to a boss would be useless. It also clears the meter when a fight **ends without a kill** — the boss resets, or the group wipes — so the next attempt starts clean; the attempt you just made stays on screen until you re-pull (see [The last encounter stays up](#the-last-encounter-stays-up)) |
 | Compass | Collectibles / Party Members | what the bearing strip carries. Separate from the minimap's ticks below — the two panels answer different questions, and wanting chests on one but not the other is ordinary. Soulstones have no tick and always show |
-| Minimap | Collectibles / Players / Enemies / Activities | what the map draws, by category — orbs and chests share one tick, since nobody wants one without the other. Obelisks, respawn points and soulstones have no tick and are always drawn: they're the landmarks you navigate *by*. The compass isn't affected |
+| Minimap | Collectibles / Players / Enemies / Activities / Critters | what the map draws, by category — orbs and chests share one tick, since nobody wants one without the other. Obelisks, respawn points and soulstones have no tick and are always drawn: they're the landmarks you navigate *by*. The compass isn't affected. Enemies and Critters cycle through three states instead of a tick — see [the minimap section](#minimap) for their middle ones (*only missing from codex* / *only uncollected*) |
 | History | Keep a history of finished encounters | saves every encounter to disk instead of throwing it away — see [Combat history](#combat-history). Off by default; ticking it reveals the folder path and the browser |
 | Actions | 60s Parse Mode | see below |
 | Actions | Parse Screenshots | opens `parses/` in Explorer (created on the spot if you haven't run one yet) |
@@ -332,9 +332,18 @@ Enemies are exempt: a mob appearing late is worse than a mob flickering.
 
 **Critters are green pawprints**, not red dots. The game calls them
 Companions — frogs, rabbits, squirrels, goats — and they were previously drawn
-as enemies, which they aren't. They have their own **Critters** tick, so a zone
-carpeted in them can be cleared off the map without hiding anything that can
-actually hurt you.
+as enemies, which they aren't. They have three states of their own in the
+control menu, the same shape as enemies:
+`Critters: all` → `Critters: only uncollected` → `Critters: hidden`.
+
+The middle one is for filling your collection. Your account's caught
+companions are replicated to the client, so the meter knows exactly which
+kinds you've already netted — set it and the map draws only the critters you
+still need, and a catch takes its dot off the map within moments. Until the
+collection has been read (a few seconds after attach) everything shows rather
+than hiding the world. The last state clears a zone carpeted in frogs off the
+map without hiding anything that can actually hurt you, which is what the old
+**Critters** tick did (an unticked box carries across as `hidden`).
 
 Critters are also swept **without a distance limit**, unlike enemies. That's
 what makes the sparkly tracker below work: a sparkling critter three hills away

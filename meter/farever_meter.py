@@ -583,10 +583,9 @@ MINIMAP_FILTERS = (
     ("nodes",      "Ore & herb nodes", ("ore", "herb")),
     ("players",    "Players",      ("hero",)),
     ("activities", "Activities",   ("activity",)),
-    # Critters get a tick of their own rather than riding the Enemies cycle:
-    # they are not enemies, and the reason to hide them (a zone carpeted in
-    # frogs) has nothing to do with the reason to hide mobs.
-    ("critters",   "Critters",     ("critter",)),
+    # Critters are NOT here: they graduated from a tick to a three-state
+    # cycle of their own (MINIMAP_CRITTER_MODES) when the collection filter
+    # arrived — same shape as enemies, for the same reason.
 )
 # category -> which tick governs it, built once rather than searched per marker.
 MINIMAP_FILTER_OF = {cat: key for key, _label, cats in MINIMAP_FILTERS
@@ -606,6 +605,22 @@ MINIMAP_FOE_MODES = (
 )
 MINIMAP_FOE_MODE_KEYS = [k for k, _ in MINIMAP_FOE_MODES]
 MINIMAP_FOE_LABEL = dict(MINIMAP_FOE_MODES)
+
+# Critters used to be an ordinary tick; the collection gave them the same
+# three states enemies have. "Only uncollected" is the codex filter's twin:
+# with 74 catchable companions, the question while filling the collection is
+# not "are critters shown" but "which of these do I still need a net for".
+# The middle state hides a critter as soon as its KIND is in the account's
+# Collection.pets list (measured 2026-08-07: that list holds plain unit
+# kinds, and the game's own already-caught check — Collection.hasPet — takes
+# exactly this string).
+MINIMAP_CRITTER_MODES = (
+    ("all",         "Critters: all"),
+    ("uncollected", "Critters: only uncollected"),
+    ("off",         "Critters: hidden"),
+)
+MINIMAP_CRITTER_MODE_KEYS = [k for k, _ in MINIMAP_CRITTER_MODES]
+MINIMAP_CRITTER_LABEL = dict(MINIMAP_CRITTER_MODES)
 
 # The compass gets its own pair, deliberately not shared with the map's. The
 # two panels answer different questions — "what is around me" against "which
@@ -3182,6 +3197,12 @@ class GameUIState:
         # empty dict and a fully-mastered codex are indistinguishable here.
         self._codex_ranks: dict[str, int] = {}
         self._codex_seen = False
+        # Unit kinds of the account's collected companions, mirrored from
+        # Collection.pets. Same no-mirror-yet rule as the codex: an empty set
+        # and "the list hasn't arrived" are indistinguishable, so the filter
+        # only trusts this once a `pets` message has landed.
+        self._pets: set[str] = set()
+        self._pets_seen = False
 
     def set_zone(self, sig, world_map=None):
         """layer.world.level from the hook — the loaded level's name, sent
@@ -3269,6 +3290,28 @@ class GameUIState:
         see the note on _codex_ranks."""
         with self._lock:
             return self._codex_seen
+
+    def set_pets(self, kinds):
+        """The whole collected-companion list from the hook, replacing what we
+        had. Replaced rather than merged like the codex mirror — though here
+        it matters less: Collection.pets is ACCOUNT-wide (measured), so a
+        character switch shows the same list."""
+        if not isinstance(kinds, (list, tuple)):
+            return
+        with self._lock:
+            self._pets = {k for k in kinds if isinstance(k, str)}
+            self._pets_seen = True
+
+    def pet_collected(self, kind):
+        """Whether this critter kind is already in the account's collection."""
+        with self._lock:
+            return kind in self._pets
+
+    def pets_ready(self):
+        """Whether a collection mirror has arrived. False means "don't
+        filter" — same reasoning as codex_ready."""
+        with self._lock:
+            return self._pets_seen
 
     def zone_sig(self):
         with self._lock:
@@ -4404,6 +4447,9 @@ class Overlay:
                                  for key, _label, _cats in COMPASS_FILTERS}
         # Enemies have their own three-state mode; see MINIMAP_FOE_MODES.
         self._foe_mode = "all"
+        # ...and so do critters, since the collection filter (see
+        # MINIMAP_CRITTER_MODES).
+        self._critter_mode = "all"
         # Codex popups — both the per-kill count and the completion fanfare.
         # On by default: it's the visible half of the codex feature, and a
         # feature nobody can see until they find a tick is a feature nobody
@@ -4873,6 +4919,15 @@ class Overlay:
             old = data.get("map_filters")
             if isinstance(old, dict) and old.get("enemies") is False:
                 self._foe_mode = "off"
+        # Critters were an ordinary tick until 3.7.3; carry an unticked box
+        # across as "hidden" rather than silently turning them back on.
+        cm = data.get("critter_mode")
+        if cm in MINIMAP_CRITTER_MODE_KEYS:
+            self._critter_mode = cm
+        else:
+            old = data.get("map_filters")
+            if isinstance(old, dict) and old.get("critters") is False:
+                self._critter_mode = "off"
         if data.get("mode") in ("party", "all"):
             self.mode = data["mode"]
         if isinstance(data.get("hide_ooc"), bool):
@@ -4964,6 +5019,7 @@ class Overlay:
                     k: bool(self._compass_filters.get(k, True))
                     for k, _label, _cats in COMPASS_FILTERS},
                 "foe_mode": self._foe_mode,
+                "critter_mode": self._critter_mode,
                 "codex_alerts": bool(self._codex_alerts),
                 "sparkly_tracker": bool(self._sparkly_on),
                 "mode": self.mode,
@@ -5824,6 +5880,9 @@ class Overlay:
                 mp, self._enqueue(lambda k=key: self._toggle_map_filter(k)))
         # Enemies cycle all -> missing-from-codex -> hidden; see MINIMAP_FOE_MODES.
         self.btn_map_foes = button(mp, self._enqueue(self._cycle_foe_mode))
+        # Critters cycle all -> only-uncollected -> hidden, the same shape.
+        self.btn_map_critters = button(mp,
+                                       self._enqueue(self._cycle_critter_mode))
 
         section(mp, "COMPASS")
         self.btn_compass_filter = {}
@@ -6130,8 +6189,16 @@ class Overlay:
             # Enemies answer to their own three-state mode rather than a tick.
             if cat == "foe" and self._foe_mode == "off":
                 continue
+            # Critters too, since the collection filter.
+            if cat == "critter" and self._critter_mode == "off":
+                continue
             codex_only = (cat == "foe" and self._foe_mode == "codex"
                           and self.ui_state.codex_ready())
+            # Same shape as codex_only: no mirror yet means show everything,
+            # because an empty collection and a missing message look the same.
+            uncollected_only = (cat == "critter"
+                                and self._critter_mode == "uncollected"
+                                and self.ui_state.pets_ready())
             style = MINIMAP_STYLE_MAP[cat]
             for e in by_cat.get(cat, ()):
                 # "Still missing" means the mob HAS a codex entry and this
@@ -6144,6 +6211,13 @@ class Overlay:
                         continue        # no codex entry at all
                     if self.ui_state.codex_rank(kind) >= CODEX_MAX_RANK:
                         continue        # already mastered
+                # "Still uncollected" = its kind is not in the account's
+                # Collection.pets list. A critter with no kind is shown, not
+                # hidden — fail open, same as an unarrived mirror.
+                if uncollected_only:
+                    kind = e.get("k")
+                    if kind and self.ui_state.pet_collected(kind):
+                        continue        # already caught
                 x, y = self._minimap_px(e.get("x", 0), e.get("y", 0), me,
                                         half, scale, rot)
                 if not (0 <= x <= size and 0 <= y <= size):
@@ -9609,6 +9683,18 @@ class Overlay:
         self._foe_mode = MINIMAP_FOE_MODE_KEYS[(i + 1) % len(MINIMAP_FOE_MODE_KEYS)]
         self._save_settings()
 
+    def _cycle_critter_mode(self):
+        """all -> only uncollected -> hidden -> all; the enemies cycle's twin.
+        Same contract too: nothing redraws by hand, the map reads the mode on
+        its own tick."""
+        try:
+            i = MINIMAP_CRITTER_MODE_KEYS.index(self._critter_mode)
+        except ValueError:
+            i = -1        # an unknown mode from a hand-edited settings file
+        self._critter_mode = MINIMAP_CRITTER_MODE_KEYS[
+            (i + 1) % len(MINIMAP_CRITTER_MODE_KEYS)]
+        self._save_settings()
+
     def _toggle_map_filter(self, key):
         """One category group on or off. Nothing to redraw by hand — the map is
         repainted wholesale on the next tick and reads the ticks as it goes."""
@@ -10794,6 +10880,12 @@ class Overlay:
         self.btn_map_foes.config(
             text=f"{foe_glyph}  "
                  + MINIMAP_FOE_LABEL.get(self._foe_mode, "Enemies: all"))
+        critter_glyph = {"all": "☑", "uncollected": "◪",
+                         "off": "☐"}.get(self._critter_mode, "☑")
+        self.btn_map_critters.config(
+            text=f"{critter_glyph}  "
+                 + MINIMAP_CRITTER_LABEL.get(self._critter_mode,
+                                             "Critters: all"))
         self.btn_map_bg.config(
             text=("☑  World map background" if self._map_bg_on
                   else "☐  World map background"))
@@ -11606,7 +11698,12 @@ REQUIRED_RESOLVER_KEYS = ("anchors", "boss_fns", "boss_targets", "cam_targets",
                           # mirror is never read — so the "only missing from
                           # codex" filter shows everything, forever, with
                           # nothing anywhere saying why.
-                          "codex_targets", "map_natives")
+                          "codex_targets", "map_natives",
+                          # Critter captures (3.7.3). Without these the collected
+                          # list still refreshes on its 20s timer, so the cost
+                          # is only a laggy filter — but the regenerate is the
+                          # same either way.
+                          "pet_targets")
 # The minimap's half of the offsets. The combat half (DamageResult, HitData,
 # ...) is deliberately not listed wholesale: it has been there since the first
 # release, so it can't be what an upgrade is missing, and a list that mentions
@@ -11689,7 +11786,14 @@ REQUIRED_OFFSET_KEYS = ("Activity", "ArrayObj", "BossInfo", "BossesInfo",
                         # footer reading "…" for good with nothing anywhere
                         # saying why. Same silent-upgrade shape as the roster
                         # subkeys above.
-                        "GameLayer.serverName")
+                        "GameLayer.serverName",
+                        # Collected critters (3.7.3). Player has existed forever;
+                        # `accountProgress` and the two new groups are what a
+                        # pre-3.7.3 file lacks — readPets() returns null without
+                        # them and the "only uncollected" filter silently shows
+                        # every critter forever.
+                        "Player.accountProgress", "AccountProgress",
+                        "Collection")
 
 
 def _data_is_current():
@@ -12690,6 +12794,7 @@ def _run(tray, session, ui_state, world, rift_rec, heal_sizer):
     liveness = {"t": time.monotonic(), "printed": 0.0}
     hero_id = {"name": None}           # last local hero, to keep the log quiet
     shard_seen = {"n": False}          # the roster is announced once, not per sweep
+    pets_seen = {"n": None}            # ...and so is the collected-critter mirror
     nullified: dict = {}               # mitigated-hit shapes seen, see below
     nullified_at = [0.0]               # last time they were reported
     boss_fight_on = [False]            # a boss fight is under way, see below
@@ -12955,6 +13060,25 @@ def _run(tray, session, ui_state, world, rift_rec, heal_sizer):
             ranks = p.get("ranks")
             if isinstance(ranks, dict):
                 ui_state.set_codex_ranks(ranks)
+        elif k == "pets":
+            # The account's collected companions, wholesale, sent when the
+            # list changes (plus once at attach). Unit kinds — the same
+            # string critters carry as `k` — which is what the map's
+            # "only uncollected" filter compares.
+            kinds = p.get("kinds")
+            if isinstance(kinds, list):
+                ui_state.set_pets(kinds)
+                # Announced once (then only on growth — a capture mid-session
+                # is worth a line). The mirror going missing is a silent
+                # failure everywhere else, so its arrival is the diagnostic.
+                if pets_seen["n"] is None:
+                    pets_seen["n"] = len(kinds)
+                    print(f"[meter] collected critters: {len(kinds)} kinds "
+                          "on the account", file=sys.stderr)
+                elif len(kinds) > pets_seen["n"]:
+                    pets_seen["n"] = len(kinds)
+                    print(f"[meter] critter collection grew to {len(kinds)} "
+                          "kinds", file=sys.stderr)
         elif k == "codexrank":
             # A single entry moved. Kept in step between full refreshes so a
             # mob you just mastered stops drawing on the map immediately.

@@ -138,6 +138,16 @@ CODEX_TARGETS = ["st.Player.notifyUnitKilled__impl",
                  "st.Player.onUnitCodexRankProgress__impl"]
 codex_targets = {nm: fi for fi, nm in names.items() if nm in CODEX_TARGETS}
 
+# ---- critter capture (companions) ----
+# The capture-net skill script calls ent.Hero.tryCaptureCritter(unit); the
+# result comes back on the hero as one of these two __impl notifications
+# (static, 2026-08-07 — the surface is confirmed but neither has been seen
+# firing yet, so the hook only uses them as "re-read the collection now"
+# triggers and never parses their arguments).
+PET_TARGETS = ["ent.Hero.notifyCapture__impl",
+               "ent.Hero.notifyCaptureMiss__impl"]
+pet_targets = {nm: fi for fi, nm in names.items() if nm in PET_TARGETS}
+
 # haxe.ds.StringMap is a thin wrapper over the native hl.types.BytesMap, so
 # reading it means calling these. They ALLOCATE (hbkeys builds an hl_varray),
 # which puts them under the same game-thread rule as every other HL call.
@@ -156,6 +166,7 @@ payload = {
     "boss_targets": boss_targets,
     "boss_fns": boss_fns,
     "codex_targets": codex_targets,
+    "pet_targets": pet_targets,
     "map_natives": map_natives,
     "funcs": funcs,
     "map_fn": map_fn,
@@ -176,6 +187,10 @@ for nm in CODEX_TARGETS:
     if nm not in codex_targets:
         print(f"    [!] codex target not found in this build: {nm} — "
               f"codex popups will not fire")
+for nm in PET_TARGETS:
+    if nm not in pet_targets:
+        print(f"    [!] capture target not found in this build: {nm} — "
+              f"the collected-critter mirror will only refresh on its timer")
 for nm, fi in sorted(candidates.items()):
     print(f"    {nm:<45} findex={fi}")
 print(f"[written] {OUT / 'resolver_data.json'}")

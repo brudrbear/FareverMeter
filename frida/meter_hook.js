@@ -1523,6 +1523,86 @@ function hookCodex(base) {
     log("codex tracking active");
 }
 
+// ---- collected critters (companions) ----
+// Measured 2026-08-07 (frida/critter_probe.js). The account-wide list of
+// caught companions is replicated and reachable by PLAIN READS ONLY — no HL
+// call anywhere, which is what lets this run on the send timer rather than
+// needing the game thread:
+//
+//   Hero.player -> Player.accountProgress -> AccountProgress.collection
+//     -> Collection.pets (hxbit.ArrayProxyData) -> .array (ArrayDyn)
+//     -> .array (ArrayObj of String)
+//
+// Elements are UNIT KINDS ("Turtle_Grey", "Frog_Demon") — the same string
+// sweepWorld already sends as `k` for every critter, and the same string the
+// game's own Collection.hasPet(kind) takes (seen firing live). That equality
+// is the entire feature: the host hides critters whose kind is in this list.
+//
+// There is no per-entry event to mirror (a capture is rare and server-decided)
+// so the list ships WHOLESALE on the codex's 20s cadence, plus immediately
+// after either capture notification fires. Resent only when it changed —
+// it's ~74 strings at most, but 20s resends of an unchanged list are noise.
+let petsLastSent = null;         // JSON of the last list shipped, or null
+
+function readPets() {
+    try {
+        if (!localHero || localHero.isNull()) return null;
+        if (!OFF.AccountProgress || !OFF.Collection
+            || OFF.Player.accountProgress == null) return null;
+        const player = localHero.add(OFF.Hero.player).readPointer();
+        if (!player || player.isNull()) return null;
+        const acct = player.add(OFF.Player.accountProgress).readPointer();
+        if (!acct || acct.isNull()) return null;
+        const coll = acct.add(OFF.AccountProgress.collection).readPointer();
+        if (!coll || coll.isNull()) return null;
+        const proxy = coll.add(OFF.Collection.pets).readPointer();
+        if (!proxy || proxy.isNull()) return null;
+        const dyn = proxy.add(OFF.ArrayProxyData.array).readPointer();
+        if (!dyn || dyn.isNull()) return null;
+        const inner = dyn.add(OFF.ArrayDyn.array).readPointer();
+        if (!inner || inner.isNull()) return null;
+        const n = inner.add(OFF.ArrayObj.length).readS32();
+        if (n < 0 || n > 4096) return null;
+        const data = inner.add(OFF.ArrayObj.array).readPointer();
+        const out = [];
+        for (let i = 0; i < n; i++) {
+            const s = hlStr(data.add(OFF.ArrayObj.data + i * 8).readPointer());
+            if (s) out.push(s);
+        }
+        return out;
+    } catch (e) { return null; }
+}
+
+function sendPets() {
+    const kinds = readPets();
+    if (kinds === null) return;      // hero not up yet, or stale offsets
+    const key = JSON.stringify(kinds);
+    if (key === petsLastSent) return;
+    petsLastSent = key;
+    send({ kind: "pets", kinds: kinds });
+}
+
+// The two capture notifications double as "the list may have moved" triggers.
+// Their argument layout is UNMEASURED (the surface is static-confirmed only),
+// so nothing here reads an argument — the hook re-reads the replicated list
+// it already trusts, after a beat for the server write to replicate.
+function hookCapture(base) {
+    const T = DATA.pet_targets || {};
+    let hooked = 0;
+    for (const name in T) {
+        try {
+            Interceptor.attach(base.add(T[name] * 8).readPointer(), {
+                onEnter: function () {
+                    setTimeout(sendPets, 500);
+                    setTimeout(sendPets, 3000);   // belt for slow replication
+                }
+            });
+            hooked++;
+        } catch (e) { log("!! capture hook failed for " + name + ": " + e); }
+    }
+    if (hooked) log("capture tracking active (" + hooked + " hooks)");
+}
+
 // Set by a timer, consumed on the game thread by the camera hook. The lookup
 // itself must NOT run on the timer: getHero is an HL call, and an HL call off
 // the game thread kills the game with "Can't lock GC in unregistered thread".
@@ -1646,6 +1726,27 @@ function main() {
         // catch-up for progress made outside them (another character, a
         // relog, or a rank the events missed).
         setInterval(function () { codexSendDue = true; }, 20000);
+    }
+    // Collected critters — plain reads only, so this may run on its own
+    // timer without the game-thread relay the codex needs. Same silent-stale
+    // failure shape as everything else on this list: without the offsets the
+    // filter shows every critter forever, so say so once.
+    if (OFF.AccountProgress && OFF.Collection
+            && OFF.Player.accountProgress != null) {
+        hookCapture(base);
+        // The hero isn't latched yet at attach, so the first reads return
+        // null — retry on a short clock until one lands, then fall back to
+        // the slow cadence. Otherwise the filter has nothing to filter on
+        // for its first 20 seconds and quietly shows everything.
+        const petsWarm = setInterval(function () {
+            if (petsLastSent !== null) { clearInterval(petsWarm); return; }
+            sendPets();
+        }, 2000);
+        setInterval(sendPets, 20000);
+    } else {
+        log("!! AccountProgress/Collection offsets missing — the "
+            + "'only uncollected critters' map filter will show everything. "
+            + "Delete analysis_out and restart to regenerate.");
     }
     // Say so if the sweep can't run. sweepWorld bails on its first line when
     // an offset it needs is absent, and it does that inside a try/catch on a
