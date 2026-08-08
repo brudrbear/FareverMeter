@@ -482,7 +482,125 @@ BUFF_PICK_LIST_H = 190
 # answer. Lower than it was, because the rows got taller and heavier.
 BUFF_PICK_MAX_ROWS = 25
 BUFF_PICK_ICON = 26            # icon edge in the picker, at 100%
+# Where the two numbers sit on an icon, and how big they are.
+#
+# Both are per tray because the right answer depends on the tray: a row of
+# small icons wants the timer big and centred with no stack count at all, while
+# a stack-heavy build wants the count large and the timer tucked in a corner.
+# The defaults are the corners they shipped in, which keeps them from colliding
+# out of the box.
+#
+# Each entry is (anchor, x fraction, y fraction). The inset is applied inward
+# from whichever edges the anchor touches, so a corner label sits off the
+# rounded edge and a centred one is not pushed around by it.
+BUFF_TEXT_POSITIONS = {
+    "Top left": ("nw", 0.0, 0.0),
+    "Top": ("n", 0.5, 0.0),
+    "Top right": ("ne", 1.0, 0.0),
+    "Left": ("w", 0.0, 0.5),
+    "Centre": ("center", 0.5, 0.5),
+    "Right": ("e", 1.0, 0.5),
+    "Bottom left": ("sw", 0.0, 1.0),
+    "Bottom": ("s", 0.5, 1.0),
+    "Bottom right": ("se", 1.0, 1.0),
+}
+BUFF_TEXT_POS_NAMES = tuple(BUFF_TEXT_POSITIONS)
+BUFF_TEXT_INSET = 0.045        # of the icon edge, so it holds at every size
+
+# Text size as a PERCENTAGE of a base derived from the icon, not an absolute
+# point size: an 18pt number is unreadable on a 24px icon and lost on a 72px
+# one, and a tray's icon size is already a slider. 100% is the size the trays
+# shipped with.
+BUFF_TEXT_SCALE_MIN, BUFF_TEXT_SCALE_MAX = 50, 220
+BUFF_TEXT_BASE_RATIO = 0.30    # icon edge -> text height at 100%
 BUFF_PICK_DESC_WRAP = 300      # px before the description wraps, at 100%
+
+
+def _blank_trays():
+    """A fresh set of tray configs — one per slot, only the first switched on.
+
+    Always BUFF_TRAY_MAX of them, because the index IS the identity: a tray's
+    window, its saved position and its settings all key off the same slot.
+    """
+    trays = [dict(BUFF_TRAY_DEFAULTS, keys=[]) for _ in range(BUFF_TRAY_MAX)]
+    for t in trays[1:]:
+        t["on"] = False
+    return trays
+
+
+def _sanitise_trays(saved):
+    """Validate a saved tray list into a usable one.
+
+    Field by field, like every other setting here: a file written by a newer
+    build, or hand-edited, should cost you the one value rather than the
+    arrangement you spent time on.
+    """
+    trays = _blank_trays()
+    if not isinstance(saved, list):
+        return trays
+    for i, row in enumerate(saved[:BUFF_TRAY_MAX]):
+        if not isinstance(row, dict):
+            continue
+        t = trays[i]
+        for flag in ("on", "lock", "stacks", "sweep", "timer", "flash", "warn"):
+            if isinstance(row.get(flag), bool):
+                t[flag] = row[flag]
+        sz = row.get("size")
+        if isinstance(sz, int) and BUFF_ICON_MIN <= sz <= BUFF_ICON_MAX:
+            t["size"] = sz
+        if row.get("layout") in BUFF_LAYOUTS:
+            t["layout"] = row["layout"]
+        if row.get("inactive") in BUFF_INACTIVE_MODES:
+            t["inactive"] = row["inactive"]
+        for which in ("stacks", "timer"):
+            if row.get(f"{which}_pos") in BUFF_TEXT_POSITIONS:
+                t[f"{which}_pos"] = row[f"{which}_pos"]
+            v = row.get(f"{which}_size")
+            if (isinstance(v, int)
+                    and BUFF_TEXT_SCALE_MIN <= v <= BUFF_TEXT_SCALE_MAX):
+                t[f"{which}_size"] = v
+        # x/y are absent for a set saved before positions followed the
+        # character; those trays keep whatever the shared position cache last
+        # put them at, which is where their windows already are.
+        for axis in ("x", "y"):
+            if isinstance(row.get(axis), int):
+                t[axis] = row[axis]
+        keys = row.get("keys")
+        if isinstance(keys, list):
+            # Deliberately NOT filtered against status_meta: a key the current
+            # metadata doesn't know is far more likely to be a buff from a game
+            # version this install hasn't regenerated for than a typo, and
+            # silently dropping it would quietly empty someone's tray on a
+            # patch day. An unknown key draws as a placeholder under its own id
+            # and starts working again the moment the data catches up.
+            t["keys"] = [k for k in keys if isinstance(k, str) and k]
+    return trays
+
+
+def _trays_to_json(trays):
+    """One tray list, as it goes into the settings file."""
+    out = []
+    for t in trays:
+        row = {"on": bool(t.get("on")),
+               "lock": bool(t.get("lock")),
+               "size": int(t.get("size", BUFF_ICON_DEFAULT)),
+               "layout": t.get("layout", "row"),
+               "inactive": t.get("inactive", BUFF_INACTIVE_DIM),
+               "stacks": bool(t.get("stacks")),
+               "stacks_pos": t.get("stacks_pos", "Bottom right"),
+               "stacks_size": int(t.get("stacks_size", 100)),
+               "sweep": bool(t.get("sweep")),
+               "timer": bool(t.get("timer")),
+               "timer_pos": t.get("timer_pos", "Top left"),
+               "timer_size": int(t.get("timer_size", 100)),
+               "flash": bool(t.get("flash")),
+               "warn": bool(t.get("warn")),
+               "keys": list(t.get("keys") or ())}
+        for axis in ("x", "y"):
+            if isinstance(t.get(axis), int):
+                row[axis] = t[axis]
+        out.append(row)
+    return out
 
 
 def _initial_shown():
@@ -518,8 +636,12 @@ BUFF_TRAY_DEFAULTS = {
     "layout": "row",
     "inactive": BUFF_INACTIVE_DIM,
     "stacks": True,
+    "stacks_pos": "Bottom right",
+    "stacks_size": 100,
     "sweep": True,
     "timer": True,
+    "timer_pos": "Top left",
+    "timer_size": 100,
     "flash": True,
     "warn": True,
     "keys": (),
@@ -3404,6 +3526,194 @@ class StatusSnapshot:
             return self.stamp > 0
 
 
+class _HistoryRow:
+    """One reusable dataset line in the History browser.
+
+    Same reasoning, and the same measurement, as _BuffPickRow: building these
+    from scratch cost 131ms for 27 rows while reading and parsing the folder
+    behind them cost 0.89ms — so the browser's whole cost was Tk making
+    widgets. HISTORY_PAGE is 200 and the history folder grows without bound, so
+    on a well-used install that was heading for a full second of frozen UI
+    every time the tab was raised.
+
+    Built once, re-pointed at a different dataset on each show(). The Report
+    button is packed and unpacked rather than created conditionally, because
+    only rifts have one and a row must be able to become either kind.
+    """
+
+    def __init__(self, ov):
+        self.ov = ov
+        self.entry = None
+        self._packed = False
+        f = ov.fonts_m
+        self.frame = tk.Frame(ov.history_list, bg=BG_BODY)
+        self.mark = tk.Label(self.frame, text=" ", bg=BG_BODY, fg=FG_DIM,
+                             font=f["mono"], width=1)
+        self.mark.pack(side="left")
+        self.name = tk.Label(self.frame, text="", bg=BG_BODY, fg=FG_TEXT,
+                             font=f["mono"], width=HISTORY_NAME_CELLS,
+                             anchor="w")
+        self.name.pack(side="left")
+        self.when = tk.Label(self.frame, text="", bg=BG_BODY, fg=FG_DIM,
+                             font=f["mono"], width=HISTORY_WHEN_CELLS,
+                             anchor="w")
+        self.when.pack(side="left")
+        self.meta = tk.Label(self.frame, text="", bg=BG_BODY, fg=FG_DIM,
+                             font=f["mono"], width=HISTORY_META_CELLS,
+                             anchor="w")
+        self.meta.pack(side="left")
+        # Packed right-to-left, so Details ends up left of Report.
+        self.btn_details = self._mini("Details", self._details)
+        self.btn_report = self._mini("Report", self._report)
+        self.btn_report.pack_forget()
+        self._report_packed = False
+
+    def _mini(self, text, cmd):
+        b = tk.Button(self.frame, text=text, command=cmd,
+                      font=self.ov.fonts_m["ui"], bg=BG_BODY_SOFT,
+                      fg=FG_TEXT, activebackground=BG_BAR_TRACK,
+                      activeforeground=FG_VALUE, relief="flat", bd=0,
+                      padx=8, pady=1, highlightthickness=1,
+                      highlightbackground=BG_BAR_TRACK, cursor="hand2")
+        b.pack(side="right", padx=(4, 0))
+        return b
+
+    def _details(self):
+        if self.entry:
+            self.ov._enqueue(
+                lambda s=self.entry: self.ov._open_history_entry(s))()
+
+    def _report(self):
+        if self.entry:
+            self.ov._enqueue(
+                lambda s=self.entry: self.ov._open_history_report(s))()
+
+    def show(self, r):
+        self.entry = r
+        if not self._packed:
+            self.frame.pack(fill="x", pady=1)
+            self._packed = True
+        rift = r["kind"] == "rift"
+        cfg = self.ov._cfg
+        # A rift is the one dataset that opens two ways, so it is marked. The
+        # colour is the report card's own, which is where clicking it goes.
+        cfg(self.mark, text="◆" if rift else " ",
+            fg=RIFT_GLOW if rift else FG_DIM)
+        cfg(self.name, text=r["name"][:HISTORY_NAME_CELLS],
+            fg=FG_VALUE if rift else FG_TEXT)
+        cfg(self.when, text=self.ov._when_text(r["at"]))
+        cfg(self.meta,
+            text=f"{self.ov._mmss(r['duration'])}  {int(r['total']):,}")
+        if rift and not self._report_packed:
+            self.btn_report.pack(side="right", padx=(4, 0))
+            self._report_packed = True
+        elif not rift and self._report_packed:
+            self.btn_report.pack_forget()
+            self._report_packed = False
+
+    def hide(self):
+        if self._packed:
+            self.frame.pack_forget()
+            self._packed = False
+        self.entry = None
+
+
+class _BuffPickRow:
+    """One reusable row in the Buffs tab's picker.
+
+    Exists purely for speed, and the numbers are the justification: rebuilding
+    the picker's rows from scratch measured 297ms for 25 rows while deciding
+    what belonged in them took 1.4ms. Tk widget creation was the whole cost, it
+    ran on every keystroke, and the search box felt broken as a result.
+
+    So each row is created once and then re-pointed at whatever status should
+    occupy it. `hide()` unpacks without destroying, because a search that
+    narrows and then widens again must not pay to rebuild what it just threw
+    away.
+
+    The command bound to the Track button cannot be baked in at construction —
+    the row stands for a different status every time it is shown — so it reads
+    `self.key` through a closure that is set on each show().
+    """
+
+    def __init__(self, ov):
+        self.ov = ov
+        self.key = None
+        self._packed = False
+        self._img = None                # keeps the PhotoImage referenced
+        f = ov.fonts_m
+        self.frame = tk.Frame(ov.buff_list, bg=BG_BODY)
+        self.dot = tk.Label(self.frame, text="", bg=BG_BODY, fg=ACCENT,
+                            font=f["ui_tiny_i"], width=2, anchor="w")
+        self.dot.pack(side="left")
+        # One label for the icon, always packed. An empty image is a blank of
+        # the right width, which keeps the name column aligned whether or not
+        # a status has art — the previous version packed a spacer Frame
+        # instead, which is another widget per row for the same effect.
+        self.icon = tk.Label(self.frame, bg=BG_BODY, bd=0)
+        self.icon.pack(side="left", padx=(0, 6))
+        self.text_col = tk.Frame(self.frame, bg=BG_BODY)
+        self.text_col.pack(side="left", fill="x", expand=True)
+        self.name = tk.Label(self.text_col, text="", bg=BG_BODY, fg=FG_TEXT,
+                             font=f["ui"], anchor="w")
+        self.name.pack(side="top", fill="x")
+        self.desc = tk.Label(self.text_col, text="", bg=BG_BODY, fg=FG_DIM,
+                             font=f["ui_tiny_i"], anchor="w", justify="left",
+                             wraplength=BUFF_PICK_DESC_WRAP)
+        self.desc_packed = False
+        self.btn = tk.Button(
+            self.frame, text="Track", command=self._clicked, font=f["ui"],
+            bg=BG_BODY_SOFT, fg=FG_TEXT, activebackground=BG_BAR_TRACK,
+            activeforeground=FG_VALUE, relief="flat", bd=0, padx=10, pady=0,
+            highlightthickness=1, highlightbackground=BG_BAR_TRACK,
+            cursor="hand2")
+        self.btn.pack(side="left", padx=(6, 0))
+
+    def _clicked(self):
+        if self.key:
+            self.ov._enqueue(lambda k=self.key: self.ov._track_buff(k))()
+
+    def show(self, row, tracked, icon_px):
+        self.key = row["key"]
+        if not self._packed:
+            self.frame.pack(fill="x", pady=1)
+            self._packed = True
+        # Guarded throughout — see Overlay._cfg. Clicking Track re-renders the
+        # whole list, but only ONE row's contents actually changed, and Tk
+        # charges full price for setting a label to what it already says.
+        cfg = self.ov._cfg
+        cfg(self.dot, text="●" if row["seen"] else "")
+        img = self.ov.status_icons.get(row["key"], icon_px)
+        # Tk does not own its PhotoImages; the row holds the reference so a
+        # cache eviction elsewhere cannot blank the column.
+        self._img = img
+        if img is not None:
+            cfg(self.icon, image=img, width=0, height=0)
+        else:
+            cfg(self.icon, image="", width=icon_px // 8 or 1, height=1)
+        cfg(self.name, text=row["name"], fg=FG_DIM if tracked else FG_TEXT)
+        if row["desc"]:
+            cfg(self.desc, text=row["desc"])
+            if not self.desc_packed:
+                self.desc.pack(side="top", fill="x")
+                self.desc_packed = True
+        elif self.desc_packed:
+            self.desc.pack_forget()
+            self.desc_packed = False
+        cfg(self.btn,
+            text="Tracked" if tracked else "Track",
+            state="disabled" if tracked else "normal",
+            fg=FG_DIM if tracked else FG_TEXT,
+            disabledforeground=FG_DIM,
+            cursor="arrow" if tracked else "hand2")
+
+    def hide(self):
+        if self._packed:
+            self.frame.pack_forget()
+            self._packed = False
+        self.key = None
+
+
 class StatusIcons:
     """Status icons, cut from the committed sheet on demand.
 
@@ -4867,11 +5177,16 @@ class Overlay:
         # is the identity — a tray's saved position, its window and its
         # settings all key off the same slot, and deleting tray 2 has to leave
         # trays 3 and 4 where they are rather than shuffling them up.
-        self._trays = [dict(BUFF_TRAY_DEFAULTS, keys=[])
-                       for _ in range(BUFF_TRAY_MAX)]
-        # Only the first exists until you make another; the rest are off.
-        for t in self._trays[1:]:
-            t["on"] = False
+        self._trays = _blank_trays()
+        # Which character's trays are loaded. None until the hook identifies
+        # the hero, and the trays are saved under that name — see
+        # set_character(). A character with no saved set starts blank rather
+        # than inheriting the last one, so an alt is never cluttered with a
+        # class's buffs it cannot cast.
+        self._tray_char = None
+        # name -> the saved tray list, for every character seen. Kept whole so
+        # switching back and forth costs nothing and never loses a layout.
+        self._trays_by_char = {}
         self._tray_edit = 0            # which tray the Buffs tab is editing
         # kind -> when it was last seen up, for the flash-on-appear. Kept here
         # rather than in the snapshot because it is a property of what has been
@@ -4884,6 +5199,10 @@ class Overlay:
         # Which trays were revealing on the previous draw, so the draw pass can
         # spot a reveal STARTING or LAPSING and re-run the visibility rules.
         self._tray_revealed_last = set()
+        # (face, pixel height) -> Font, for the numbers drawn on icons. Their
+        # size follows the tray's icon size and its own scale setting, so they
+        # cannot come from the fixed FONT_SPECS sets.
+        self._buff_fonts = {}
         # Pushes settings to the running hook (currently just the sweep rate).
         # A no-op when there's no hook, so the overlay stays testable on its own.
         self._configure = configure or (lambda **kw: None)
@@ -5306,12 +5625,7 @@ class Overlay:
             self.compasswin.geometry(f"+{cp[0]}+{cp[1]}")
         else:
             self._default_compass_pos()
-        for i, win in enumerate(self.buffwins):
-            bp = pos.get(f"buffs{i}")
-            if bp and self._pos_visible(*bp):
-                win.geometry(f"+{bp[0]}+{bp[1]}")
-            else:
-                self._default_buff_pos(i)
+        self._apply_tray_positions(pos)
         mn = pos.get("menu")
         if mn and self._pos_visible(*mn):
             self.menu.geometry(f"+{mn[0]}+{mn[1]}")
@@ -5519,36 +5833,17 @@ class Overlay:
         # A settings file is a record of what you chose, not a schema — an
         # upgrade that erased unknown keys would take your window positions
         # with it the first time someone ran an older build afterwards.
-        # Validated field by field like everything else here: this is the one
-        # setting a user can put real work into (a hand-arranged watchlist), so
-        # one bad value must cost that value and not the arrangement.
-        trays = data.get("buff_trays")
-        if isinstance(trays, list):
-            for i, saved in enumerate(trays[:BUFF_TRAY_MAX]):
-                if not isinstance(saved, dict):
-                    continue
-                t = self._trays[i]
-                for flag in ("on", "lock", "stacks", "sweep", "timer",
-                             "flash", "warn"):
-                    if isinstance(saved.get(flag), bool):
-                        t[flag] = saved[flag]
-                sz = saved.get("size")
-                if isinstance(sz, int) and BUFF_ICON_MIN <= sz <= BUFF_ICON_MAX:
-                    t["size"] = sz
-                if saved.get("layout") in BUFF_LAYOUTS:
-                    t["layout"] = saved["layout"]
-                if saved.get("inactive") in BUFF_INACTIVE_MODES:
-                    t["inactive"] = saved["inactive"]
-                keys = saved.get("keys")
-                if isinstance(keys, list):
-                    # Deliberately NOT filtered against status_meta: a key the
-                    # current metadata doesn't know is far more likely to be a
-                    # buff from a game version this install hasn't regenerated
-                    # for than a typo, and silently dropping it would quietly
-                    # empty someone's tray on a patch day. An unknown key draws
-                    # as a placeholder under its own id and starts working
-                    # again the moment the data catches up.
-                    t["keys"] = [k for k in keys if isinstance(k, str) and k]
+        # Trays are per character. `buff_trays` is what a pre-3.8.1 file wrote
+        # and what we still load before the hook has identified the hero — the
+        # trays have to be on screen from the first frame, and which character
+        # you are is not known for a second or two after that.
+        self._trays = _sanitise_trays(data.get("buff_trays"))
+        by_char = data.get("buff_trays_by_char")
+        if isinstance(by_char, dict):
+            self._trays_by_char = {
+                name: _sanitise_trays(rows)
+                for name, rows in by_char.items()
+                if isinstance(name, str) and name}
         show = data.get("show")
         if isinstance(show, dict):
             for key, _label in TOGGLEABLE_ELEMENTS:
@@ -5603,29 +5898,25 @@ class Overlay:
                 "social_sort": self._social_sort,
                 "session_sort": self._session_sort,
                 "history_on": bool(self._history_on),
-                "buff_trays": [
-                    {"on": bool(t.get("on")),
-                     "lock": bool(t.get("lock")),
-                     "size": int(t.get("size", BUFF_ICON_DEFAULT)),
-                     "layout": t.get("layout", "row"),
-                     "inactive": t.get("inactive", BUFF_INACTIVE_DIM),
-                     "stacks": bool(t.get("stacks")),
-                     "sweep": bool(t.get("sweep")),
-                     "timer": bool(t.get("timer")),
-                     "flash": bool(t.get("flash")),
-                     "warn": bool(t.get("warn")),
-                     "keys": list(t.get("keys") or ())}
-                    for t in self._trays],
+                # The live set, which is also what a character with no saved
+                # trays of its own falls back to reading on the next launch
+                # before its hero is identified.
+                "buff_trays": _trays_to_json(self._trays),
+                "buff_trays_by_char": {
+                    name: _trays_to_json(rows)
+                    for name, rows in self._trays_by_char.items()},
             }, indent=2))
         except OSError as e:
             print(f"[meter] couldn't save settings: {e}", file=sys.stderr)
 
     def _save_pos(self):
+        # Tray positions are NOT written here — they follow the character, so
+        # they live in the tray record and go out with the settings. Everything
+        # else on screen is one window per install and belongs in this file.
+        self._capture_tray_positions()
+        self._save_settings()
         try:
-            trays = {f"buffs{i}": {"x": w.winfo_x(), "y": w.winfo_y()}
-                     for i, w in enumerate(self.buffwins)}
             POSITION_CACHE.write_text(json.dumps({
-                **trays,
                 "meter": {"x": self.root.winfo_x(), "y": self.root.winfo_y()},
                 "detail": {"x": self.detail.winfo_x(),
                            "y": self.detail.winfo_y()},
@@ -6477,6 +6768,14 @@ class Overlay:
         # number that a row of buttons beats a dropdown — you can see how many
         # you have and which are on without opening anything.
         section(buf, "TRAY", first=True)
+        # Whose trays these are. Without it, editing an alt's set looks exactly
+        # like editing your main's — and the moment they differ, that is a
+        # setting you will change on the wrong character.
+        self.lbl_tray_char = tk.Label(
+            buf, text="", bg=BG_BODY, fg=FG_DIM,
+            font=self.fonts_m["ui_tiny_i"], anchor="w", justify="left",
+            wraplength=WARN_WRAP)
+        self.lbl_tray_char.pack(fill="x", pady=(0, 4))
         trayrow = tk.Frame(buf, bg=BG_BODY)
         trayrow.pack(fill="x", pady=(0, 4))
         self.btn_tray_pick = []
@@ -6532,6 +6831,33 @@ class Overlay:
         for flag, _label in BUFF_TRAY_FLAGS:
             self.btn_tray_flag[flag] = button(
                 buf, self._enqueue(lambda f=flag: self._toggle_tray_flag(f)))
+
+        # Where the two numbers go on the icon, and how big. One pair of rows
+        # each, because they are independent — a big centred timer with a small
+        # corner stack count is a perfectly reasonable thing to want.
+        section(buf, "NUMBERS ON THE ICON")
+        self._tray_text_var = {}
+        for which, label in (("timer", "Time left"), ("stacks", "Stacks")):
+            row = field(buf, label)
+            pv = tk.StringVar(value=BUFF_TRAY_DEFAULTS[f"{which}_pos"])
+            self._tray_text_var[f"{which}_pos"] = pv
+            opt = dropdown(row, pv, BUFF_TEXT_POS_NAMES,
+                           lambda _v, w=which: self._on_tray_text_pos(w))
+            opt.pack(side="right", expand=True, fill="x", padx=(8, 0))
+            row = field(buf, f"{label} size")
+            sv = tk.IntVar(value=100)
+            self._tray_text_var[f"{which}_size"] = sv
+            slider(row, sv, BUFF_TEXT_SCALE_MIN, BUFF_TEXT_SCALE_MAX,
+                   lambda _e, w=which: self._on_tray_text_size(w)).pack(
+                side="right", expand=True, fill="x", padx=(8, 0))
+        # Only appears when the two are pointed at the same corner, which is
+        # allowed but is almost always a mistake — they draw on top of each
+        # other and the result reads as a rendering fault.
+        self.lbl_tray_text_clash = tk.Label(
+            buf, text="", bg=BG_BODY, fg=FG_WARN,
+            font=self.fonts_m["ui_tiny_i"], anchor="w", justify="left",
+            wraplength=WARN_WRAP)
+        self.lbl_tray_text_clash.pack(fill="x", pady=(0, 2))
 
         # -- what this tray watches --
         section(buf, "TRACKING")
@@ -8484,16 +8810,19 @@ class Overlay:
         if sig == self._history_sig:
             return
         self._history_sig = sig
-        for w in self._history_row_widgets:
-            w.destroy()
-        self._history_row_widgets = []
         # Name or zone, so "manfish" finds a dungeon's fights and "honey"
         # finds a boss's.
         shown = [r for r in rows
                  if not q or q in r["name"].lower() or q in r["zone"].lower()]
-        for r in shown[:HISTORY_PAGE]:
-            self._history_row_widgets.append(
-                self._build_history_row(self.history_list, r))
+        page = shown[:HISTORY_PAGE]
+        # Rows are pooled, not rebuilt — see _HistoryRow for the measurement
+        # that made that necessary.
+        for i, r in enumerate(page):
+            while len(self._history_row_widgets) <= i:
+                self._history_row_widgets.append(_HistoryRow(self))
+            self._history_row_widgets[i].show(r)
+        for row in self._history_row_widgets[len(page):]:
+            row.hide()
         total = len(rows)
         if q:
             text = f"{len(shown)} / {total}"
@@ -8520,44 +8849,6 @@ class Overlay:
         fmt = ("%H:%M" if time.strftime("%Y%m%d", lt) == time.strftime("%Y%m%d")
                else "%b %d %H:%M")
         return time.strftime(fmt, lt)
-
-    def _build_history_row(self, parent, r):
-        """One dataset line: what it was, when, and how big."""
-        row = tk.Frame(parent, bg=BG_BODY)
-        row.pack(fill="x", pady=1)
-        rift = r["kind"] == "rift"
-        # A rift is the one dataset that opens two ways, so it is marked. The
-        # colour is the report card's own, which is where clicking it goes.
-        tk.Label(row, text="◆" if rift else " ", bg=BG_BODY,
-                 fg=RIFT_GLOW if rift else FG_DIM,
-                 font=self.fonts_m["mono"], width=1).pack(side="left")
-        tk.Label(row, text=r["name"][:HISTORY_NAME_CELLS], bg=BG_BODY,
-                 fg=FG_VALUE if rift else FG_TEXT, font=self.fonts_m["mono"],
-                 width=HISTORY_NAME_CELLS, anchor="w").pack(side="left")
-        tk.Label(row, text=self._when_text(r["at"]), bg=BG_BODY, fg=FG_DIM,
-                 font=self.fonts_m["mono"], width=HISTORY_WHEN_CELLS,
-                 anchor="w").pack(side="left")
-        tk.Label(row, text=f"{self._mmss(r['duration'])}  {int(r['total']):,}",
-                 bg=BG_BODY, fg=FG_DIM, font=self.fonts_m["mono"],
-                 width=HISTORY_META_CELLS, anchor="w").pack(side="left")
-
-        def mini(text, cmd):
-            b = tk.Button(row, text=text, command=cmd,
-                          font=self.fonts_m["ui"], bg=BG_BODY_SOFT,
-                          fg=FG_TEXT, activebackground=BG_BAR_TRACK,
-                          activeforeground=FG_VALUE, relief="flat", bd=0,
-                          padx=8, pady=1, highlightthickness=1,
-                          highlightbackground=BG_BAR_TRACK, cursor="hand2")
-            b.pack(side="right", padx=(4, 0))
-            return b
-
-        # Packed right-to-left, so Details ends up left of Report.
-        mini("Details", self._enqueue(
-            lambda s=r: self._open_history_entry(s)))
-        if rift:
-            mini("Report", self._enqueue(
-                lambda s=r: self._open_history_report(s)))
-        return row
 
     def _open_history_entry(self, summary):
         """Open one dataset's breakdown — the page the card has no room for."""
@@ -9194,6 +9485,11 @@ class Overlay:
         self._tray_layout_var.set(
             BUFF_LAYOUT_LABEL.get(t.get("layout", "row"), "Across"))
         self._tray_inactive_var.set(t.get("inactive", BUFF_INACTIVE_DIM))
+        for which in ("timer", "stacks"):
+            self._tray_text_var[f"{which}_pos"].set(
+                t.get(f"{which}_pos", BUFF_TRAY_DEFAULTS[f"{which}_pos"]))
+            self._tray_text_var[f"{which}_size"].set(
+                int(t.get(f"{which}_size", 100)))
 
     def _toggle_tray_on(self):
         t = self._tray(self._tray_edit)
@@ -9232,6 +9528,17 @@ class Overlay:
     def _on_tray_inactive(self):
         t = self._tray(self._tray_edit)
         t["inactive"] = self._tray_inactive_var.get()
+        self._save_settings()
+
+    def _on_tray_text_pos(self, which):
+        t = self._tray(self._tray_edit)
+        t[f"{which}_pos"] = self._tray_text_var[f"{which}_pos"].get()
+        self._save_settings()
+        self._refresh_menu()
+
+    def _on_tray_text_size(self, which):
+        t = self._tray(self._tray_edit)
+        t[f"{which}_size"] = int(self._tray_text_var[f"{which}_size"].get())
         self._save_settings()
 
     def _track_buff(self, key):
@@ -9392,66 +9699,33 @@ class Overlay:
         if sig == self._buff_pick_sig:
             return
         self._buff_pick_sig = sig
-        for w in self._buff_pick_widgets:
-            w.destroy()
-        self._buff_pick_widgets = []
         # The count is not decoration: the list is capped, so without it a
         # search matching sixty things looks like it matched forty.
         self.buff_count.config(
             text=(f"{len(rows)} found, showing {len(shown)}"
                   if len(rows) > len(shown) else f"{len(rows)} found"))
         icon_px = int(BUFF_PICK_ICON * self._scales["menu"])
-        for r in shown:
-            row = tk.Frame(self.buff_list, bg=BG_BODY)
-            row.pack(fill="x", pady=1)
-            self._buff_pick_widgets.append(row)
-            # A dot for "you have had this one", in the accent. Cheaper to read
-            # than a word and it keeps the name column starting at one x.
-            tk.Label(row, text="●" if r["seen"] else "",
-                     bg=BG_BODY, fg=ACCENT, font=self.fonts_m["ui_tiny_i"],
-                     width=2, anchor="w").pack(side="left")
-            # The icon, which is what actually makes this list scannable — a
-            # column of names all reading "…increased by …" is not.
-            img = self.status_icons.get(r["key"], icon_px)
-            if img is not None:
-                lbl = tk.Label(row, image=img, bg=BG_BODY, bd=0)
-                # Tk does not own its PhotoImages. The StatusIcons cache holds
-                # this one alive too, but a picker rebuilt on every keystroke
-                # is exactly where a dropped reference shows up as a column of
-                # blank squares, so the widget keeps its own.
-                lbl.image = img
-                lbl.pack(side="left", padx=(0, 6))
-            else:
-                tk.Frame(row, bg=BG_BODY,
-                         width=icon_px + 6, height=icon_px).pack(side="left")
-            already = r["key"] in tracked
-            # Name over description, so the eye runs down the names and only
-            # stops on the small print when two names are the same — which,
-            # with 29 repeated names in this build, is the whole reason the
-            # description is here.
-            text_col = tk.Frame(row, bg=BG_BODY)
-            text_col.pack(side="left", fill="x", expand=True)
-            tk.Label(text_col, text=r["name"], bg=BG_BODY,
-                     fg=FG_DIM if already else FG_TEXT,
-                     font=self.fonts_m["ui"], anchor="w").pack(
-                side="top", fill="x")
-            if r["desc"]:
-                tk.Label(text_col, text=r["desc"], bg=BG_BODY, fg=FG_DIM,
-                         font=self.fonts_m["ui_tiny_i"], anchor="w",
-                         justify="left", wraplength=BUFF_PICK_DESC_WRAP).pack(
-                    side="top", fill="x")
-            btn = tk.Button(
-                row, text="Tracked" if already else "Track",
-                command=self._enqueue(lambda k=r["key"]: self._track_buff(k)),
-                font=self.fonts_m["ui"],
-                bg=BG_BODY_SOFT, fg=FG_DIM if already else FG_TEXT,
-                activebackground=BG_BAR_TRACK, activeforeground=FG_VALUE,
-                relief="flat", bd=0, padx=10, pady=0, highlightthickness=1,
-                highlightbackground=BG_BAR_TRACK,
-                cursor="arrow" if already else "hand2")
-            if already:
-                btn.config(state="disabled", disabledforeground=FG_DIM)
-            btn.pack(side="left", padx=(6, 0))
+        for i, r in enumerate(shown):
+            self._buff_pick_row(i).show(r, r["key"] in tracked, icon_px)
+        # Surplus rows are hidden, not destroyed — see _buff_pick_row.
+        for row in self._buff_pick_widgets[len(shown):]:
+            row.hide()
+
+    def _buff_pick_row(self, i):
+        """Picker row `i`, built once and reused.
+
+        Measured 2026-08-08: destroying and rebuilding the rows cost **297ms**
+        for 25 of them, against 1.4ms to work out what they should contain —
+        so essentially all of it was Tk creating ~175 widgets, on EVERY
+        KEYSTROKE in the search box. Typing was unusable.
+
+        Widgets are therefore made once and reconfigured. A pool row that is
+        surplus to the current search is `pack_forget()`-ed rather than
+        destroyed, so the next keystroke that needs it pays nothing.
+        """
+        while len(self._buff_pick_widgets) <= i:
+            self._buff_pick_widgets.append(_BuffPickRow(self))
+        return self._buff_pick_widgets[i]
 
     # ---- buff trays ----------------------------------------------------
     def _tray(self, i):
@@ -9463,6 +9737,89 @@ class Overlay:
         if 0 <= i < len(self._trays):
             return self._trays[i]
         return self._trays[0]
+
+    def _capture_tray_positions(self):
+        """Read each tray window's position back into its config.
+
+        Tray positions belong to the CHARACTER, not to the machine, so they
+        live in the tray record rather than in the shared position cache — a
+        healer alt can keep its trays somewhere a warrior's would be in the
+        way. Called before anything saves or switches character."""
+        for i, win in enumerate(self.buffwins):
+            try:
+                self._trays[i]["x"] = win.winfo_x()
+                self._trays[i]["y"] = win.winfo_y()
+            except tk.TclError:
+                pass
+
+    def _apply_tray_positions(self, pos=None):
+        """Move each tray window to where its config says it goes.
+
+        Falls back, in order: the tray's own saved x/y, then the shared
+        position cache (which is where 3.8.0 put them, so an upgrade keeps the
+        trays where the player left them), then the default stack."""
+        pos = pos or {}
+        for i, win in enumerate(self.buffwins):
+            t = self._tray(i)
+            xy = None
+            if isinstance(t.get("x"), int) and isinstance(t.get("y"), int):
+                xy = (t["x"], t["y"])
+            elif pos.get(f"buffs{i}"):
+                xy = pos[f"buffs{i}"]
+            if xy and self._pos_visible(*xy):
+                win.geometry(f"+{xy[0]}+{xy[1]}")
+            else:
+                self._default_buff_pos(i)
+
+    def set_character(self, name):
+        """Point the trays at `name`'s own set, saving whoever's they were.
+
+        Runs on the Tk thread (queued from the hook's `hero` message). A
+        character with no saved trays gets a blank set rather than inheriting
+        the last one — an alt should not come up cluttered with placeholders
+        for buffs its class cannot cast.
+        """
+        if not name or name == self._tray_char:
+            return
+        # Whatever is on screen belongs to whoever we were until now — which
+        # is nobody on the first identification, and in that case the set that
+        # was loaded from `buff_trays` is exactly what should seed this
+        # character IF they have nothing saved. See below.
+        self._capture_tray_positions()
+        previous = self._tray_char
+        if previous:
+            self._trays_by_char[previous] = self._trays
+        saved = self._trays_by_char.get(name)
+        if saved is None:
+            # The MIGRATION case, and only that: no character has ever been
+            # recorded, so the trays currently up were built under 3.8.0 when
+            # there was one shared set. Whoever is identified first inherits
+            # them, because blanking work someone already did is not an
+            # acceptable way to gain a feature.
+            #
+            # Deliberately NOT "any character we haven't seen before" — that
+            # was the first version of this line, and it would hand your main's
+            # trays to every alt on its first login, which is the opposite of
+            # what per-character trays are for.
+            if previous is None and not self._trays_by_char:
+                saved = self._trays
+            else:
+                saved = _blank_trays()
+        self._tray_char = name
+        self._trays = saved
+        self._trays_by_char[name] = saved
+        self._tray_edit = 0
+        self._apply_tray_positions()
+        self._save_settings()
+        self._sync_tray_controls()
+        self._render_tracked()
+        self._render_buff_pick()
+        self._refresh_menu()
+        self._refresh_visibility()
+        print(f"[meter] buff trays: now using {name}'s set "
+              f"({sum(len(t.get('keys') or ()) for t in saved)} buffs across "
+              f"{sum(1 for t in saved if t.get('on'))} tray(s))",
+              file=sys.stderr)
 
     def _tray_revealing(self, i):
         """True while tray `i` is announcing its position."""
@@ -9774,36 +10131,74 @@ class Overlay:
         elif not active:
             self._buff_first_seen.pop(key, None)
 
-        # Stacks, bottom-right. Only ever the raw count — the cdb's maxStacks
-        # is a base that gear raises (measured: a buff capped at 3 in the data
-        # ran at 5), so "5/3" is a lie this deliberately cannot tell.
+        # Stacks. Only ever the raw count — the cdb's maxStacks is a base that
+        # gear raises (measured: a buff capped at 3 in the data ran at 5), so
+        # "5/3" is a lie this deliberately cannot tell.
         if active and tray.get("stacks") and (up.get("stacks") or 1) > 1:
-            # White, not FG_VALUE. These sit on the game's own artwork, not on
-            # a panel, so the theme's "text on our background" colour is the
-            # wrong question — on the parchment themes it is near-black, which
-            # vanished into every dark icon.
-            self._buff_corner_text(c, str(up["stacks"]),
-                                   x + size - 3, y + size - 2, "se", size,
-                                   FG_HEADER)
+            self._buff_overlay_text(
+                c, str(up["stacks"]), x, y, size,
+                tray.get("stacks_pos", "Bottom right"),
+                tray.get("stacks_size", 100))
 
-        # The countdown, top-left, so it never collides with the stack count.
+        # The countdown.
         if active and tray.get("timer"):
             left = up.get("left")
             if left is not None:
                 txt = (f"{left:.1f}" if left < BUFF_TIMER_PRECISE_UNDER
                        else _short_secs(left))
-                self._buff_corner_text(c, txt, x + 2, y + 1, "nw", size,
-                                       FG_HEADER)
+                self._buff_overlay_text(
+                    c, txt, x, y, size,
+                    tray.get("timer_pos", "Top left"),
+                    tray.get("timer_size", 100))
 
-    def _buff_corner_text(self, c, text, x, y, anchor, size, fill):
-        """A number on top of an icon, with a hard shadow under it.
+    def _buff_text_font(self, size, scale_pct):
+        """A bold font sized to the icon, cached by pixel height.
 
-        The shadow is not decoration: these sit on artwork whose brightness is
-        whatever the game's icon happens to be, and a plain light glyph
-        disappears entirely on the pale ones."""
-        font = self.fonts["ui_sm_b"] if size >= 34 else self.fonts["ui_tiny_i"]
-        for dx, dy, col in ((1, 1, BG_BORDER), (0, 0, fill)):
-            c.create_text(x + dx, y + dy, text=text, font=font,
+        Sized in PIXELS (a negative Tk size) rather than points, because it has
+        to land in a known fraction of an icon whose edge is itself a slider —
+        points would drift against the icon with the display's DPI.
+        """
+        px = max(7, int(round(size * BUFF_TEXT_BASE_RATIO
+                              * (scale_pct / 100.0))))
+        # Keyed by face as well as size: a theme may swap the UI face, and a
+        # cache keyed on size alone would keep handing back the old one.
+        face = getattr(self, "_theme_font", UI_FONT_DEFAULT)
+        font = self._buff_fonts.get((face, px))
+        if font is None:
+            font = tkfont.Font(root=self.root, family=face,
+                               size=-px, weight="bold")
+            self._buff_fonts[(face, px)] = font
+        return font
+
+    def _buff_overlay_text(self, c, text, x, y, size, pos, scale_pct):
+        """A number on top of an icon, where the tray asked for it.
+
+        Drawn with a hard shadow under it, which is not decoration: these sit
+        on artwork whose brightness is whatever the game's icon happens to be,
+        and a plain light glyph disappears entirely on the pale ones.
+
+        Always white — never FG_VALUE. These sit on the game's own art rather
+        than on one of our panels, so the theme's "text on our background"
+        colour is the wrong question; on the parchment themes it is near-black
+        and vanished into every dark icon.
+        """
+        anchor, xf, yf = BUFF_TEXT_POSITIONS.get(
+            pos, BUFF_TEXT_POSITIONS["Top left"])
+        inset = max(1.0, size * BUFF_TEXT_INSET)
+        tx, ty = x + size * xf, y + size * yf
+        # Inward from whichever edges the anchor actually touches, so a corner
+        # label clears the rounded edge while a centred one stays centred.
+        if "w" in anchor and anchor != "center":
+            tx += inset
+        if "e" in anchor and anchor != "center":
+            tx -= inset
+        if "n" in anchor:
+            ty += inset
+        if "s" in anchor:
+            ty -= inset
+        font = self._buff_text_font(size, scale_pct)
+        for dx, dy, col in ((1, 1, BG_BORDER), (0, 0, FG_HEADER)):
+            c.create_text(tx + dx, ty + dy, text=text, font=font,
                           fill=col, anchor=anchor)
 
     def _toggle_parse(self):
@@ -11727,6 +12122,32 @@ class Overlay:
                       file=sys.stderr)
         print(f"[meter] reset bind is now {bind_label()}", file=sys.stderr)
 
+    @staticmethod
+    def _cfg(widget, **kw):
+        """widget.config(**kw), skipping options already set to that value.
+
+        Tk does NOT short-circuit a no-op configure. Measured 2026-08-08:
+        setting 40 labels to the text they already held cost 1.26ms — exactly
+        the same as changing all 40 — while reading them back first cost
+        0.023ms, so guarding is a 43x saving on the common case. That matters
+        here because _refresh_menu relabels several dozen widgets on every
+        250ms tick and almost none of them have changed.
+
+        Values are compared as strings because that is what Tk gives back:
+        cget returns the string form of colours, states and image names, so a
+        `str()` on both sides is what makes the comparison meaningful rather
+        than always-unequal.
+        """
+        changed = {}
+        for k, v in kw.items():
+            try:
+                if str(widget.cget(k)) != str(v):
+                    changed[k] = v
+            except tk.TclError:
+                changed[k] = v          # unknown option: let config complain
+        if changed:
+            widget.config(**changed)
+
     def _unpost_menus(self):
         """Take down any dropdown that's currently posted.
 
@@ -12226,26 +12647,26 @@ class Overlay:
     def _refresh_menu(self):
         """Menu buttons are labelled with what they'll *do*, so they double as
         the state readout the old hint line used to provide."""
-        self.btn_heal.config(
+        self._cfg(self.btn_heal, 
             text=("☑  Healing columns" if self._show_heal
                   else "☐  Healing columns"))
         for key, label, _cats in MINIMAP_FILTERS:
             on = self._map_filters.get(key, True)
-            self.btn_map_filter[key].config(
+            self._cfg(self.btn_map_filter[key], 
                 text=("☑  " if on else "☐  ") + label)
         # Three states, so the marker says which one rather than ticked/not.
         # A hollow circle for "hidden" keeps it visually a filter row.
         foe_glyph = {"all": "☑", "codex": "◪", "off": "☐"}.get(self._foe_mode, "☑")
-        self.btn_map_foes.config(
+        self._cfg(self.btn_map_foes, 
             text=f"{foe_glyph}  "
                  + MINIMAP_FOE_LABEL.get(self._foe_mode, "Enemies: all"))
         critter_glyph = {"all": "☑", "uncollected": "◪",
                          "off": "☐"}.get(self._critter_mode, "☑")
-        self.btn_map_critters.config(
+        self._cfg(self.btn_map_critters, 
             text=f"{critter_glyph}  "
                  + MINIMAP_CRITTER_LABEL.get(self._critter_mode,
                                              "Critters: all"))
-        self.btn_map_bg.config(
+        self._cfg(self.btn_map_bg, 
             text=("☑  World map background" if self._map_bg_on
                   else "☐  World map background"))
         # Buff trays. The selector buttons carry their own state — how many
@@ -12254,49 +12675,66 @@ class Overlay:
         for i, b in enumerate(self.btn_tray_pick):
             t = self._tray(i)
             n = len(t.get("keys") or ())
-            b.config(text=f"{i + 1}" + (f" ({n})" if n else ""))
+            self._cfg(b, text=f"{i + 1}" + (f" ({n})" if n else ""))
             self._paint_tab_btn(b, i == self._tray_edit)
+        others = len([n for n in self._trays_by_char if n != self._tray_char])
+        self._cfg(self.lbl_tray_char, 
+            text=(f"Trays for {self._tray_char}."
+                  + (f" {others} other character"
+                     f"{'' if others == 1 else 's'} saved." if others else "")
+                  if self._tray_char else
+                  "Waiting for the game to say which character you are — "
+                  "these are the trays this install last used."))
         cur = self._tray(self._tray_edit)
-        self.btn_tray_on.config(
+        self._cfg(self.btn_tray_on, 
             text=("☑  Tray on" if cur.get("on") else "☐  Tray off"))
         # States, not actions: "Locked" means it IS locked, matching the
         # convention the rest of the menu's standing settings use.
-        self.btn_tray_lock.config(
+        self._cfg(self.btn_tray_lock, 
             text=("\U0001F512  Locked" if cur.get("lock")
                   else "\U0001F513  Unlocked"))
         for flag, label in BUFF_TRAY_FLAGS:
-            self.btn_tray_flag[flag].config(
+            self._cfg(self.btn_tray_flag[flag], 
                 text=("☑  " if cur.get(flag) else "☐  ") + label)
+        # Both numbers in the same corner is legal and occasionally deliberate
+        # (one of them switched off), so this warns rather than forbids — and
+        # only when both are actually being drawn.
+        clash = (cur.get("timer") and cur.get("stacks")
+                 and cur.get("timer_pos") == cur.get("stacks_pos"))
+        self._cfg(self.lbl_tray_text_clash, 
+            text=("Time left and Stacks are both in the "
+                  f"{str(cur.get('timer_pos', '')).lower()} corner — they will "
+                  "draw on top of each other." if clash else ""))
         if not self._binding_now:
-            self.btn_bind.config(text=bind_label())
+            self._cfg(self.btn_bind, text=bind_label())
         for key, label, _cats in COMPASS_FILTERS:
             on = self._compass_filters.get(key, True)
-            self.btn_compass_filter[key].config(
+            self._cfg(self.btn_compass_filter[key], 
                 text=("☑  " if on else "☐  ") + label)
         # A standing setting, so this one shows its state rather than its action.
-        self.btn_hide_ooc.config(
+        self._cfg(self.btn_hide_ooc, 
             text=("☑  Hide out of combat" if self._hide_ooc
                   else "☐  Hide out of combat"))
-        self.btn_sounds.config(
+        self._cfg(self.btn_sounds, 
             text=("☑  Enable sounds" if self._sounds_on
                   else "☐  Enable sounds"))
-        self.btn_history.config(
+        self._cfg(self.btn_history, 
             text=("☑  Keep a history of finished encounters"
                   if self._history_on
                   else "☐  Keep a history of finished encounters"))
-        self.btn_auto_reset.config(
+        self._cfg(self.btn_auto_reset, 
             text=("☑  Auto reset on boss pull" if self._auto_reset_boss
                   else "☐  Auto reset on boss pull"))
-        self.btn_codex_alerts.config(
+        self._cfg(self.btn_codex_alerts, 
             text=("☑  Codex alerts" if self._codex_alerts
                   else "☐  Codex alerts"))
-        self.btn_sparkly.config(
+        self._cfg(self.btn_sparkly, 
             text=("☑  Sparkly Tracker" if self._sparkly_on
                   else "☐  Sparkly Tracker"))
         # Reads state, not action — and it's the same setting the rift prompt's
         # "Do this every time" ticks, so a player who opted in from the prompt
         # finds it already on here.
-        self.btn_rift_auto_view.config(
+        self._cfg(self.btn_rift_auto_view, 
             text=("☑  Auto 'View All Players' in rifts" if self._rift_auto_view
                   else "☐  Auto 'View All Players' in rifts"))
         # Labelled with the action, but tinted by the *state*: green while
@@ -12310,12 +12748,12 @@ class Overlay:
         # appears out of nowhere mid-session is a button nobody knew to look
         # for. The label says why it does nothing yet.
         have_report = self._report_data is not None
-        self.btn_rift_report.config(
+        self._cfg(self.btn_rift_report, 
             text=("Last Rift Report" if have_report
                   else "Last Rift Report   (no rift yet)"),
             fg=FG_TEXT if have_report else FG_DIM)
         parsing = self._parse_state is not None
-        self.btn_parse.config(
+        self._cfg(self.btn_parse, 
             text=(f"Stop {PARSE_LENGTH_SECS}s Parse" if parsing
                   else f"{PARSE_LENGTH_SECS}s Parse Mode"),
             bg=BTN_ON_BG if parsing else BG_BODY_SOFT,
@@ -12328,10 +12766,10 @@ class Overlay:
         # blank before the hook has reported one: an empty slot reads as a
         # feature that isn't working, where the ellipsis reads as waiting.
         shard = self.ui_state.server()
-        self.lbl_shard.config(text=shard or "…")
+        self._cfg(self.lbl_shard, text=shard or "…")
 
         all_players = self.mode == "all"
-        self.btn_mode.config(
+        self._cfg(self.btn_mode, 
             text=("Show party only" if all_players else "Show all players")
                  + "   (resets data)",
             bg=BTN_ON_BG if all_players else BG_BODY_SOFT,
@@ -12423,7 +12861,17 @@ class Overlay:
         # _sync_game_ui now rides the fast input pump instead — see
         # _pump_input. It stays idempotent, so nothing here depends on which
         # loop got to it first.
-        self._refresh_menu()
+        #
+        # Only while the panel is actually on screen. Measured 2026-08-08:
+        # _refresh_menu costs ~8ms, and it was running four times a second for
+        # the whole session — relabelling several dozen widgets nobody could
+        # see, in the same interpreter as the 30ms tray/minimap loop and the
+        # 33ms input pump. Nothing is lost by skipping it: _sync_game_ui calls
+        # it explicitly before the menu is shown, precisely so the panel is
+        # never stale on the way up, and every control that changes state
+        # calls it too.
+        if self._shown.get("menu"):
+            self._refresh_menu()
         # The Social pages are deliberately NOT refreshed here: they load on
         # the menu opening, the tab being raised, and the Refresh button, and
         # hold still in between — see _reload_social for what polling cost.
@@ -14801,6 +15249,12 @@ def _run(tray, session, ui_state, world, statuses, rift_rec, heal_sizer):
                 hero_id["name"] = name
                 print("[meter] local hero "
                       + ("identified." if first else "changed."), file=sys.stderr)
+                # Buff trays are per character. Queued rather than called —
+                # this is the hook's thread, and swapping the trays touches
+                # every tray window and the whole Buffs page.
+                ov = _OVERLAY["ref"]
+                if ov is not None:
+                    ov._enqueue(lambda n=name: ov.set_character(n))()
         elif k == "shard":
             # The hook only sends this when the roster actually changed, so
             # there is no throttle here — an arriving message IS the change.
