@@ -1373,6 +1373,117 @@ function sweepInventory() {
     } catch (e) {}
 }
 
+// ---- live statuses (the buff tracker) ----
+// Measured 2026-08-08 (frida/run_status.py, two rounds). ent.Unit.statuses is
+// an hxbit proxy array of st.skill.Status, reached by the same chain as
+// Collection.pets, so this is plain pointer reads and rides a timer rather
+// than needing the game thread.
+//
+// What the fields actually mean, none of which their names tell you:
+//
+//   * stopTime is -1 on EVERY status. The expiry is startTime + duration.
+//   * duration GROWS on each refresh while startTime never moves (a Zealot was
+//     watched going 15.00 -> 17.03 -> 34.53 -> 64.03). So duration is
+//     lifetime-at-expiry, and refreshDuration — constant, and matching the
+//     cdb's own number — is the buff's nominal length. The host needs BOTH:
+//     the expiry to count down, the nominal to size a clock-swipe against.
+//   * refreshDuration == 0 means no timer at all (Dash, UnderWater, "Surge of
+//     Violence"). Those end on an event, and `e` is omitted for them so the
+//     host shows them as simply up rather than as expired hours ago.
+//   * stacks is 1-based and climbs on ONE entry.
+//   * A status can be caught MID-CONSTRUCTION with start/duration both 0, so a
+//     zero start is treated as "no expiry known yet", not as an expiry in 1970.
+//   * Every st.skill.ItemStatus reports the literal kind "ItemStatus"; the
+//     originItem's kind is the only thing that separates a potion from a meal.
+//
+// The clock: Hero.layer -> GameLayer.time -> TimeState.serverNow, confirmed
+// running at exactly 1s/s against the wall clock (drift measured at 0.0s over
+// a 45s window) but QUANTISED TO 0.5s. That is why the expiry is shipped in
+// server time together with the reading of `now` that goes with it: the host
+// latches the pair against its own monotonic clock and interpolates, so the
+// countdown glides instead of stepping twice a second.
+//
+// Sent on CHANGE only. A signature of kind/stacks/expiry means a resting buff
+// bar costs one array walk per tick and no traffic at all; a refresh moves the
+// expiry and a stack moves the count, and either one resends.
+let statusLastSig = null;
+let statusWarned = false;
+
+function serverNow() {
+    try {
+        if (!OFF.GameLayer || OFF.GameLayer.time == null
+            || !OFF.TimeState || OFF.TimeState.serverNow == null) return null;
+        const layer = localHero.add(OFF.Hero.layer).readPointer();
+        if (!layer || layer.isNull()) return null;
+        const ts = layer.add(OFF.GameLayer.time).readPointer();
+        if (!ts || ts.isNull()) return null;
+        return ts.add(OFF.TimeState.serverNow).readDouble();
+    } catch (e) { return null; }
+}
+
+function readStatuses() {
+    const S = OFF.Status;
+    const proxy = localHero.add(OFF.Unit.statuses).readPointer();
+    if (!proxy || proxy.isNull()) return null;
+    const dyn = proxy.add(OFF.ArrayProxyData.array).readPointer();
+    if (!dyn || dyn.isNull()) return null;
+    const inner = dyn.add(OFF.ArrayDyn.array).readPointer();
+    if (!inner || inner.isNull()) return null;
+    const n = inner.add(OFF.ArrayObj.length).readS32();
+    if (n < 0 || n > 512) return null;
+    const data = inner.add(OFF.ArrayObj.array).readPointer();
+    const out = [];
+    for (let i = 0; i < n; i++) {
+        try {
+            const st = data.add(OFF.ArrayObj.data + i * 8).readPointer();
+            if (!st || st.isNull()) continue;
+            if (S.removed != null && st.add(S.removed).readU8()) continue;
+            const kind = hlStr(st.add(S.kind).readPointer());
+            if (!kind) continue;
+            const row = { k: kind, s: st.add(S.stacks).readS32() };
+            const start = st.add(S.startTime).readDouble();
+            const dur = st.add(S.duration).readDouble();
+            const nominal = st.add(S.refreshDuration).readDouble();
+            // Both guards matter: nominal 0 is a status with no timer by
+            // design, start 0 is one the server has not filled in yet. Neither
+            // may be turned into an expiry.
+            if (nominal > 0 && start > 0 && dur > 0) {
+                row.e = start + dur;
+                row.n = nominal;
+            }
+            if (S.originItem != null && OFF.Item && OFF.Item.kind != null) {
+                const it = st.add(S.originItem).readPointer();
+                if (it && !it.isNull()) {
+                    const ik = hlStr(it.add(OFF.Item.kind).readPointer());
+                    if (ik) row.i = ik;
+                }
+            }
+            out.push(row);
+        } catch (e) {}
+    }
+    return out;
+}
+
+function sweepStatuses() {
+    try {
+        if (!localHero || localHero.isNull() || !OFF.Status
+            || !OFF.Unit || OFF.Unit.statuses == null
+            || !OFF.ArrayProxyData || !OFF.ArrayDyn || !OFF.ArrayObj) return;
+        const list = readStatuses();
+        if (list === null) return;
+        // The expiry is rounded into the signature so a duration that jitters
+        // in its third decimal doesn't resend an unchanged bar every tick,
+        // while a real refresh (which moves it by seconds) always does.
+        const sig = list.map(function (r) {
+            return r.k + "|" + r.s + "|" + (r.e ? r.e.toFixed(1) : "-")
+                + "|" + (r.i || "");
+        }).join(",");
+        if (sig === statusLastSig) return;
+        statusLastSig = sig;
+        send({ kind: "status", now: serverNow(), list: list });
+    } catch (e) {}
+}
+
 // ---- the codex (hunting log) ----
 // Measured 2026-08-05. The per-character store
 // is REPLICATED, so the whole thing is plain pointer reads from the hero plus
@@ -1619,7 +1730,14 @@ function refreshLocalHero() {
                 // A different hero object means a different loadout, so the
                 // pickup baseline is meaningless — rebuild it rather than
                 // announcing the new hero's whole bag as picked up.
-                if (!localHero || !localHero.equals(h)) invReady = false;
+                // A new hero object is a new set of Status objects, so the
+                // change signature the sweep suppresses on is meaningless —
+                // drop it or an identical-looking bar after a respawn never
+                // gets resent and the tracker sits on the old hero's numbers.
+                if (!localHero || !localHero.equals(h)) {
+                    invReady = false;
+                    statusLastSig = null;
+                }
                 localHero = h;
                 partyNames = readParty(h);
                 const nm = hlStr(h.add(OFF.Hero.name).readPointer());
@@ -1701,6 +1819,28 @@ function main() {
         log("!! inventory offsets missing (" + invAbsent.join(", ") +
             ") — the legendary pickup cue will never fire. The offsets file " +
             "is older than this build; delete analysis_out and restart.");
+
+    // Live statuses, on their own clock. One small array walk (a hero carries
+    // a handful of statuses, not hundreds), and it sends nothing at all unless
+    // the set changed — so 200ms buys a buff appearing on screen within a fifth
+    // of a second while a resting bar costs no traffic whatsoever. The
+    // countdown itself is the host's job: it latches the expiry against its own
+    // clock, so this cadence sets how fast a buff APPEARS, not how smoothly it
+    // ticks down.
+    const STATUS_NEED = ["Status", "ArrayProxyData", "ArrayDyn", "ArrayObj"];
+    const statusAbsent = STATUS_NEED.filter(function (k) { return !OFF[k]; });
+    if (statusAbsent.length || OFF.Unit.statuses == null) {
+        // Same silent-stale shape as every other sweep here: without the
+        // offsets readStatuses() returns on its first line forever and the
+        // buff trays just stay empty, which reads as "I picked the wrong
+        // buffs" rather than as a broken install.
+        log("!! status offsets missing (" + statusAbsent.join(", ")
+            + (OFF.Unit.statuses == null ? " Unit.statuses" : "")
+            + ") — the buff tracker will stay empty. The offsets file is older "
+            + "than this build; delete analysis_out and restart to regenerate.");
+    } else {
+        setInterval(sweepStatuses, 200);
+    }
 
     // The minimap wants a faster cadence than the combat heartbeat: at 400ms
     // dots visibly step rather than move. The sweep costs ~1ms, so its own

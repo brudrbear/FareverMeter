@@ -73,6 +73,7 @@ def main():
     arrobj = offs("hl.types.ArrayObj")
     foe = offs("ent.Foe")
     unit = offs("ent.Unit")
+    status = offs("st.skill.Status")
     elem = offs("ent.Element")
     cam = offs("client.BaseCamera")
     bosses = offs("ui.hud.BossesInfo")
@@ -264,7 +265,38 @@ def main():
                  # UnitAttributes.maxHealth reads 0 for the whole of a boss
                  # fight (measured), so health is only good for "did it die",
                  # never for a percentage.
-                 "attr": unit["attr"][0]},
+                 "attr": unit["attr"][0],
+                 # The buff tracker's source. An hxbit proxy array of
+                 # st.skill.Status — same ArrayProxyData -> ArrayDyn -> ArrayObj
+                 # chain as Collection.pets, so it is plain pointer reads and
+                 # safe from a timer rather than needing the game thread.
+                 "statuses": unit["statuses"][0]},
+        # One live buff/debuff. Status extends BaseSkill, so these are resolved
+        # off the SUBCLASS — the inherited fields land at the same offsets, but
+        # asking the subclass is what guarantees it.
+        #
+        # Measured 2026-08-08 (frida/run_status.py), and none of it is what the
+        # field names suggest:
+        #   * stopTime is -1 on every status. It is not a clock. The expiry is
+        #     startTime + duration.
+        #   * duration GROWS on every refresh while startTime stays put (a
+        #     Zealot was watched going 15.00 -> 64.03), so duration is
+        #     lifetime-at-expiry and NOT the length of the buff.
+        #   * refreshDuration IS the nominal length and stays constant, which
+        #     makes it the only correct denominator for a clock-swipe.
+        #   * refreshDuration == 0 means the status has no timer at all —
+        #     Dash, UnderWater, "Surge of Violence". Those end on an event.
+        #   * stacks is 1-based and climbs on ONE entry; a status does not
+        #     appear once per stack.
+        #   * originItem is the only way to tell two ItemStatuses apart: every
+        #     one of them reports the literal kind "ItemStatus".
+        "Status": {"kind": status["kind"][0],
+                   "stacks": status["stacks"][0],
+                   "startTime": status["startTime"][0],
+                   "duration": status["duration"][0],
+                   "refreshDuration": status["refreshDuration"][0],
+                   "originItem": status["originItem"][0],
+                   "removed": status["removed"][0]},
         "Foe": {"summonOwner": foe["summonOwner"][0],
                 "persistantSummon": foe["persistantSummon"][0]},
         # hl.types.ArrayObj: length, then a pointer to an hl_varray whose
@@ -387,6 +419,14 @@ def main():
         out_traits.write_text(json.dumps(traits, indent=0), encoding="utf-8")
         print(f"[written] {out_traits} ({len(traits['critter'])} critters, "
               f"{len(traits['spark'])} sparkling)")
+        smeta = extract_status_meta(Path(hlboot).parent)
+        out_status = _OUT_DIR / "status_meta.json"
+        out_status.write_text(json.dumps(smeta, ensure_ascii=False, indent=0),
+                              encoding="utf-8")
+        named = sum(1 for r in smeta["status"].values() if r.get("name"))
+        print(f"[written] {out_status} ({len(smeta['status'])} statuses, "
+              f"{named} named, {len(smeta['types'])} types, "
+              f"{len(smeta['items'])} status-granting items)")
     except Exception as e:
         print(f"[!] display names skipped ({e}) — boss toasts and history "
               f"dataset names fall back to ids")
@@ -619,6 +659,179 @@ def extract_unit_traits(game_dir):
         if (fl >> spark_bit) & 1:
             spark.append(uid)
     return {"critter": sorted(critters), "spark": sorted(spark)}
+
+
+# Statuses whose `kind` is not a cdb id. Measured 2026-08-08 (frida/run_status.py,
+# resting dump on a Warrior): every st.skill.ItemStatus reports the literal
+# string "ItemStatus", so food and potions are one indistinguishable kind as far
+# as the array is concerned. The tracker identifies those from originItem
+# instead; this list is what tells it which kinds to stop looking up here.
+CLASS_KINDS = ("ItemStatus",)
+
+# The statusType flags column, whose BIT INDICES are read off the column
+# definition rather than hardcoded — same reasoning as the unit `Spark` flag
+# above: a patch inserting a flag would otherwise silently re-point every one.
+STATUS_TYPE_FLAGS = ("DoT", "CrowdControl", "HardCC", "HoT")
+
+# What makes a `skill` row a status. Measured 2026-08-08: filtering on
+# props.status finds 250 rows and MISSES 43 real ones — a probe session on a
+# Warrior turned up "Surge of Violence", "Resilience of the Unkillable Demon
+# King" and PhysicalBlock_Status_WellTimed on the hero, all named, all with
+# icons, none carrying props.status. `nature == Status` finds 293 and is a
+# strict superset of the props.status set, so props.status is only good for the
+# extra columns (maxStacks, types) and not for deciding what counts.
+STATUS_NATURE = "Status"
+
+
+def _status_nature_index(skill_sheet):
+    """Which `nature` enum index means Status, read off the column definition
+    rather than hardcoded — a patch inserting a nature above it would otherwise
+    silently re-point the whole filter, exactly as the heal-effect index and
+    the unit Spark bit are guarded."""
+    for c in skill_sheet["columns"]:
+        if c.get("name") == "nature" and isinstance(c.get("typeStr"), str):
+            names = c["typeStr"].split(":", 1)[-1].split(",")
+            if STATUS_NATURE in names:
+                return names.index(STATUS_NATURE)
+    raise ValueError("skill.nature column has no Status entry")
+
+
+def extract_status_meta(game_dir):
+    """Everything the buff tracker needs to NAME and CLASSIFY a status, from
+    data.cdb — so the picker can offer every buff in the game rather than only
+    the ones you happen to have proc'd, and so a name never costs an HL call.
+
+    A status is a `skill` row whose `nature` is Status (see STATUS_NATURE for
+    why that and not props.status); its `kind` at runtime IS that row's id
+    (measured: Enchant_Zealot_Status, GA_Demon_Combo_Status). 293 rows in this
+    build.
+
+    Per status:
+      name        display name, or absent when the cdb never gave it one (the
+                  internal plumbing — Dash_Status and friends — mostly has none,
+                  which is exactly how the picker knows to hide them)
+      desc        tooltip text, for the picker's list
+      max         the cdb's maxStacks. ADVISORY ONLY, and specifically NOT a
+                  denominator: measured 2026-08-08, GA_Demon_Combo_Status is
+                  maxStacks 3 in the cdb and was observed live at 5 stacks —
+                  gear and talents raise the ceiling, which is why Status has a
+                  computed getMaxStacks() rather than reading this. A tracker
+                  that renders "5/3" is worse than one that renders "5".
+      dur         the cdb's default duration in seconds. NOT authoritative — the
+                  live Status carries its own, which affixes and ranks change —
+                  but it is what lets the picker's preview show a plausible
+                  sweep before you have ever had the buff.
+      types       statusType ids (Buff, Debuff, Bleed, Stun, ...)
+      cc/dot/hot  rolled up from those types' flags, for the picker's filters
+      color       the first type's colour as #rrggbb, which is what a status
+                  with no icon falls back to being drawn as
+
+    Plus a `types` table naming and colouring each category. Icons are NOT here:
+    they come off an atlas in res.pak (857MB) and are a committed asset built by
+    build_status_icons.py, not something to extract on every self-heal.
+    """
+    import pak_extract
+    data, entries, data_off = pak_extract.load(Path(game_dir) / "res.light.pak")
+    e = next(x for x in entries if x.path.endswith("data.cdb"))
+    cdb = json.loads(data[data_off + e.pos: data_off + e.pos + e.size])
+    sheets = {s["name"]: s for s in cdb["sheets"]}
+
+    def text(node, field):
+        """cdb text columns are sometimes a bare string and sometimes {"v": ...}
+        — both shapes appear in this one file (the unit sheet's names are bare,
+        statusType's are wrapped), so neither may be assumed."""
+        v = (node or {}).get(field)
+        if isinstance(v, dict):
+            v = v.get("v")
+        return v if isinstance(v, str) and v else None
+
+    bits = {}
+    for c in sheets["statusType"]["columns"]:
+        if c["name"] == "flags" and isinstance(c.get("typeStr"), str):
+            names = c["typeStr"].split(":", 1)[-1].split(",")
+            bits = {n: i for i, n in enumerate(names)}
+    missing = [f for f in STATUS_TYPE_FLAGS if f not in bits]
+    if missing:
+        raise ValueError(f"statusType flags column has no {missing} bit(s)")
+
+    types = {}
+    for ln in sheets["statusType"]["lines"]:
+        tid = ln.get("id")
+        if not isinstance(tid, str):
+            continue
+        fl = ln.get("flags") if isinstance(ln.get("flags"), int) else 0
+        col = ln.get("color")
+        entry = {"name": text(ln.get("texts"), "name") or tid}
+        if isinstance(col, int):
+            entry["color"] = f"#{col & 0xFFFFFF:06x}"
+        for f in STATUS_TYPE_FLAGS:
+            if (fl >> bits[f]) & 1:
+                entry[f] = 1
+        types[tid] = entry
+
+    nature_status = _status_nature_index(sheets["skill"])
+    out = {}
+    for ln in sheets["skill"]["lines"]:
+        sid = ln.get("id")
+        if not isinstance(sid, str) or ln.get("nature") != nature_status:
+            continue
+        # Optional: 43 of the 293 statuses have no props.status block at all,
+        # and they are ordinary buffs, not leftovers. Everything read out of it
+        # is therefore a bonus rather than a requirement.
+        props = (ln.get("props") or {}).get("status")
+        props = props if isinstance(props, dict) else {}
+        tids = [t.get("type") for t in (props.get("types") or [])
+                if isinstance(t.get("type"), str)]
+        row = {}
+        nm = text(ln.get("texts"), "name")
+        if nm:
+            row["name"] = nm
+        ds = text(ln.get("texts"), "desc")
+        if ds:
+            row["desc"] = ds
+        if isinstance(props.get("maxStacks"), int):
+            row["max"] = props["maxStacks"]
+        if isinstance(ln.get("duration"), (int, float)):
+            row["dur"] = ln["duration"]
+        if tids:
+            row["types"] = tids
+            for f, key in (("DoT", "dot"), ("HoT", "hot")):
+                if any(types.get(t, {}).get(f) for t in tids):
+                    row[key] = 1
+            if any(types.get(t, {}).get("CrowdControl")
+                   or types.get(t, {}).get("HardCC") for t in tids):
+                row["cc"] = 1
+            col = next((types[t]["color"] for t in tids
+                        if t in types and "color" in types[t]), None)
+            if col:
+                row["color"] = col
+        out[sid] = row
+
+    # Items that grant a status, by name. Needed because every ItemStatus
+    # reports the same kind, so "Beggar's Garbure" and "Minor Alchemist
+    # Cauldron" are one indistinguishable string until the originItem names
+    # them. Scoped to the items that actually grant one rather than reviving
+    # the whole item table, which was dropped from the bundle in 2c67b5a for
+    # its size — this is a few dozen rows, not a thousand.
+    #
+    # props.effects is a LIST of effect blocks, each of which may carry its own
+    # `status` list. It is emphatically not a dict, and treating it as one
+    # silently matches nothing at all.
+    items = {}
+    for ln in sheets["item"]["lines"]:
+        iid = ln.get("id")
+        if not isinstance(iid, str):
+            continue
+        effects = (ln.get("props") or {}).get("effects")
+        if not isinstance(effects, list):
+            continue
+        if not any(isinstance(b, dict) and b.get("status") for b in effects):
+            continue
+        nm = text(ln.get("texts"), "name")
+        if nm:
+            items[iid] = nm
+    return {"status": out, "types": types, "items": items,
+            "classKinds": list(CLASS_KINDS)}
 
 
 if __name__ == "__main__":

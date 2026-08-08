@@ -32,6 +32,11 @@ datas = [
     # Which unit kinds are critters and which carry the Spark flag. Without it
     # critters draw as ordinary red enemies and the sparkly tracker never fires.
     (str(ROOT / "analysis_out" / "unit_traits.json"), "res/analysis_out"),
+    # Every status the game defines, named and categorised. Without it the buff
+    # picker lists raw ids and — worse — cannot tell a real buff from the
+    # game's internal plumbing, since "the cdb never named it" is exactly the
+    # test that hides Dash_Status and friends.
+    (str(ROOT / "analysis_out" / "status_meta.json"), "res/analysis_out"),
     (str(ROOT / "assets" / "farevermeter.ico"), "res/assets"),
     # Fixed cues, played through Windows' own MCI so they add files rather than
     # an audio dependency. Listed one by one rather than by glob, so a new cue
@@ -47,6 +52,22 @@ datas = [
 for f in sorted((ROOT / "assets" / "maps").glob("*")):
     if f.suffix in (".webp", ".json"):
         datas.append((str(f), "res/assets/maps"))
+
+# The buff trays' icon sheet (hltools/build_status_icons.py output). Sheet and
+# index ship as a pair like the map backdrops, and for the same reason: the
+# index addresses cells in that exact sheet, so shipping one without the other
+# is worse than shipping neither. Required, not optional — without it every
+# tracked buff falls back to a three-letter coloured tile, which is a feature
+# that technically works and nobody would want.
+_status_dir = ROOT / "assets" / "status"
+_status_files = [_status_dir / "icons.webp", _status_dir / "icons.json"]
+_missing = [f.name for f in _status_files if not f.is_file()]
+if _missing:
+    raise SystemExit(
+        f"[!] assets/status is missing {', '.join(_missing)} — the buff trays "
+        "would ship with no icons. Run: python hltools/build_status_icons.py")
+for f in _status_files:
+    datas.append((str(f), "res/assets/status"))
 
 # The POOLED cues (SOUND_POOLS): one folder per cue, every playable file in it.
 # Globbed on purpose, and for the opposite reason the fixed cues are listed by

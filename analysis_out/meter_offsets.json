@@ -118,7 +118,17 @@
   "Unit": {
     "kind": 600,
     "inf": 640,
-    "attr": 984
+    "attr": 984,
+    "statuses": 496
+  },
+  "Status": {
+    "kind": 184,
+    "stacks": 456,
+    "startTime": 192,
+    "duration": 336,
+    "refreshDuration": 448,
+    "originItem": 256,
+    "removed": 8
   },
   "Foe": {
     "summonOwner": 1232,

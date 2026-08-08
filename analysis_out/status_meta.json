@@ -1,0 +1,2547 @@
+{
+"status": {
+"PhysicalBlock_Status_WellTimed": {
+"name": "[PhysicalBlock]",
+"desc": "Damage of your next [ComboAttack] increased by ::damage%::.",
+"dur": 10
+},
+"Dash_Status": {
+"desc": "[MoveSpeedFactor] increased by ::val1::%.",
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"SparkSurge_Status": {
+"name": "Spark surge",
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"SparkSurge_Mark": {
+"name": "Spark surge",
+"max": -1,
+"types": [
+"Magic"
+],
+"color": "#3dd4da"
+},
+"Axe_Boomerang_Skill1_Status": {
+"name": "Bonethrow",
+"desc": "A [Bleeding] effect dealing ::dmg:: over ::dur::.",
+"max": -1,
+"dur": 8,
+"types": [
+"Bleed",
+"Debuff"
+],
+"dot": 1,
+"color": "#d41616"
+},
+"Axe_Boomerang_Skill_Passive_Status": {
+"name": "Bloodrage Aura",
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Mace_Benediction_Status": {
+"name": "Benediction",
+"desc": "On consumption, heal nearby allies for ::heal::.",
+"max": 5,
+"dur": 6,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Mace_Benediction_Skill1_Proc": {
+"desc": "Next cast of ::ref1_name:: is instant.",
+"dur": 10
+},
+"Mace_Benediction_Skill1_Status": {
+"name": "Ram Veil",
+"desc": "[Fervor] and [CritChance] increased by ::val%::.",
+"max": 1,
+"dur": 15,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Mace_Benediction_Passive_Status": {
+"name": "Blessing",
+"desc": "Your [Attack]s deal an additional ::dmg:: and generate a ::ref_name:: stack.",
+"max": 10,
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Sword_Start_Skill1Status": {
+"name": "Cleave",
+"desc": "A [Bleeding] effect that deals ::dmg:: over ::dur::.",
+"dur": 10,
+"types": [
+"Bleed",
+"Debuff"
+],
+"dot": 1,
+"color": "#d41616"
+},
+"Sword_Craft_Skill1_Status": {
+"name": "[Sword_Craft_Skill1]",
+"desc": "Damage of your next ::ref_name:: increased by ::ref_var3%::.",
+"dur": 10
+},
+"Sword_Craft_Passive_Status": {
+"name": "Righteous Resolve",
+"desc": "Heals nearby allies for ::heal:: every ::dur1:: while you are surrounded by ::ref_var1:: or more enemies within ::ref_range::."
+},
+"Sword_Swarm_Skill1_Status": {
+"name": "Hive's Sunder",
+"desc": "[MagicArmor] reduced by ::val1%::.",
+"dur": 10,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Sword_Swarm_Skill1_SelfBuff": {
+"name": "Hive's Sunder",
+"desc": "[MagicArmor] increased by ::val1%::.",
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Sword_Swarm_Passive_Swarm": {
+"name": "Hive Swarm",
+"desc": "You are surrounded by a swarm, dealing ::dmg:: to nearby enemies every ::time:: and healing you for ::ref_var2%:: that amount.",
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Sword_Swarm_Passive_Poison": {
+"name": "Swarm",
+"desc": "A [Poison] that deals ::dmg:: over ::duration::.",
+"dur": 6,
+"types": [
+"Poison",
+"Debuff"
+],
+"dot": 1,
+"color": "#9320ff"
+},
+"Shield_Start_Skill1_Status": {
+"name": "Empowered Shield Bash",
+"desc": "Damage of your next ::ref_name:: increased by ::ref_var2%::.",
+"dur": 15
+},
+"Shield_Craft_Status": {
+"name": "Fortified",
+"desc": "[Armor] increased by ::val1%::.",
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Shield_Craft_Passive_Status": {
+"name": "Heartsteel",
+"desc": "Your next [ComboAttack] deals an additional ::ref_dmg::.",
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Shield_OrbitWater_S1_OrbStatus": {
+"name": "Depth Shield",
+"desc": "When an enemy is nearby, the bubble consumes a charge to pulse, dealing ::dmg:: to enemies and healing allies for ::heal::.",
+"max": 3,
+"dur": 20,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Shield_OrbitWater_P_Status": {
+"name": "Water Infusion",
+"desc": "At ::stacks:: stacks, your next [AttackBlock] becomes empowered and will deal ::ref1_dmg:: to nearby enemies.",
+"max": 4,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Shield_OrbitWater_P_StatusBlockBuffed": {
+"name": "Water Infusion: empowered",
+"desc": "Your next [AttackBlock] becomes empowered and will deal ::dmg:: to nearby enemies."
+},
+"Shield_Firebreath_Passive_Status": {
+"name": "Cinder Coat",
+"desc": "You are surrounded by flames, dealing ::dmg:: to nearby enemies every ::time::.",
+"dur": 4,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Spear_Goo_Combo_Status": {
+"name": "Dart",
+"desc": "At ::stacks:: stacks, your next ::ref_name:: will release the stings.",
+"max": 3,
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Spear_Goo_Skill1_Status": {
+"name": "Swarm Rush",
+"desc": "[MoveSpeedFactor] increased by ::val1%::.",
+"dur": 4,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Spear_Goo_PassiveStatus": {
+"name": "Goo",
+"desc": "Slowed by ::val1%::.",
+"max": 1,
+"dur": 8,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Spear_Goo_Passive_Dot": {
+"name": "Ignited Goo",
+"desc": "Deals ::dmg:: over ::duration::.",
+"max": 1,
+"dur": 6,
+"types": [
+"Debuff",
+"Burn"
+],
+"dot": 1,
+"color": "#b96a2b"
+},
+"Spear_Eruption_Combo_Status": {
+"name": "Swift Strike",
+"desc": "[CritChance] increased.",
+"max": 3,
+"dur": 15,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Spear_Eruption_Skill1_Status": {
+"name": "Swirling Embers",
+"desc": "You are surrounded by an embers whirlwind, dealing ::dmg:: to nearby enemies every ::time::.",
+"dur": 8,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Spear_Eruption_Passive_Status": {
+"name": "Heart of the Furnace",
+"desc": "[Armor] increased.",
+"max": 15,
+"dur": 15,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Spear_Eruption_Passive_Shield": {
+"name": "Heart of the Furnace",
+"max": 1,
+"dur": 3,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"DS_Bladeleaf_Combo_Status": {
+"name": "Bladeleaf",
+"desc": "Using your [SignatureSkill] consumes all stacks and throws them at the nearest enemy, dealing them ::ref_dmg::.",
+"max": 2,
+"dur": 6,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"DS_Bladeleaf_Skill_1Recast": {
+"name": "Hiveborn Blossom",
+"desc": "You can cast ::ref_name:: again, with increased damage.",
+"dur": 4
+},
+"DS_Bladeleaf_Skill2_Status": {
+"name": "Swarmstrike Accord",
+"desc": "All [Attack]s deal an additional ::dmg::.",
+"dur": 8,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"DS_Bladeleaf_Passive_Status": {
+"name": "Queen's Decree",
+"desc": "The next time one of your skills deals [Magic] damage, it is increased by ::ref_damage%::."
+},
+"DA_Water_Combo_Status": {
+"name": "Cascade",
+"desc": "[CritDamage] increased.",
+"max": 5,
+"dur": 15,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"DA_Water_Skill1_Status": {
+"name": "Abyssal Fury",
+"desc": "All your [Attack] have a ::chance:: chance to blast ::dmg::.",
+"dur": 8,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"DA_Water_Skill1_StatusShield": {
+"dur": 8,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"DA_Water_Passive_Status": {
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"DA_Water_Passive_Status_R3": {
+"dur": 120,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"DM_Multispin_Combo_Status": {
+"desc": "Takes ::damage%:: more damage.",
+"dur": 10,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"DM_Multispin_Skill1_Recast": {
+"desc": "You can cast ::ref1_name:: again."
+},
+"DM_Multispin_Skill1_Status": {
+"dur": 12,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"DM_Multispin_Passive_Status": {
+"name": "Zeal",
+"desc": "At ::stacks::, your next [ComboAttack] consums all stacks to reset the cooldown of ::ref_name:: and increase its damage by ::ref2_damage%::.",
+"max": 10,
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"DM_Multispin_Passive_Status2": {
+"name": "Zeal",
+"desc": "Damage of ::ref_name:: increased by ::damage%::.",
+"dur": 3,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Daggers_Start_Combo_Status": {
+"name": "Sinister Fracture",
+"desc": "[Armor] reduced by ::val1%:: for ::dur::.",
+"dur": 15,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Daggers_Start_Skill2_Status": {
+"name": "Killer Instinct",
+"desc": "Damage of your next [WeaponSkill] increased by ::var1%::.",
+"dur": 6,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Daggers_DuplicatePoison_ComboAttack_Status": {
+"name": "Cheese-blessed",
+"desc": "Damage of your next Cheesebane  increased by ::var1%::.",
+"max": 10,
+"dur": 8,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Daggers_DuplicatePoison_Skill1_Status": {
+"name": "Gaping Wound",
+"desc": "Bleeds for ::dmg:: over ::duration::.",
+"max": 1,
+"dur": 8,
+"types": [
+"Bleed",
+"Debuff"
+],
+"dot": 1,
+"color": "#d41616"
+},
+"Daggers_DuplicatePoison_PassiveStatus": {
+"name": "Gash",
+"desc": "A [Bleeding] dealing ::dmg:: over ::duration::.",
+"max": 5,
+"dur": 9,
+"types": [
+"Bleed",
+"Debuff"
+],
+"dot": 1,
+"color": "#d41616"
+},
+"Daggers_DuplicatePoison_Passive_Bonus": {
+"name": "Gash",
+"desc": "[ArmorPenetration] and [MoveSpeedFactor] increased by ::val1%::.",
+"dur": -1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Daggers_Demondash_Combo_Status": {
+"name": "Demonic Bite",
+"desc": "Damage of your next [WeaponSkill] increased by ::var1%::.",
+"dur": 6,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Daggers_Demondash_Mark": {
+"name": "Chaos Mark",
+"desc": "Your next ::ref_name:: hitting this target will have its cooldown reset.",
+"dur": 6
+},
+"Daggers_Demondash_Skill1_Status": {
+"name": "Chaotic Flames",
+"desc": "Deals ::dmg:: over ::duration::.",
+"dur": 6,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Daggers_Demondash_Skill1_Counter": {
+"name": "Demon Dash",
+"max": 100,
+"dur": 5,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Daggers_Demondash_Skill2_Counter": {
+"desc": "Cast again to fire a fang.",
+"max": 5,
+"dur": 8,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Daggers_Demondash_Passive_Status": {
+"desc": "Deals damage over time.",
+"max": -1,
+"dur": 6,
+"types": [
+"Burn"
+],
+"dot": 1,
+"color": "#ff9920"
+},
+"Daggers_Demondash_Passive_Debuff": {
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"GS_Nova_Combo_Status": {
+"max": 3,
+"dur": 12,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"GS_Nova_Skill2_Buff": {
+"dur": 6,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"GS_Nova_Passive_Stack": {
+"name": "Hysteria",
+"desc": "At max stacks, you can cast [GS_Nova_Ultimate].",
+"max": 150,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"GS_Nova_Ultimate_Slow": {
+"name": "Slow",
+"dur": 5,
+"types": [
+"Slow"
+],
+"cc": 1,
+"color": "#7e8131"
+},
+"GS_Nova_Ultimate_Proc": {
+"name": "Anger Release",
+"desc": "You can cast [GS_Nova_Ultimate].",
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"GA_Craft_FinalCombo_Status": {
+"name": "Brutal Frenzy",
+"desc": "[PhysicalMastery] increased by ::val1%:: per stack.",
+"max": 3,
+"dur": 15,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"GA_Demon_Combo_Status": {
+"name": "Burning Appetite",
+"desc": "Your [Attack]s deals an additional ::dmg:: per stack.",
+"max": 3,
+"dur": 20,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"GA_Demon_Skill1_Status": {
+"name": "Tear Reality",
+"desc": "[Armor] and [MagicArmor] reduced.",
+"dur": 15,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"GA_Demon_Skill2_Status": {
+"name": "Dark Gift",
+"desc": "[CritChance], [MagicMastery], [PhysicalMastery] and [CooldownReduction] increased by ::ref_val1%:: but you lose ::var1%:: of your [MaxHealth] every ::time::.",
+"dur": 10,
+"types": [
+"Buff",
+"Burn"
+],
+"dot": 1,
+"color": "#cae91d"
+},
+"GA_Demon_Passive_Status": {
+"name": "Resilience of the Unkillable Demon King",
+"desc": "Your next [ComboAttack] deals ::ref_damage%:: increased damage and heal yourself for ::ref_var1%:: of the damage dealt."
+},
+"GM_MassGrab_Combo_Proc": {
+"name": "Honey Crushed",
+"desc": "Your next ::ref_name:: critically strikes.",
+"dur": 6,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"GM_MassGrab_Skill1_Status": {
+"name": "Reverse Honey Spin",
+"desc": "Slowed by ::val1%::.",
+"dur": 4,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"GM_MassGrab_Skill1_Status2": {
+"name": "Reverse Honey Spin",
+"desc": "[Armor] and [MagicArmor] increased.",
+"max": 10,
+"dur": 8,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"GM_MassGrab_Skill2_Status": {
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"GM_MassGrab_Passive_Status": {
+"name": "Buzzing",
+"desc": "At ::stacks:: stacks, summons an angry bee that starts attacking enemies for ::dur1::, dealing ::ref_dmg:: every ::time::.",
+"max": 10,
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Book_Start_Skill1_Burn": {
+"name": "Light Burn",
+"desc": "A [Burn] that deals ::dmg:: over ::dur::.",
+"dur": 10,
+"types": [
+"Burn",
+"Debuff"
+],
+"dot": 1,
+"color": "#ff9920"
+},
+"Book_WaterOrbs_Rise_Charge": {
+"name": "Tide",
+"desc": "Can be consumed by ::ref_name:: to spawn <val>Water Spheres</val>.",
+"max": 8,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Book_WaterOrbs_Orb_Charge": {
+"name": "Tide",
+"desc": "Can be consumed by ::ref_name:: to spawn <val>Water Spheres</val>.",
+"max": 8,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Book_WaterOrbs_Skill1_Shield": {
+"desc": "Protected by a [Shield] absorbing damage.",
+"dur": 10
+},
+"Book_WaterOrbs_Skill1_Buff": {
+"dur": 3,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Book_WaterOrbs_Passive_Status": {
+"desc": "Heal ::heal:: over ::duration::",
+"dur": 6,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Scepter_Start_Skill1_Burn": {
+"name": "Light Burn",
+"desc": "A [Burn] that deals ::dmg:: over ::dur::.",
+"dur": 10,
+"types": [
+"Burn",
+"Debuff"
+],
+"dot": 1,
+"color": "#ff9920"
+},
+"Scepter_Start_Skill2_Shield": {
+"desc": "Radiance",
+"dur": 10,
+"types": [
+"Buff",
+"Shield"
+],
+"color": "#cae91d"
+},
+"Scepter_Flamie_Combo_Status": {
+"name": "Searing Furnace",
+"desc": "All damage suffered increased by ::val1%::.",
+"dur": 10,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Scepter_Flamie_Skill1_Shield": {
+"dur": 15
+},
+"Scepter_Flamie_S2_R2": {
+"max": 5,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Scepter_Flamie_S2_R3": {
+"desc": "[MagicReduction] increased by ::val1%::.",
+"dur": 1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Scepter_Flamie_Flamie": {
+"name": "Flamie",
+"desc": "Heals you for ::heal:: every ::time::.",
+"types": [
+"Buff",
+"Scepter_Flamie",
+"HealOverTime"
+],
+"hot": 1,
+"color": "#cae91d"
+},
+"Halos_Totem_Passive_Slow": {
+"name": "Power of the Tides",
+"dur": 3,
+"types": [
+"Debuff",
+"Slow"
+],
+"cc": 1,
+"color": "#b96a2b"
+},
+"Halos_Totem_Passive_Status": {
+"name": "Power of the Tides",
+"desc": "[Magic] damage suffered increased by ::var1%::.",
+"dur": 15
+},
+"Halos_Demon_Combo_Status": {
+"name": "Void Bomblet",
+"desc": "Your [Magic] [WeaponSkill]s detonate this, dealing ::dmg:: per stack.",
+"max": 4,
+"dur": 12,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Halos_Demon_Skill1_Recast": {
+"desc": "You can cast [Halos_Demon_Skill1] to return to your original position.",
+"dur": 3
+},
+"Halos_Demon_Skill1_Shield": {
+"name": "Chaotic Shield",
+"desc": "Absorbs ::shield:: damages.",
+"dur": 12
+},
+"Halos_Demon_Skill2_Leash": {
+"name": "Deceiver Trick",
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Halos_Demon_Skill2_R3_Counter": {
+"name": "Deceiver Trick",
+"desc": "Upon reaching ::stacks:: stacks, reset the cooldown of [Halos_Demon_Skill1].",
+"max": 1,
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Halos_Demon_Passive_Status": {
+"desc": "Absorbs ::shield:: damages.",
+"dur": -1
+},
+"Crescent_FlowerSpiral_FinalCombo_Status": {
+"name": "Floral Euphoria",
+"desc": "[CritChance] increased.",
+"max": 4,
+"dur": 15,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Crescent_FlowerSpiral_Skill_1_Charge": {
+"name": "Psychoactive Petal",
+"desc": "Consumed by ::ref_name:: to spin an additional time.",
+"max": 6,
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Crescent_FlowerSpiral_Skill_2_Status": {
+"name": "Bloom",
+"desc": "All your damage heals nearby allies for ::heal%:: of the damage dealt for ::duration::.",
+"dur": 4,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Crescent_FlowerSpiral_Passive_Slow": {
+"name": "Slow",
+"dur": 3,
+"types": [
+"Slow"
+],
+"cc": 1,
+"color": "#7e8131"
+},
+"Fists_WaterUppercut_C_CritStatus": {
+"name": "Sink to the Bottom",
+"desc": "[CritChance] increased by ::val1::%.",
+"max": 5,
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Fists_WaterUppercut_S3": {
+"name": "Tide Rising",
+"desc": "Damage of your next ::ref_name:: increased.",
+"max": 10,
+"dur": 6,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Fists_WaterUppercut_P_Status_Slow": {
+"desc": "Slowed by ::val1%::.",
+"dur": 5,
+"types": [
+"Debuff",
+"Slow"
+],
+"cc": 1,
+"color": "#b96a2b"
+},
+"Fists_LightMonk_Combo_Status": {
+"name": "Fervent Strike",
+"desc": "[Fervor] increased.",
+"max": 5,
+"dur": 12,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Fists_LightMonk_Skill1_Status": {
+"name": "Blind Breakthrough Mark",
+"desc": "You can recast ::ref_name:: to dash and deal ::ref_dmg:: to this enemy.",
+"dur": 4
+},
+"Fists_LightMonk_Skill2_Status": {
+"dur": 1
+},
+"Fists_LightMonk_Passive_Shield": {
+"desc": "Absorbs ::shield:: damages.",
+"dur": 8,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Bow_Craft_AttackCombo_Status": {
+"name": "Lock and Load",
+"desc": "Damage of your next [WeaponSkill] increased by ::var1%::.",
+"max": 1,
+"dur": 15,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Bow_Craft_Skill1_Rank3_Status": {
+"name": "Sharpen Arrow",
+"desc": "A [Bleeding] effect that deals ::dmg:: over ::dur::.",
+"max": -1,
+"dur": 9,
+"types": [
+"Bleed",
+"Debuff"
+],
+"dot": 1,
+"color": "#d41616"
+},
+"Bow_Craft_Passive_Status": {
+"name": "Deadeye Focus",
+"desc": "Damage of your next ::ref_name:: increased by ::var1%::.",
+"dur": 15
+},
+"Bow_BigGame_Status": {
+"name": "Big Game Hunter",
+"desc": "Your next [Attack] is a [ComboAttack]."
+},
+"Bow_BigGame_Skill1_Status": {
+"name": "Hunter Net",
+"desc": "Slowed by ::val1%::.",
+"dur": 4,
+"types": [
+"Slow"
+],
+"cc": 1,
+"color": "#7e8131"
+},
+"Bow_BigGame_Skill2_Status": {
+"name": "Ram Trap",
+"desc": "Immobilized for ::duration::.",
+"dur": 4,
+"types": [
+"Debuff",
+"Root"
+],
+"cc": 1,
+"color": "#b96a2b"
+},
+"Bow_BigGame_Passive_Status": {
+"name": "Thrill of the Hunter",
+"desc": "Your next [Attack] against them consumes the mark and deal ::ref_damage%:: increased damage.",
+"dur": 10
+},
+"Thrown_Seeds_Sprout": {
+"name": "Ravenous Sprout",
+"desc": "Slowed by ::val1%::. Can be harvested to deal ::ref_dmg:: over ::ref_duration::. Stacks up to ::stacks::.",
+"max": 20,
+"dur": 10,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Thrown_Seeds_Dot": {
+"name": "Ravenous Toxin",
+"desc": "::dmg:: dealt over ::duration:: and slowed by ::val1%::.",
+"max": 1000,
+"dur": 6,
+"types": [
+"Poison",
+"Debuff"
+],
+"dot": 1,
+"color": "#9320ff"
+},
+"Thrown_Seeds_Skill2_Status": {
+"name": "Verdant Impetus",
+"desc": "Your Ranged [Attack]s become bouncing for ::duration::, dealing ::damage%:: increased damage and planting a stack of ::name::.",
+"max": 1000,
+"dur": 6,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Staff_Craft_C_Status": {
+"desc": "Damage of your next magic [WeaponSkill] increased by ::var1%:: per stack.",
+"max": 8,
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Staff_Craft_S1_Status": {
+"desc": "[Magic] damage suffered increased by ::var1%:: for ::dur::.",
+"dur": 15
+},
+"Staff_Craft_S1_Proc": {
+"desc": "Next cast of ::ref_name:: is instant.",
+"dur": 4
+},
+"Staff_Craft_S2_Status": {
+"name": "Pyroclasm",
+"desc": "Slowed by ::val1::%.",
+"dur": 6,
+"types": [
+"Debuff",
+"Slow"
+],
+"cc": 1,
+"color": "#b96a2b"
+},
+"Staff_Craft_Passive_Status": {
+"name": "Flame Bomb",
+"desc": "Explodes on reaching ::stacks:: stacks, dealing ::dmg:: to nearby enemies.",
+"max": 15,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Staff_SummonDemon_Combo_R3_Buff": {
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Staff_SummonDemon_Skill1_Status": {
+"name": "Demonic Charge",
+"desc": "Can be consumed by ::ref_name:: to add demonic bolt to the cast.",
+"max": 20,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Staff_SummonDemon_Passive_Buff": {
+"desc": "Your next [WeaponSkill] has no cooldown but costs you ::ref_var1%:: of your remaining [Health]."
+},
+"Staff_SummonDemon_Passive_Shield": {
+"desc": "Protected by a [Shield] absorbing damage.",
+"dur": 12
+},
+"Staff_Censer_Combo_Buff": {
+"dur": 3,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Staff_Censer_Skill2_Slow": {
+"dur": 0,
+"types": [
+"Slow"
+],
+"cc": 1,
+"color": "#7e8131"
+},
+"Staff_Censer_Mark": {
+"name": "Luon Mark",
+"desc": "Consumed when refreshed, dealing ::dmg::.",
+"max": 2,
+"dur": 10,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Staff_Censer_Passive_Buff": {
+"max": 10,
+"dur": -1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Staff_Censer_Ultimate_Proc": {
+"name": "Hidden Power",
+"desc": "You can cast [Staff_Censer_Ultimate] instead of your [Signature] skill.",
+"dur": -1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Stun": {
+"name": "Stun",
+"desc": "Unable to act for the whole duration.",
+"types": [
+"Stun",
+"Debuff"
+],
+"cc": 1,
+"color": "#9156a9"
+},
+"Slow": {
+"name": "Slow",
+"desc": "Slowed.",
+"types": [
+"Slow",
+"Debuff"
+],
+"cc": 1,
+"color": "#7e8131"
+},
+"Root": {
+"name": "Root",
+"dur": 2,
+"types": [
+"Root",
+"Debuff"
+],
+"cc": 1,
+"color": "#4f6f33"
+},
+"Silence": {
+"name": "Silence",
+"dur": 2,
+"types": [
+"Silence",
+"Debuff"
+],
+"cc": 1,
+"color": "#533f72"
+},
+"FoeStealthStatus": {
+"name": "In Stealth",
+"types": [
+"Invisibility",
+"Buff"
+],
+"color": "#221630"
+},
+"Invisible": {
+"name": "Invisible",
+"types": [
+"Invisibility"
+],
+"color": "#221630"
+},
+"EliteOutnumbered": {
+"max": -1,
+"dur": 0,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"HoneyCovered": {
+"name": "Covered in Honey",
+"desc": "[Slowed] for ::duration::",
+"dur": 5,
+"types": [
+"Slow",
+"Debuff"
+],
+"cc": 1,
+"color": "#7e8131"
+},
+"HoneyCoveredDamage": {
+"name": "Drenched in acidic Honey",
+"desc": "Suffer ::dmg:: over ::duration::.",
+"dur": 1,
+"types": [
+"Debuff",
+"Poison"
+],
+"dot": 1,
+"color": "#b96a2b"
+},
+"Fracture": {
+"name": "Fracture",
+"max": 15,
+"dur": 15,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Bulwark": {
+"name": "Bulwark",
+"max": 15,
+"dur": 15,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Ward": {
+"name": "Ward",
+"max": 15,
+"dur": 15,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"UnderWater": {
+"name": "Under water",
+"types": [
+"Debuff",
+"Slow"
+],
+"cc": 1,
+"color": "#b96a2b"
+},
+"Drowning": {
+"name": "Drowning",
+"types": [
+"Debuff",
+"Poison"
+],
+"dot": 1,
+"color": "#b96a2b"
+},
+"Frailty": {
+"name": "Frailty",
+"max": 15,
+"dur": 15,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Dueling": {
+"name": "Dueling",
+"max": 1,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Rested": {
+"name": "Rested",
+"desc": "Killing foes grant +100% experience.",
+"max": 1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Cleodora_MiniElite_FirstLife": {
+"max": 1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Cleodora_MiniElite_Sleep": {
+"max": 1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Poisoned": {
+"name": "Poisoned",
+"dur": 1,
+"types": [
+"Poison",
+"Debuff"
+],
+"dot": 1,
+"color": "#9320ff"
+},
+"Bleed": {
+"name": "Bleeding",
+"dur": 5,
+"types": [
+"Bleed",
+"Debuff"
+],
+"dot": 1,
+"color": "#d41616"
+},
+"Burning": {
+"name": "Burning",
+"dur": 1,
+"types": [
+"Burn",
+"Debuff"
+],
+"dot": 1,
+"color": "#ff9920"
+},
+"Trap": {
+"name": "Poisoned",
+"dur": 0.1,
+"types": [
+"Poison",
+"Debuff"
+],
+"dot": 1,
+"color": "#9320ff"
+},
+"Warrior_Charge_DestabilisationStatus": {
+"name": "Charge",
+"desc": "All damage dealt reduced by ::val1%::.",
+"dur": 10,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Warrior_IgnorePainStatus": {
+"name": "Ignore Pain",
+"desc": "Damage taken reduced by ::val1%::.",
+"dur": 12,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Warrior_IgnorePainStatus_Allies": {
+"name": "Ignore Pain",
+"desc": "Damage taken reduced by ::val1::.",
+"dur": 12,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Warrior_BattleShoutStatus": {
+"name": "Battle Shout",
+"dur": 15,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Warrior_BattleShout_Buff": {
+"name": "Battle Shout",
+"dur": 15,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Warrior_BerserkStatus": {
+"name": "Berserk",
+"desc": "Increase all damage done by ::val1%:: and [Rage] generated from [Skill]s and [Attack]s by ::var1::.",
+"dur": 15,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Warrior_BurstOfAnger_Status": {
+"name": "Burst of Anger",
+"desc": "Your ::var1:: next [WeaponSkill]s have no cooldown.",
+"dur": 20
+},
+"Warrior_Hemorrhage_Status": {
+"name": "Hemorrhage",
+"desc": "A [Bleed] dealing damage over ::dur::.",
+"max": -1,
+"dur": 8,
+"types": [
+"Hemorage",
+"Debuff"
+],
+"dot": 1,
+"color": "#9e0000"
+},
+"Warrior_Talent_Bruise_Status": {
+"name": "Bruise",
+"desc": "All [Physical] damage suffered increased by ::damage%:: for ::duration::.",
+"dur": 15
+},
+"Warrior_Talent_SurgeOfViolence_Status": {
+"name": "Surge of Violence",
+"desc": "Your next ::ref_name:: critically strikes and costs no [Rage]."
+},
+"Warrior_Talent_InfusedWound_Status": {
+"name": "Spark Hemorrhage",
+"desc": "A [Bleed] dealing damage over ::dur::.",
+"max": -1,
+"dur": 9,
+"types": [
+"Hemorage",
+"Debuff"
+],
+"dot": 1,
+"color": "#9e0000"
+},
+"Warrior_Talent_RageShield_Status": {
+"name": "Rage Shield",
+"desc": "A [Shield] absorbing an amount equal to ::ref_var1%:: of your [MaxHealth].",
+"dur": 8
+},
+"Warrior_Talent_CrippingBloodloss_Status": {
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Warrior_Talent_HoldTheLine_Status": {
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Warrior_SecondWind_Cooldown": {
+"name": "Second Wind",
+"desc": "::ref_name:: cannot occur.",
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Rogue_Poison_DeadlyStatus": {
+"max": 5,
+"dur": 10,
+"types": [
+"Poison",
+"Debuff"
+],
+"dot": 1,
+"color": "#9320ff"
+},
+"Rogue_ShadowstepStatus": {
+"name": "Momentum",
+"dur": 3,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Rogue_SmokeBomb_Status": {
+"name": "Smoke Bomb",
+"desc": "Dodges all [Attack]s.",
+"dur": 1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Rogue_SmokeBomb_MoveSpeed": {
+"name": "Smoke Bomb",
+"dur": 3,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Rogue_AssassinMark_Status": {
+"name": "Marked",
+"desc": "Damage dealt increased by ::var1%::. If the target die while the mark is active, the couldown of ::ref_name:: is reset.",
+"dur": 30,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Rogue_KnivesTempest_Status": {
+"name": "Silent Storm",
+"desc": "[MoveSpeedFactor] increased.",
+"dur": 3,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Rogue_KnivesTempest_StatusBis": {
+"name": "Silent Storm",
+"desc": "[MoveSpeedFactor] reduced.",
+"dur": 3,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Rogue_KnivesTempest_Status2": {
+"name": "Shred",
+"desc": "[Armor] reduced.",
+"dur": 3,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Rogue_UrgeToKill_Status": {
+"name": "Urge to Kill",
+"desc": "::ref_name:: has no cooldown and you generate ::var1:: [ComboPoint] every ::time::.",
+"dur": 10
+},
+"Rogue_UrgeToKill_Status2": {
+"name": "Ramp-up",
+"desc": "Damage of ::ref_name:: increased.",
+"max": 100,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Rogue_Finisher_Combo_Point": {
+"name": "Combo Master",
+"desc": "You can now stack up to ::var1:: [ComboPoint].",
+"types": [
+"State"
+],
+"color": "#ffe3b8"
+},
+"Rogue_Talent_LethalPoison_Status": {
+"name": "Lethal Poison",
+"desc": "A poison dealing ::dmg#:: over ::duration::, stacking up to ::stacks::.",
+"max": 5,
+"dur": 8,
+"types": [
+"Debuff",
+"Poison"
+],
+"dot": 1,
+"color": "#b96a2b"
+},
+"Rogue_Talent_AcidicSplatter_Status": {
+"name": "Acidic Splatter",
+"desc": "A poison dealing ::dmg:: over ::duration:: and reducing [MagicArmor] by ::val1%::.",
+"dur": 6,
+"types": [
+"Debuff",
+"Poison"
+],
+"dot": 1,
+"color": "#b96a2b"
+},
+"Rogue_Talent_Adrenaline_Status": {
+"name": "Adrenaline",
+"desc": "[MoveSpeedFactor] increased by ::val1%::.",
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Rogue_Talent_AtrophicPoison_Status": {
+"name": "Atrophic Poison",
+"desc": "Inflicts ::ref_dmg:: reduced damage."
+},
+"Rogue_Talent_CripplingPoison_Tracker": {
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Rogue_Talent_CheatDeath_Status": {
+"name": "Cheat Death",
+"dur": 3,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Rogue_Talent_CheatDeath_Cooldown": {
+"name": "Cheat Death Cooldown",
+"desc": "Cheat Death cannot occur.",
+"dur": 120,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Priest_Judgment_Status": {
+"name": "Alacrity",
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Priest_Judgment_Status2": {
+"name": "Revitalized Soul",
+"dur": 3,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Priest_Prayer_Shield_Status": {
+"name": "Prayer: Virtue",
+"desc": "Protects you for ::shield:: damages.",
+"dur": 10
+},
+"Priest_PenanceStatus": {
+"dur": 10,
+"types": [
+"State"
+],
+"color": "#ffe3b8"
+},
+"Priest_FaithfulWindsStatus": {
+"name": "Faithful Winds",
+"desc": "[MoveSpeedFactor] increased by ::val1%::.",
+"dur": 3,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Priest_BlessingOfFervor_Status": {
+"name": "Blessing of Fervor",
+"dur": 15,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Priest_Crusader_Status": {
+"name": "Crusader",
+"max": 300,
+"dur": 20,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Priest_BeaconOfHope_Status": {
+"dur": 10
+},
+"Priest_BeaconOfHope_Status_Buff": {
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Priest_BeaconOfHope_Status_Debuff": {
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Priest_Miracle_Status": {
+"name": "Miracle",
+"dur": 15
+},
+"Priest_Talent_Sunlight_Status": {
+"name": "Sunlight",
+"desc": "Your next [ComboAttack] deals an additional ::dmg::.",
+"dur": 6,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Priest_Talent_MeltingFaith_Status": {
+"name": "Melting Faith",
+"desc": "[MagicArmor] and [Armor] reduced by ::val1%::.",
+"dur": 10,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Priest_Talent_PurgingStrikes_Status": {
+"desc": "Your [Attack]s deal an additional ::dmg::.",
+"dur": 6,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Priest_Talent_PotentFortitude_Status": {
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Priest_Talent_BurningRays_Status": {
+"name": "Burning Rays",
+"desc": "A burn dealing ::dmg:: of the damage dealt over ::ref_duration::.",
+"dur": 6,
+"types": [
+"Debuff",
+"Burn"
+],
+"dot": 1,
+"color": "#b96a2b"
+},
+"Mage_Conduit_Power_Status": {
+"name": "Conduit: Power",
+"desc": "[MagicMastery] increased by ::val1%:: per stack.",
+"max": 20,
+"dur": 15,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Mage_Foresight_Status": {
+"name": "Foresight",
+"desc": "Your next [WeaponSkill] or [ComboAttack] has no [Spark] cost.",
+"max": 2,
+"dur": 12,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Mage_RayOfSpark_Status": {
+"name": "Frost Infusion",
+"types": [
+"Slow",
+"Debuff"
+],
+"cc": 1,
+"color": "#7e8131"
+},
+"Mage_Blink_Mastery2_Position": {
+"name": "Return",
+"desc": "Teleport back to where you casted Blink."
+},
+"Mage_Blink_Mastery3": {
+"name": "Phase Strike",
+"desc": "Your next [WeaponSkill] deals ::damage%:: increased damage."
+},
+"Mage_ShieldOfSpark_Status": {
+"name": "Spark Shield",
+"desc": "Protected by a [Shield] absorbing damage.",
+"dur": 60,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Mage_ShieldOfSpark_Status2": {
+"dur": 3,
+"types": [
+"Debuff",
+"Slow"
+],
+"cc": 1,
+"color": "#b96a2b"
+},
+"Mage_MysticEmpowerment_Status": {
+"name": "Mystic Empowerment",
+"dur": 15,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Mage_MysticEmpowerment_Status_Physical": {
+"name": "Mystic Empowerment",
+"dur": 15,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Mage_StaticNova_Status_Root": {
+"name": "Static Drag",
+"dur": 4,
+"types": [
+"Root",
+"Debuff"
+],
+"cc": 1,
+"color": "#4f6f33"
+},
+"Mage_StaticNova_Status_M1": {
+"name": "Static Drag",
+"dur": 8,
+"types": [
+"Slow",
+"Debuff"
+],
+"cc": 1,
+"color": "#7e8131"
+},
+"Mage_Overload_Status": {
+"dur": 9
+},
+"Mage_Talent_Chaincast_Accum_Status": {
+"name": "Chaincast",
+"desc": "Using ::ref2_var1:: [Skill]s within ::duration:: grants you ::ref_name:: for ::ref_duration::.",
+"max": 4,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Mage_Talent_Chaincast_Status": {
+"name": "Chaincast",
+"desc": "Your next [WeaponSkill] has no cooldown, costs no [Spark] and triggers [Conduit]s.",
+"dur": 15,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Mage_Talent_PowerCircuit_Status": {
+"name": "Power Circuit",
+"desc": "Chance to land a [Physical] critical strike increased by ::chance::.",
+"dur": 6
+},
+"Mage_Talent_HighVoltage_Status": {
+"name": "High Voltage",
+"desc": "Your next [ComboAttack] will critically strike.",
+"dur": 20
+},
+"KoboldThief_Auto_Status": {
+"name": "Lethal Poison",
+"desc": "A [Poison] that deals ::dmg:: over ::duration::.",
+"dur": 9,
+"types": [
+"Poison",
+"Debuff"
+],
+"dot": 1,
+"color": "#9320ff"
+},
+"KoboldOverseer_MadRunStatus": {
+"dur": 9,
+"types": [
+"State"
+],
+"color": "#ffe3b8"
+},
+"Demon_Claws_Shield_Shield": {
+"name": "Chaos Shield",
+"desc": "Protected by a [Shield] absorbing damage.",
+"dur": 60,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Demon_Spear_Skill_Status": {
+"dur": -1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Demon_Spear_Skill_Burn": {
+"name": "Chaos Burn",
+"dur": 10,
+"types": [
+"Debuff",
+"Burn"
+],
+"dot": 1,
+"color": "#b96a2b"
+},
+"Demon_Gate_Visual_Status": {
+"max": 1,
+"types": [
+"State"
+],
+"color": "#ffe3b8"
+},
+"FairieSuperElite_Clones_Stealth": {
+"dur": 1000,
+"types": [
+"Invisibility"
+],
+"color": "#221630"
+},
+"FaerieEliteDemon_NightRain_Status": {
+"name": "Chaos Scar",
+"desc": "Take ::var1%#:: more damage from orbs.",
+"max": 15,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"SuperEliteDemon_Rage_Status": {
+"dur": -1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"SuperEliteDemon_Bomb_Status": {
+"dur": 5,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"SuperEliteDemon_Status_Stackable": {
+"name": "Chaos Scar",
+"desc": "Take ::var1%#:: more damage from the boss.",
+"max": 15,
+"dur": 30,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Crimson_SwordShield_Consecration_Shield": {
+"dur": 10,
+"types": [
+"Buff",
+"Shield"
+],
+"color": "#cae91d"
+},
+"Crimson_Book_Aura": {
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Crimson_Scepter_Auto_Status": {
+"name": "Light Burn",
+"desc": "A [Burn] that deals ::dmg:: over ::dur::.",
+"dur": 6,
+"types": [
+"Burn",
+"Debuff"
+],
+"dot": 1,
+"color": "#ff9920"
+},
+"Crimson_Captain_FanaticalFuryStatus": {
+"name": "Fanatical fury",
+"desc": "Attacks deal an additional ::dmg::.",
+"dur": 30,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Sprout_Burrowed": {
+"name": "Dormant",
+"types": [
+"Stun"
+],
+"cc": 1,
+"color": "#9156a9"
+},
+"Skunk_Auto_Status": {
+"name": "Bleeding",
+"desc": "A [Bleed] that deals ::dmg:: over ::duration::.",
+"dur": 9,
+"types": [
+"Bleed",
+"Debuff"
+],
+"dot": 1,
+"color": "#d41616"
+},
+"Wolf_Auto_Status": {
+"name": "Bleeding",
+"desc": "A [Bleed] that deals ::dmg:: over ::duration::.",
+"dur": 9,
+"types": [
+"Bleed",
+"Debuff"
+],
+"dot": 1,
+"color": "#d41616"
+},
+"Wolf_Skill1_Status": {
+"name": "Destabilized",
+"dur": 15,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"ManfishBoss_WaterBreath_Shield": {
+"types": [
+"Buff",
+"Shield"
+],
+"color": "#cae91d"
+},
+"R1CrabBoss_NayasFuryMoveStatus": {
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"R1CrabBoss_HuntDownStatus": {
+"dur": 13,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Ratsar_KingRage": {
+"name": "King's Rage",
+"max": 3,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Ratsar_SparklingShield": {
+"types": [
+"Buff",
+"Shield"
+],
+"color": "#cae91d"
+},
+"MChuck_SprayedFondueStatus": {
+"name": "Hot Cheese",
+"dur": 6,
+"types": [
+"Debuff",
+"Burn",
+"Slow"
+],
+"dot": 1,
+"cc": 1,
+"color": "#b96a2b"
+},
+"Mokshi_ChrysalisStatus": {
+"name": "Chrysalis",
+"types": [
+"Buff",
+"Shield",
+"Root"
+],
+"cc": 1,
+"color": "#cae91d"
+},
+"Golcano_ShieldApply_Status": {
+"name": "Melting",
+"desc": "Take ::var1%#:: more damage from [Golcano_ShieldApply].",
+"max": 15,
+"dur": -1,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Golcano_Shield": {
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Phrixes_DimensionalInstabilityStatus": {
+"name": "Dimensional Instability",
+"desc": "Increases the spawn rate of Chaos Orbs from Rifts by ::var1%::",
+"max": 66,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Phrixes_EternalNightStatus": {
+"types": [
+"Buff",
+"Shield"
+],
+"color": "#cae91d"
+},
+"Phrixes_OpenRiftStatus": {
+"dur": 3,
+"types": [
+"State"
+],
+"color": "#ffe3b8"
+},
+"Phrixes_ChaosOrbStatus": {
+"dur": 5,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"ItemStatus": {
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"MinorShieldPotion_Status": {
+"name": "Minor Shield Potion",
+"desc": "Protected by a [Shield] absorbing damage.",
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"ShieldPotion_Status": {
+"name": "Shield Potion",
+"desc": "Protected by a [Shield] absorbing damage.",
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"MinorVelocityPotion_Status": {
+"name": "Minor Velocity Potion",
+"desc": "Movement speed increased by ::val1::%.",
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"FastSwimPotion": {
+"name": "Fast Swim Potion",
+"desc": "While under water, your movement speed is increased by ::ref_val%::.",
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"FastSwimPotionStatus": {
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"LongBreathPotion": {
+"name": "Long Breath Potion",
+"desc": "Breath longer under water.",
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"SacrificePotion_Status": {
+"name": "Sacrifice Potion",
+"desc": "Protected by a [Shield] absorbing damage.",
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"VesselPotion_Status": {
+"dur": 20,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"ElixirOfAbundanceStatus": {
+"name": "Elixir of Abundance",
+"desc": "Your chance to find rare components while gathering is increased.",
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Enchant_Zealot_Status": {
+"name": "Zealot",
+"desc": "[CritChanceRating] increased by ::val1::.",
+"max": 5,
+"dur": 15,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Enchant_Devote_Status": {
+"name": "Devote",
+"desc": "[FervorRating] increased by ::val1::.",
+"max": 5,
+"dur": 15,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Whetstone_Status": {
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Weighstone_Status": {
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"StoneOfPower_Trinket_Status": {
+"name": "Stone of Power",
+"desc": "[Strength] increased by ::val1::.",
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"StoneOfCunning_Trinket_Status": {
+"name": "Stone of Cunning",
+"desc": "[Dexterity] increased by ::val1::.",
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"StoneOfWisdom_Trinket_Status": {
+"name": "Stone of Wisdom",
+"desc": "[Intellect] increased by ::val1::.",
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"StoneOfRighteousness_Trinket_Status": {
+"name": "Stone of Righteousness",
+"desc": "[Faith] increased by ::val1::.",
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"InfusedTusk_Cooldown": {
+"name": "Infused Tusk",
+"desc": "::ref_name:: cannot occur.",
+"dur": 120,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"InfusedTusk_Status": {
+"name": "Infused Tusk",
+"desc": "A [Shield] absorbing ::ref_var1%:: of your [Vitality].",
+"dur": 15
+},
+"PurifiedHeart_Status": {
+"name": "Purified Heart",
+"desc": "At ::stacks::, your next [WeaponSkill] releases a lightning bolt dealing ::ref_dmg::.",
+"max": 20,
+"dur": 20,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"PurifiedHeart_Proc": {
+"name": "Purified Heart",
+"desc": "Your next [WeaponSkill] releases a lightning  bolt dealing ::dmg::.",
+"dur": 20,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"PrismaticPearl_Status": {
+"name": "Prismatic Pearl",
+"desc": "[Strength] increased by ::val1::.",
+"dur": 5,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"PrismaticPearl_Status2": {
+"name": "Prismatic Pearl",
+"desc": "[Dexterity] increased by ::val1::.",
+"dur": 5,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Trinket_Manfish_Status": {
+"name": "Poetrident",
+"desc": "Heals you for ::var1%:: of your [MaxHealth] over ::duration::.",
+"dur": 6,
+"types": [
+"Buff",
+"Poison"
+],
+"dot": 1,
+"color": "#cae91d"
+},
+"Trinket_Kobold_Status": {
+"name": "Raclette Pan",
+"desc": "[CritChanceRating] increased.",
+"max": 10,
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Trinket_Bee_Status": {},
+"Trinket_Crimson_Status": {
+"name": "Lost Relic Found",
+"desc": "[MoveSpeedFactor] increased by ::val1%::.",
+"dur": 3,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Trinket_Demon_Status": {
+"name": "Finger of Sukuna'Maatata",
+"desc": "Deals ::dmg:: over ::duration::.",
+"dur": 6,
+"types": [
+"Debuff",
+"Poison"
+],
+"dot": 1,
+"color": "#b96a2b"
+},
+"OreAffix_Fire": {
+"name": "Pyrh Blessed",
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"OreAffix_Fire_Status": {
+"name": "Pyrh Blessed",
+"desc": "Deals ::dmg:: to nearby enemies every ::time::.",
+"dur": 120,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"OreAffix_Ice": {
+"name": "Naya Blessed",
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"OreAffix_Ice_Status": {
+"name": "Naya Blessed",
+"desc": "Your [Attack]s have a ::chance::  chance to deal an additional ::dmg:: to enemies and slow them by ::ref_va1%:: for ::ref_duration::.",
+"dur": 120,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"OreAffix_Ice_Slow": {
+"name": "Naya Blessed",
+"desc": "Slowed by ::val1::%.",
+"dur": 3,
+"types": [
+"Debuff",
+"Slow"
+],
+"cc": 1,
+"color": "#b96a2b"
+},
+"OreAffix_Air": {
+"name": "Aoyl Blessed",
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"OreAffix_Air_Status": {
+"name": "Aoyl Blessed",
+"dur": 120,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"OreAffix_Nature": {
+"name": "Mely Blessed",
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"OreAffix_Nature_Status": {
+"name": "Mely Blessed",
+"desc": "Heals for ::heal:: [Health] upon killing an enemy.",
+"dur": 120,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Activity_BallonBouncing_StatusCounter": {
+"max": 999,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Respawn_Remaining": {
+"name": "Remaining Respawn",
+"desc": "After your death, you will be able to respawn.",
+"types": [
+"State"
+],
+"color": "#ffe3b8"
+},
+"DebugShieldStatus": {
+"dur": 5
+},
+"FXTest": {
+"dur": 20,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"ConsumableStatus": {
+"max": 99,
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+}
+},
+"types": {
+"Bleed": {
+"name": "Bleed",
+"color": "#d41616",
+"DoT": 1
+},
+"Burn": {
+"name": "Burn",
+"color": "#ff9920",
+"DoT": 1
+},
+"Poison": {
+"name": "Poison",
+"color": "#9320ff",
+"DoT": 1
+},
+"Magic": {
+"name": "Magic",
+"color": "#3dd4da"
+},
+"Buff": {
+"name": "Buff",
+"color": "#cae91d"
+},
+"Debuff": {
+"name": "Debuff",
+"color": "#b96a2b"
+},
+"State": {
+"name": "State",
+"color": "#ffe3b8"
+},
+"Shield": {
+"name": "Shield",
+"color": "#c1d7eb"
+},
+"Slow": {
+"name": "Slow",
+"color": "#7e8131",
+"CrowdControl": 1
+},
+"Silence": {
+"name": "Silence",
+"color": "#533f72",
+"CrowdControl": 1
+},
+"Stun": {
+"name": "Stun",
+"color": "#9156a9",
+"CrowdControl": 1,
+"HardCC": 1
+},
+"Root": {
+"name": "Root",
+"color": "#4f6f33",
+"CrowdControl": 1,
+"HardCC": 1
+},
+"Grounded": {
+"name": "Grounded",
+"color": "#585633",
+"CrowdControl": 1
+},
+"Invisibility": {
+"name": "Invisibility",
+"color": "#221630"
+},
+"Heal": {
+"name": "Heal",
+"color": "#6ddc5b"
+},
+"HealOverTime": {
+"name": "HealOverTime",
+"color": "#6ddc5b",
+"HoT": 1
+},
+"Scepter_Flamie": {
+"name": "Flamie",
+"color": "#ff9920"
+},
+"Hemorage": {
+"name": "Hemorage",
+"color": "#9e0000",
+"DoT": 1
+}
+},
+"items": {
+"SmallAlchemistCauldron": "Minor Alchemist Cauldron",
+"MinorShieldPotion": "Minor Shield Potion",
+"MinorVelocityPotion": "Minor Velocity Potion",
+"LongBreathPotion": "Long Breath Potion",
+"FastSwimPotion": "Fast Swim Potion",
+"ShieldPotion_Z2": "Shield Potion",
+"MinorStrengthPotion": "Minor Strength Potion",
+"MinorDexterityPotion": "Minor Dexterity Potion",
+"MinorIntelligencePotion": "Minor Intelligence Potion",
+"MinorFaithPotion": "Minor Faith Potion",
+"SacrificePotion": "Sacrifice Potion",
+"VesselPotion": "Vessel Potion",
+"ElixirOfMinorStrength": "Elixir of Minor Strength",
+"ElixirOfMinorDexterity": "Elixir of Minor Dexterity",
+"ElixirOfMinorIntelligence": "Elixir of Minor Intelligence",
+"ElixirOfMinorFaith": "Elixir of Minor Faith",
+"ElixirofMinorArmor": "Elixir of Minor Armor",
+"ElixirOfAbundance": "Elixir of Abundance",
+"ElixirOfStrength_Z2": "Elixir of Strength",
+"ElixirOfDexterity_Z2": "Elixir of Dexterity",
+"ElixirOfIntelligence_Z2": "Elixir of Intelligence",
+"ElixirOfFaith_Z2": "Elixir of Faith",
+"ElixirOfArmor_Z2": "Elixir of Armor",
+"Feast": "Plainswalker Feast",
+"Cook_7": "Flavored Candies",
+"Cook_2": "Grilled Wolf Chops",
+"Cook_5": "Grilled Mackerel",
+"Cook_1": "Wild Boar Stew",
+"Cook_3": "Crab Goulash",
+"Cook_4": "Melted Herbed Cheese",
+"Cook_6": "Skunk Stew",
+"Cook_8": "Mixed Salad",
+"Cook_9": "Smoked Coyote",
+"Cook_10": "Skover Root Soup",
+"Cook_11": "Beggar's Garbure",
+"Cook_12": "Pumpkin Pie",
+"Cook_13": "Beehive Lozenge",
+"Cook_14": "Ramburg Fondue",
+"Cook_15": "Pike Cooked in Foil",
+"Cook_16": "Sea Omelette",
+"Cook_Demon_0": "Eye Salad",
+"Cook_Demon_1": "Horn in Sauce",
+"Cook_Demon_2": "Skinless Iodized Wings",
+"Cook_Demon_3": "Grilled Tail Skewers",
+"Cook_Demon_4": "Demonic Stew",
+"Cook_Demon_5": "Surf and Murk",
+"Cook_Demon_6": "Hot Wings",
+"ScrollOfStrength": "Scroll Of Strength I",
+"ScrollOfDexterity": "Scroll Of Dexterity I",
+"ScrollOfIntelligence": "Scroll Of Intelligence I",
+"ScrollOfFaith": "Scroll Of Faith I",
+"ScrollOfVitality": "Scroll Of Vitality I",
+"ScrollOfCorruptedStrength": "Scroll Of Corrupted Strength",
+"ScrollOfCorruptedDexterity": "Scroll Of Corrupted Dexterity",
+"ScrollOfCorruptedFaith": "Scroll Of Corrupted Faith",
+"ScrollOfCorruptedIntellect": "Scroll Of Corrupted Intellect",
+"Whetstone": "Whetstone",
+"Weightstone": "Weightstone"
+},
+"classKinds": [
+"ItemStatus"
+]
+}
