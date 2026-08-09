@@ -11465,17 +11465,25 @@ class Overlay:
         live in the tray record rather than in the shared position cache — a
         healer alt can keep its trays somewhere a warrior's would be in the
         way. Called before anything saves or switches character."""
-        for i, win in enumerate(self.buffwins):
-            try:
-                # Stored as the ANCHOR, not the top-left: the window's corner
-                # moves as icons come and go, and saving that would walk the
-                # tray across the screen a little on every drag.
-                dx, dy = self._tray_offset(self._tray(i), win.winfo_width(),
-                                           win.winfo_height())
-                self._trays[i]["x"] = win.winfo_x() + dx
-                self._trays[i]["y"] = win.winfo_y() + dy
-            except tk.TclError:
-                pass
+        for i in range(len(self.buffwins)):
+            self._capture_tray_position(i)
+
+    def _capture_tray_position(self, i):
+        """One tray's position, back into its config.
+
+        Stored as the ANCHOR, not the window's top-left: the corner moves as
+        icons come and go, and saving that would walk the tray across the
+        screen a little on every drag. Called per step while dragging as well
+        as on save — see _bind_drag's on_move.
+        """
+        try:
+            win = self.buffwins[i]
+            dx, dy = self._tray_offset(self._tray(i), win.winfo_width(),
+                                       win.winfo_height())
+            self._trays[i]["x"] = win.winfo_x() + dx
+            self._trays[i]["y"] = win.winfo_y() + dy
+        except (tk.TclError, IndexError):
+            pass
 
     def _apply_tray_positions(self, pos=None):
         """Move each tray window to where its config says it goes.
@@ -11604,7 +11612,8 @@ class Overlay:
             # Draggable from anywhere on the tray, like every other overlay
             # window — there is no titlebar to grab, and the icons ARE the
             # window.
-            self._bind_drag(win, (c,), unlocked=self._buff_drag_gate(i))
+            self._bind_drag(win, (c,), unlocked=self._buff_drag_gate(i),
+                            on_move=(lambda n=i: self._capture_tray_position(n)))
 
     def _buff_rows(self, tray, live_by_key, now):
         """What one tray should draw, in the order the player arranged it.
@@ -12114,11 +12123,19 @@ class Overlay:
         (its escape menu). The game's UI state is the only input."""
         return not self._menu_unlock
 
-    def _bind_drag(self, win, widgets, unlocked=None):
+    def _bind_drag(self, win, widgets, unlocked=None, on_move=None):
         """Drag any of `widgets` to move `win` (while unlocked).
 
         `unlocked` overrides what counts as unlocked, for windows that don't
-        follow the overlay-wide rule — the minimap answers to the cursor."""
+        follow the overlay-wide rule — the minimap answers to the cursor.
+
+        `on_move` is called after each step for windows whose position is also
+        written somewhere else. The buff trays are: their draw pass re-places
+        them from a stored anchor every frame, so without telling that store
+        where the window has got to, the next frame drags it straight back —
+        which is exactly what a tray did, snapping home the moment the cursor
+        stopped moving.
+        """
         state = {}
         free = unlocked or (lambda: not self._is_locked())
 
@@ -12139,6 +12156,8 @@ class Overlay:
             if not free() or not state.get("on"):
                 return
             win.geometry(f"+{e.x_root - state['dx']}+{e.y_root - state['dy']}")
+            if on_move is not None:
+                on_move()
 
         def end(e):
             if state.pop("on", None):
