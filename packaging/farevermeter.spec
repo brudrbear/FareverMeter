@@ -38,6 +38,35 @@ datas = [
     # test that hides Dash_Status and friends.
     (str(ROOT / "analysis_out" / "status_meta.json"), "res/analysis_out"),
     (str(ROOT / "assets" / "farevermeter.ico"), "res/assets"),
+    # The settings panel's markup. Three files rather than one string constant
+    # in menu_host.py, which reads and inlines them into a single document at
+    # startup — so they stay editable, and there is no file:// origin to get
+    # wrong. Required, not optional: without them the panel opens blank.
+    (str(ROOT / "meter" / "web" / "menu.html"), "res/web"),
+    (str(ROOT / "meter" / "web" / "menu.css"), "res/web"),
+    (str(ROOT / "meter" / "web" / "menu.js"), "res/web"),
+]
+
+# The Help tab's articles. Globbed rather than listed, because a help topic
+# exists to be added to — a new .md file should ship by being written.
+_help = sorted((ROOT / "meter" / "web" / "help").glob("*.md"))
+if not _help:
+    raise SystemExit("[!] meter/web/help holds no articles — the Help tab "
+                     "would ship empty")
+for f in _help:
+    datas.append((str(f), "res/web/help"))
+
+# The fundraiser logo on the Help tab. Optional on purpose — the button falls
+# back to a wordmark when it is absent, so a missing image is a slightly
+# plainer button rather than a broken build.
+_logo = ROOT / "assets" / "gofundme.png"
+if _logo.is_file():
+    datas.append((str(_logo), "res/assets"))
+else:
+    print("[i] assets/gofundme.png not found — the Help tab's support button "
+          "will use its text fallback.")
+
+datas += [
     # Fixed cues, played through Windows' own MCI so they add files rather than
     # an audio dependency. Listed one by one rather than by glob, so a new cue
     # added to SOUND_FILES and forgotten here fails loudly at build review
@@ -106,11 +135,22 @@ for tool in ("build_targets.py", "emit_offsets.py", "hlbc_parser.py",
 # should never see "pip install pillow" either.
 hiddenimports = ["PIL.Image", "PIL.ImageDraw", "PIL.ImageFont",
                  # The map backdrop paints through Tk; ImageTk is its bridge.
-                 "PIL.ImageTk"]
+                 "PIL.ImageTk",
+                 # The settings panel's process. FareverMeter.exe re-enters
+                 # itself with --menu-host and imports this, so nothing in the
+                 # import graph points at it and PyInstaller cannot find it on
+                 # its own.
+                 "menu_host",
+                 # pywebview picks its backend at runtime by importing it, so
+                 # the WinForms/EdgeChromium one is invisible to the analysis
+                 # too. clr is pythonnet's entry point into .NET.
+                 "webview.platforms.winforms", "clr"]
 
 a = Analysis(
     [str(ROOT / "meter" / "farever_meter.py")],
-    pathex=[str(ROOT)],
+    # meter/ as well as the root, so the "menu_host" hidden import above
+    # resolves — it is a sibling module, not a package member.
+    pathex=[str(ROOT), str(ROOT / "meter")],
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,

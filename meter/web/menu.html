@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Farever+ Controls</title>
+<style>/*CSS*/</style>
+</head>
+<body>
+<!-- Eight invisible grips around the edge. A frameless WinForms window has no
+     resize border of its own, so these are what make the panel resizable —
+     each one hands the drag to Windows via WM_NCLBUTTONDOWN. -->
+<div class="grip n"    data-edge="top"></div>
+<div class="grip s"    data-edge="bottom"></div>
+<div class="grip w"    data-edge="left"></div>
+<div class="grip e"    data-edge="right"></div>
+<div class="grip nw"   data-edge="topleft"></div>
+<div class="grip ne"   data-edge="topright"></div>
+<div class="grip sw"   data-edge="bottomleft"></div>
+<div class="grip se"   data-edge="bottomright"></div>
+
+<div id="shell">
+  <header id="titlebar">
+    <span id="title">Farever+ Controls</span>
+    <span id="version"></span>
+    <span class="spacer"></span>
+    <button class="linkbtn" data-act="check_updates">Check updates</button>
+    <button class="linkbtn" data-act="open_repo">GitHub</button>
+  </header>
+
+  <!-- The old panel's top line: how to stop the meter, and where an update
+       notice lands when there is one. -->
+  <div id="banner"></div>
+
+  <div id="body">
+    <nav id="nav"></nav>
+    <main id="page"></main>
+  </div>
+
+  <footer id="footer">
+    <button id="quit" class="btn warn" data-act="quit"></button>
+    <span class="spacer"></span>
+    <span id="shard-cap">Shard</span>
+    <span id="shard">…</span>
+  </footer>
+</div>
+
+<script>/*JS*/</script>
+</body>
+</html>

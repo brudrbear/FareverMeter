@@ -47,6 +47,7 @@ import os
 import queue
 import random
 import re
+import subprocess
 import sys
 import tempfile
 import threading
@@ -205,6 +206,29 @@ REFRESH_MS = 250
 # often to redraw damage numbers, and far too slow to feel like a keypress.
 # ~30 fps costs two user32 calls and a queue drain per tick.
 UI_TICK_MS = 33
+# The input pump runs at ~30Hz, which is the right pace for "does the overlay
+# feel responsive" and far too fast for a settings panel. Two throttles on top
+# of it, both counted in pump ticks:
+#
+#   PANEL_PUSH_TICKS     how often the panel's state is rebuilt when nothing
+#                        has been clicked. Building it walks the roster and the
+#                        whole status list, so doing it 30 times a second to
+#                        discover nothing changed is exactly the waste the Tk
+#                        panel was retired for. A click bypasses this — see
+#                        MenuBridge.dirty.
+#   PANEL_REASSERT_TICKS how often the show is re-sent so the window keeps its
+#                        topmost standing, which it loses to anything else that
+#                        claims it.
+PANEL_PUSH_TICKS = 6            # ~5 times a second
+PANEL_REASSERT_TICKS = 30       # ~once a second
+# How long the panel's geometry has to hold still before it is written to disk.
+# A drag reports every step, and each write is a file rewrite — this turns a
+# whole gesture into one save, shortly after the user lets go.
+PANEL_GEOM_SETTLE_SECS = 0.6
+# How long to let the foreground change settle before replaying an Escape at
+# the game. Long enough that SetForegroundWindow has taken effect, short enough
+# that the key still feels like the one you pressed.
+PANEL_ESC_REPLAY_MS = 60
 MAX_PLAYER_ROWS = 8
 MAX_SKILL_ROWS = 8
 # The breakdown's summary sidebar. Seven is the most it can currently show
@@ -248,6 +272,11 @@ TOP_STRIP_RIFT = 190
 # so it gets its own line rather than a timeshare.
 TOP_STRIP_KILL = 240
 KILL_TOAST_SECS = 8.0       # how long the time stays on screen
+# The reset confirmation. Short: it answers a keypress you just made, and a
+# banner sitting over your own damage numbers stops being reassuring quickly.
+RESET_TOAST_SECS = 2.2
+RESET_TOAST_TEXT = ("Reset Successful",
+                    "Awaiting new combat data")
 # The codex toast gets its own strip below the kill time, for the same reason
 # the kill time has one: mastering a codex entry and killing a boss are the
 # same event often enough (a boss IS a codex entry, and one kill masters it)
@@ -381,6 +410,9 @@ TOGGLEABLE_ELEMENTS = (
 # corners for, and each one holds as many buffs as you like.
 BUFF_TRAY_MAX = 4
 BUFF_TRAY_KEY = "buffs"                     # the TOGGLEABLE_ELEMENTS row
+# How long "is anything in this tray up?" is reused for. Asked from the 30Hz
+# visibility pass, answered from a set the hook rewrites far more slowly.
+TRAY_LIVE_CACHE_SECS = 0.15
 
 # Icon edge in pixels, before the UI scale is applied.
 BUFF_ICON_MIN, BUFF_ICON_MAX = 20, 72
@@ -398,6 +430,26 @@ BUFF_LAYOUT_BY_LABEL = {v: k for k, v in BUFF_LAYOUT_LABEL.items()}
 # fixed size and the icons in fixed places, which is what makes it readable
 # with peripheral vision — the thing you are actually doing with a buff tray.
 # Hiding them makes a tidier overlay that reshuffles as buffs come and go.
+# Which way a tray grows as icons are added or drop off.
+#
+# The saved position stops being the window's top-left and becomes its ANCHOR:
+# the edge (or centre) that holds still while the rest moves. Without this a
+# tray always grew right/down from a fixed left edge, which is wrong for one
+# put against the right of the screen — it grew off it — and wrong for one
+# centred under the crosshair, which drifted sideways as buffs came and went.
+BUFF_ALIGNS = ("start", "center", "end")
+BUFF_ALIGN_START, BUFF_ALIGN_CENTER, BUFF_ALIGN_END = BUFF_ALIGNS
+# Labelled by what they DO, which depends on the direction the tray is laid
+# out in — "end" means leftwards across and upwards down.
+BUFF_ALIGN_LABELS = {
+    "row": {BUFF_ALIGN_START: "Grow right",
+            BUFF_ALIGN_CENTER: "Grow from centre",
+            BUFF_ALIGN_END: "Grow left"},
+    "col": {BUFF_ALIGN_START: "Grow down",
+            BUFF_ALIGN_CENTER: "Grow from centre",
+            BUFF_ALIGN_END: "Grow up"},
+}
+
 BUFF_INACTIVE_MODES = ("Dim placeholder", "Hide")
 BUFF_INACTIVE_DIM, BUFF_INACTIVE_HIDE = BUFF_INACTIVE_MODES
 
@@ -550,6 +602,8 @@ def _sanitise_trays(saved):
             t["size"] = sz
         if row.get("layout") in BUFF_LAYOUTS:
             t["layout"] = row["layout"]
+        if row.get("align") in BUFF_ALIGNS:
+            t["align"] = row["align"]
         if row.get("inactive") in BUFF_INACTIVE_MODES:
             t["inactive"] = row["inactive"]
         for which in ("stacks", "timer"):
@@ -634,6 +688,9 @@ BUFF_TRAY_DEFAULTS = {
     "lock": False,
     "size": BUFF_ICON_DEFAULT,
     "layout": "row",
+    # Grows right/down from where you put it, which is what trays did before
+    # this was a choice — so an upgrade moves nobody's tray.
+    "align": BUFF_ALIGN_START,
     "inactive": BUFF_INACTIVE_DIM,
     "stacks": True,
     "stacks_pos": "Bottom right",
@@ -1375,6 +1432,46 @@ UI_SCALE_MIN, UI_SCALE_MAX = 50, 175      # percent
 # column is uniform and every control lines up under it.
 FIELD_LABEL_CHARS = 13
 
+# The settings panel's tabs, in the order it lists them down the left. General
+# stays the landing page — it is what you open the panel for most of the time.
+# History and Social sit under it because they are the pages you open to READ
+# rather than to change something; the configuration pages follow.
+MENU_TABS = ("Help", "General", "History", "Social", "Buffs", "Actions",
+             "Windows", "Map")
+# Where EVERY launch lands. Help rather than General: the settings are
+# discoverable by reading them, and the one thing the panel cannot tell you by
+# being looked at is what any of it is for. Held in memory only — the tab
+# follows you for the session and resets when the meter next starts.
+MENU_TAB_DEFAULT = "Help"
+# The project's fundraiser, at the top of Help. Its logo is optional: drop a
+# gofundme.png beside the other assets and the button wears it, otherwise it
+# falls back to a wordmark in the brand green. That way the button works
+# whether or not the image has been added, rather than the page shipping a
+# broken picture.
+SUPPORT_URL = "https://gofund.me/6922dd070"
+SUPPORT_LOGO = ROOT / "assets" / "gofundme.png"
+SUPPORT_BLURB = (
+    "Farever+ is sticking around. After a lot of feedback and support the "
+    "project has got to the point where I want to keep it going as long as "
+    "Shiro Games allows it. I plan on bringing more features and keeping the "
+    "app updated for new versions of the game to come.\n"
+    "Eventually we should have a logging site and a place to compete with "
+    "your peers for boss killing times, with the ability to inspect gear, "
+    "talents, and more.")
+# The Help tab's articles, as markdown beside the panel's other web assets.
+# Files rather than string constants so they stay writable prose — and the
+# numeric prefix is the running order, so inserting one is a rename rather than
+# an edit to a list somewhere else.
+HELP_DIR = (ROOT / "web" / "help") if FROZEN else (
+    Path(__file__).resolve().parent / "web" / "help")
+# Which heading each article sits under on the index. Anything not named here
+# lands in the last group, so a new file appears rather than disappearing.
+HELP_GROUPS = (
+    ("Getting started", ("10-steam", "20-stopping")),
+    ("The overlay", ("30-buff-trays", "40-social", "50-map")),
+    ("Collecting", ("60-critters", "70-codex")),
+)
+
 SCALE_GROUPS = (
     ("meter", "Meter"),
     ("detail", "Breakdown"),
@@ -1663,6 +1760,9 @@ DWMWCP_ROUND = 2                   # 3 = DWMWCP_ROUNDSMALL, a tighter radius
 # no python.exe to call and sys.executable is *this* program, so the exe has to
 # be able to act as its own interpreter for the two bundled tool scripts.
 TOOL_FLAG = "--run-hltool"
+# ...and the same trick for the settings panel, which is a WebView2 window in
+# its own process. See menu_host.py for why it cannot share this one.
+MENU_FLAG = "--menu-host"
 CREATE_NO_WINDOW = 0x08000000   # ...or every regenerate flashes a console up
 
 
@@ -4175,6 +4275,84 @@ class GameUIState:
 
 
 # ---------------------------------------------------------------------------
+# Display scaling
+# ---------------------------------------------------------------------------
+# Windows scales an application that never says otherwise. This one never did:
+# there is no dpiAware entry in the shipped manifest and no awareness call
+# anywhere, so at a 300% system scale the desktop composer bitmap-stretched
+# every overlay window to three times its size and blurred it on the way. The
+# size sliders could not fight that, because the stretch happens after Tk has
+# finished drawing.
+#
+# Declaring per-monitor-v2 turns the stretching off. It also puts every
+# coordinate this process handles into one space — ours AND the game's, since
+# _window_rect_of_pid asks Windows for the game's rect and an unaware process
+# is handed a virtualised answer.
+DPI_PER_MONITOR_V2 = -4
+# The other half, and NOT optional. Every size in FONT_SPECS is in POINTS, and
+# Tk turns points into pixels using the DPI it is told the screen has. While
+# unaware it is told 96 and uses 96/72. Once aware it is told the real 288 at
+# 300%, and would re-inflate every font by exactly the factor we just removed —
+# the same bug arriving by a different route. Pinning the conversion to the
+# 96-DPI value is what makes "aware" mean "identical at 100%".
+TK_POINT_SCALE = 96 / 72
+# Windows' own reference DPI. A scale factor is whatever the monitor reports
+# divided by this.
+USER_DEFAULT_SCREEN_DPI = 96
+
+
+def declare_dpi_awareness():
+    """Opt out of Windows' bitmap stretching. Returns what was achieved.
+
+    Must run before this process owns its first window — the tray icon's, Tk's,
+    or a message box's — because awareness is latched at that moment and cannot
+    be changed afterwards. Each fallback is a older-Windows entry point for the
+    same idea, tried newest first.
+    """
+    if sys.platform != "win32":
+        return "not windows"
+    u = ctypes.windll.user32
+    try:                                  # Windows 10 1703 and later
+        u.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        u.SetProcessDpiAwarenessContext.restype = wintypes.BOOL
+        if u.SetProcessDpiAwarenessContext(
+                ctypes.c_void_p(DPI_PER_MONITOR_V2)):
+            return "per-monitor-v2"
+    except (AttributeError, OSError):
+        pass
+    try:                                  # Windows 8.1 .. 10 1607
+        if ctypes.windll.shcore.SetProcessDpiAwareness(2) == 0:
+            return "per-monitor"
+    except (AttributeError, OSError):
+        pass
+    try:                                  # Vista .. 8.0
+        return "system" if u.SetProcessDPIAware() else "unaware"
+    except (AttributeError, OSError):
+        return "unaware"
+
+
+def display_scale():
+    """The primary monitor's scale factor: 1.0 at 100%, 3.0 at 300%.
+
+    Only meaningful once awareness is declared — an unaware process is told 96
+    whatever the user chose, which is the whole point of being unaware. Used to
+    migrate window positions saved by a build that had not declared it.
+    """
+    if sys.platform != "win32":
+        return 1.0
+    try:
+        dc = ctypes.windll.user32.GetDC(0)
+        try:
+            # LOGPIXELSX = 88
+            dpi = ctypes.windll.gdi32.GetDeviceCaps(dc, 88)
+        finally:
+            ctypes.windll.user32.ReleaseDC(0, dc)
+        return (dpi / USER_DEFAULT_SCREEN_DPI) if dpi else 1.0
+    except Exception:
+        return 1.0
+
+
+# ---------------------------------------------------------------------------
 # Windows click-through + hotkeys (adapted from the original meter)
 # ---------------------------------------------------------------------------
 def _set_rounded_corners(hwnd):
@@ -5162,6 +5340,306 @@ class TrayIcon:
 
 
 # ---------------------------------------------------------------------------
+# The settings panel, at arm's length
+# ---------------------------------------------------------------------------
+class MenuBridge:
+    """The meter's half of the link to the WebView2 settings panel.
+
+    The panel runs in its own process (menu_host.py explains why) and speaks
+    line-JSON over its stdin and stdout. This class owns that process: starting
+    it, pushing state at it, translating what comes back into actions on the Tk
+    thread, and noticing when it dies.
+
+    It is deliberately forgiving. Nothing here may take the meter down: the
+    overlay, the hook and the damage numbers all work perfectly well with no
+    settings panel at all, so every failure path ends in "no panel" rather than
+    an exception reaching the refresh loop.
+    """
+
+    def __init__(self, overlay):
+        self.overlay = overlay
+        self.proc = None
+        self.ready = False
+        self.geom = {}                  # last reported x/y/w/h
+        self.geom_at = 0.0              # when it last changed; see _handle
+        self._last_push = None          # the spec we last sent, to skip repeats
+        self._lock = threading.Lock()
+        self._failed = False            # give up after one failure to start
+
+    # -- lifecycle --------------------------------------------------------
+    def start(self, geom=None):
+        """Spawn the panel, hidden. Called once, lazily — a player who never
+        opens the menu never pays for a second process or a WebView2."""
+        if self.proc is not None or self._failed:
+            return
+        self.geom = dict(geom or {})
+        cmd = ([sys.executable, MENU_FLAG, json.dumps(self.geom)] if FROZEN
+               else [sys.executable, str(Path(__file__).resolve().parent
+                                         / "menu_host.py"),
+                     json.dumps(self.geom)])
+        try:
+            self.proc = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=None,            # its log lines join ours
+                text=True, encoding="utf-8", bufsize=1,
+                creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+        except OSError as e:
+            print(f"[meter] settings panel wouldn't start: {e}",
+                  file=sys.stderr)
+            self._failed = True
+            return
+        threading.Thread(target=self._read, daemon=True).start()
+        print("[meter] settings panel started", file=sys.stderr)
+
+    def alive(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def pid(self):
+        """The panel's process id, or None. Used by the overlay's focus test —
+        the panel takes focus like any other window, and the meter has to know
+        that is still 'us'."""
+        return self.proc.pid if self.alive() else None
+
+    def stop(self):
+        if not self.alive():
+            return
+        self.send({"t": "quit"})
+        try:
+            self.proc.wait(timeout=2)
+        except Exception:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+        self.proc = None
+        self.ready = False
+
+    # -- sending ----------------------------------------------------------
+    def send(self, obj):
+        if not self.alive():
+            return
+        line = json.dumps(obj, separators=(",", ":")) + "\n"
+        with self._lock:
+            try:
+                self.proc.stdin.write(line)
+                self.proc.stdin.flush()
+            except (OSError, ValueError):
+                # The panel died. Leave the corpse for _read to notice.
+                pass
+
+    def show(self):
+        self.send({"t": "show"})
+
+    def hide(self):
+        self.send({"t": "hide"})
+
+    def push(self, spec):
+        """Send the panel its state, if it has changed.
+
+        The refresh loop calls this on every tick the panel is open, and almost
+        every tick produces exactly what the last one did — comparing here is
+        far cheaper than serialising it down a pipe and re-rendering it.
+        """
+        if not self.ready:
+            return
+        if spec == self._last_push:
+            return
+        self._last_push = spec
+        self.send({"t": "state", "d": spec})
+
+    def invalidate(self):
+        """Force the next push through even if it matches. Used when the panel
+        has just appeared and its idea of the state is nothing at all, and by
+        every action the panel triggers, so a click redraws immediately rather
+        than on the next throttled rebuild."""
+        self._last_push = None
+
+    def dirty(self):
+        """True if a push is owed. Lets the overlay skip building the spec at
+        all on the ticks in between — see PANEL_PUSH_TICKS."""
+        return self._last_push is None
+
+    # -- receiving --------------------------------------------------------
+    def _read(self):
+        """One thread, for the panel's lifetime. Everything it decides to do
+        is handed to the Tk thread through the overlay's action queue — this
+        thread must never touch a widget."""
+        proc = self.proc
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                self._handle(msg)
+        except (OSError, ValueError):
+            pass
+        # stdout closed: the panel has gone.
+        print("[meter] settings panel closed", file=sys.stderr)
+        self.ready = False
+        if self.proc is proc:
+            self.proc = None
+
+    def _handle(self, msg):
+        t = msg.get("t")
+        if t == "ready":
+            self.ready = True
+            self.invalidate()
+        elif t == "geom":
+            # Straight onto the object; the save path reads it on the Tk
+            # thread and a torn read of four ints is not a real hazard here.
+            got = {k: msg.get(k) for k in ("x", "y", "w", "h")}
+            if got != self.geom:
+                self.geom = got
+                # Stamped rather than saved here. This arrives on the reader
+                # thread, and it arrives for every step of a drag — writing the
+                # file each time would be sixty writes a second. The overlay
+                # notices the stamp and saves once the gesture has settled.
+                self.geom_at = time.monotonic()
+        elif t == "typing":
+            self.overlay._enqueue(
+                lambda on=bool(msg.get("on")): self.overlay._panel_typing(on))()
+        elif t == "call":
+            self._dispatch(msg)
+        elif t == "closed":
+            self.overlay._enqueue(self.overlay._panel_closed)()
+
+    def _dispatch(self, msg):
+        method, params = msg.get("m"), msg.get("p") or {}
+        cid = msg.get("id") or 0
+        fn = self.overlay._menu_actions().get(method)
+        if fn is None:
+            print(f"[meter] panel asked for unknown action {method!r}",
+                  file=sys.stderr)
+            if cid:
+                self.send({"t": "ret", "id": cid, "r": None})
+            return
+
+        def run():
+            result = None
+            try:
+                result = fn(params) if _wants_params(fn) else fn()
+            except Exception as e:
+                print(f"[meter] panel action {method!r} failed: {e!r}",
+                      file=sys.stderr)
+            # Anything the panel asked for may have changed what it should be
+            # showing, so the next tick rebuilds rather than waiting for the
+            # throttle. One place, so no action can forget.
+            self.invalidate()
+            if cid:
+                self.send({"t": "ret", "id": cid, "r": result})
+
+        # Onto the Tk thread, like every hotkey and every old menu button.
+        self.overlay._enqueue(run)()
+
+
+def _align_options(tray):
+    """The alignment choices, worded for the way this tray is laid out."""
+    return list(BUFF_ALIGN_LABELS[tray.get("layout", "row")].values())
+
+
+def _align_label(tray):
+    return BUFF_ALIGN_LABELS[tray.get("layout", "row")].get(
+        tray.get("align", BUFF_ALIGN_START), "Grow right")
+
+
+def _align_from_label(tray, label):
+    """...and back again. Keyed off the tray's layout, so the same label text
+    cannot mean two things."""
+    for key, text in BUFF_ALIGN_LABELS[tray.get("layout", "row")].items():
+        if text == label:
+            return key
+    return BUFF_ALIGN_START
+
+
+def _parse_help(text):
+    """Turn one help article into (title, blurb, spec blocks).
+
+    A deliberately small markdown subset — enough for the prose we actually
+    write and nothing more, because a full parser here would be a dependency
+    and a surface for the panel to render something unexpected:
+
+        # Title          the article's name (first one wins)
+        > blurb          the one-liner on the index
+        ## Heading       a section rule
+        * item           a bullet list
+        ```              a fenced code block
+        anything else    a paragraph
+
+    Inline **bold** and `code` survive as markers and are handled by the
+    renderer, which builds them as elements rather than as HTML — nothing here
+    ever becomes innerHTML.
+    """
+    title, blurb, blocks = "", "", []
+    para, bullets, code, in_code = [], [], [], False
+
+    def flush():
+        if para:
+            blocks.append({"k": "prose", "t": " ".join(para)})
+            para.clear()
+        if bullets:
+            blocks.append({"k": "bullets", "items": list(bullets)})
+            bullets.clear()
+
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if line.strip().startswith("```"):
+            if in_code:
+                blocks.append({"k": "code", "t": "\n".join(code)})
+                code.clear()
+            else:
+                flush()
+            in_code = not in_code
+            continue
+        if in_code:
+            code.append(raw)
+            continue
+        s = line.strip()
+        if not s:
+            flush()
+        elif s.startswith("# ") and not title:
+            title = s[2:].strip()
+        elif s.startswith("> ") and not blurb:
+            blurb = s[2:].strip()
+        elif s.startswith("## "):
+            flush()
+            blocks.append({"k": "section", "t": s[3:].strip()})
+        elif s.startswith("* "):
+            if para:
+                flush()
+            bullets.append(s[2:].strip())
+        elif bullets and raw.startswith("  "):
+            bullets[-1] += " " + s          # a wrapped bullet
+        else:
+            if bullets:
+                flush()
+            para.append(s)
+    if in_code and code:
+        blocks.append({"k": "code", "t": "\n".join(code)})
+    flush()
+    return title, blurb, blocks
+
+
+def _wants_params(fn):
+    """True if `fn` takes the panel's parameter dict.
+
+    The action table mixes two kinds of callable: existing meter methods that
+    already take nothing (self._toggle_sounds) and small adapters written for
+    the panel that need the value the user picked. Rather than wrap the former
+    in dozens of no-argument lambdas, ask.
+    """
+    try:
+        import inspect
+        sig = inspect.signature(fn)
+        return len(sig.parameters) >= 1
+    except (TypeError, ValueError):
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Overlay
 # ---------------------------------------------------------------------------
 class Overlay:
@@ -5196,6 +5674,10 @@ class Overlay:
         # tray index -> monotonic deadline while it is announcing itself.
         # Empty almost always; see _reveal_tray.
         self._tray_reveal = {}
+        # The live status set, reused across one visibility pass — see
+        # _tray_has_live for why it is cached rather than rebuilt per tray.
+        self._tray_live = {}
+        self._tray_live_at = 0.0
         # Which trays were revealing on the previous draw, so the draw pass can
         # spot a reveal STARTING or LAPSING and re-run the visibility rules.
         self._tray_revealed_last = set()
@@ -5216,6 +5698,36 @@ class Overlay:
         # not seeing keystrokes right now. Everything that would otherwise
         # shove focus back at the game defers to this — see _refocus_game.
         self._typing = False
+        # The settings panel, in its own process. Not started here: it is
+        # spawned the first time the game's escape menu opens, so a player who
+        # never opens it never pays for a second process or a WebView2.
+        self.menubridge = MenuBridge(self)
+        self._panel_visible = False
+        self._panel_reassert = 0
+        self._panel_errs = set()    # panel failures already reported
+        # The icon sheet is sent once per panel process, on its boot — half a
+        # megabyte has no business in a state push. Reset when a panel dies so
+        # a restarted one gets it again.
+        self._icon_sheet_sent = False
+        # Position AND size, unlike every other window here — the panel is
+        # resizable, which is the whole point of it, so remembering where it
+        # was without remembering how big it was would be half a feature.
+        # Filled in below, once the saved positions have been read.
+        self._panel_geom = {}
+        # Its search boxes. The Tk panel kept these in StringVars owned by the
+        # widgets; the web panel has no widgets on this side, so the text lives
+        # here where the spec builder can read it back.
+        self._social_query_text = ""
+        self._buff_query_text = ""
+        self._social_note_text = ""
+        self._help_open = None      # which help article is open, if any
+        # Deliberately NOT saved to disk. Every launch opens on Help, and the
+        # tab then follows you for the rest of the session — so pressing Escape
+        # again resumes where you left off, without a page you picked once
+        # weeks ago being what greets you tomorrow.
+        self._menu_tab = MENU_TAB_DEFAULT
+        self._history_query_text = ""
+        self._history_note_text = ""
         self._hide_ooc = False         # "hide out of combat" setting
         self._social_sort = "name"     # Social roster order; see SOCIAL_SORTS
         self._best_times = self._load_best_times()   # fastest boss kills, secs by kind
@@ -5369,7 +5881,15 @@ class Overlay:
         self._apply_history_setting()
 
         pos = self._load_positions()
+        # The panel is not a Tk window, so it is not in _place_windows' list —
+        # it takes its geometry with it when it is spawned instead.
+        self._panel_geom = pos.get("panel") or {}
         self.root = tk.Tk()
+        # Before the fonts below are built from it. Now that the process is DPI
+        # aware Tk knows the screen's real DPI, and every point size in
+        # FONT_SPECS would be scaled by it — see TK_POINT_SCALE for why that
+        # would undo the whole point of declaring awareness.
+        self.root.tk.call("tk", "scaling", TK_POINT_SCALE)
         self._ui_scale = 1.0
         # One font set per independently-scaled window group. Tk fonts are
         # shared objects, so resizing one would resize every widget using it —
@@ -5401,6 +5921,19 @@ class Overlay:
         self.detail.title("Farever+ Breakdown")
         self.menu = tk.Toplevel(self.root)
         self.menu.title("Farever+ Controls")
+        # Withdrawn HERE, at creation, and never mapped again — the settings
+        # panel is the WebView2 window now.
+        #
+        # The startup withdraw loop further down is not early enough on its
+        # own: _place_windows runs before it and calls update_idletasks() on
+        # this window to measure it, which is enough to realise it on screen.
+        # The symptom was the old Tk menu appearing for a moment on load.
+        #
+        # Its widgets are still built below, because ~200 places in this file
+        # still reference them and unpicking that is a separate job from
+        # replacing the window. Nothing shows them; see _refresh_visibility,
+        # which pins this window's visibility to False.
+        self.menu.withdraw()
         self.hintwin = tk.Toplevel(self.root)
         self.hintwin.title("Farever+ Hint")
         self.parsewin = tk.Toplevel(self.root)
@@ -5421,6 +5954,11 @@ class Overlay:
         # distance numbers live here, one window down. See _build_compass.
         self.badgewin = tk.Toplevel(self.root)
         self.badgewin.title("Farever+ Compass Badges")
+        # Confirmation that a manual reset happened. Its own window, managed
+        # by hand like the other toasts rather than through the fade system:
+        # it answers a keypress and has to be on screen in the same frame.
+        self.resetwin = tk.Toplevel(self.root)
+        self.resetwin.title("Farever+ Reset")
         self.killwin = tk.Toplevel(self.root)
         self.killwin.title("Farever+ Kill Time")
         self.codexwin = tk.Toplevel(self.root)
@@ -5438,7 +5976,8 @@ class Overlay:
                     self.parsewin, self.promptwin, self.reportwin,
                     self.updatewin, self.riftwin, self.mapwin,
                     self.compasswin, self.badgewin, self.killwin,
-                    self.codexwin, self.sparklywin, *self.buffwins):
+                    self.codexwin, self.sparklywin, self.resetwin,
+                    *self.buffwins):
             win.overrideredirect(True)
             win.attributes("-topmost", True)
             win.configure(bg=TRANSPARENT_KEY)
@@ -5498,6 +6037,7 @@ class Overlay:
         self._build_menu()
         self._build_hint()
         self._build_parse()
+        self._build_reset_toast()
         self._build_kill_toast()
         self._build_codex_toast()
         self._build_sparkly_tracker()
@@ -5536,6 +6076,8 @@ class Overlay:
         # you can't see is worse than useless.
         # Not a faded window — parse mode maps and unmaps it itself.
         self.parsewin.withdraw()
+        # ...nor the reset confirmation, which maps itself when you reset.
+        self.resetwin.withdraw()
         # Nor this one: the kill-time toast maps itself when a boss dies.
         self.killwin.withdraw()
         # ...nor the codex toast, which maps itself on a kill that counts.
@@ -5569,18 +6111,39 @@ class Overlay:
             d = json.loads(POSITION_CACHE.read_text())
         except Exception:
             return {}
+        # Every position written before the meter declared DPI awareness is in
+        # the VIRTUALISED space Windows hands an unaware process — the desktop
+        # divided by the scale factor. We now read and write physical pixels,
+        # so those coordinates have to be multiplied back up or a 300% user's
+        # whole layout lands in the top-left third of their screen. At 100%,
+        # which is nearly everyone, the factor is 1.0 and nothing moves.
+        scale = 1.0 if d.get("space") == "physical" else display_scale()
+
+        def at(x, y):
+            return (int(round(int(x) * scale)), int(round(int(y) * scale)))
+
         if "x" in d:
             try:
-                return {"meter": (int(d["x"]), int(d["y"]))}
+                return {"meter": at(d["x"], d["y"])}
             except Exception:
                 return {}
         out = {}
         for key in ("meter", "detail", "menu", "rift", "minimap", "compass",
                     *(f"buffs{i}" for i in range(BUFF_TRAY_MAX))):
             try:
-                out[key] = (int(d[key]["x"]), int(d[key]["y"]))
+                out[key] = at(d[key]["x"], d[key]["y"])
             except Exception:
                 pass
+        # The settings panel keeps a size as well as a position, and is not a
+        # Tk window, so it travels as a dict rather than an (x, y) pair.
+        try:
+            p = d["panel"]
+            x, y = at(p["x"], p["y"])
+            out["panel"] = {"x": x, "y": y,
+                            "w": int(round(int(p["w"]) * scale)),
+                            "h": int(round(int(p["h"]) * scale))}
+        except Exception:
+            pass
         return out
 
     def _pos_visible(self, x, y):
@@ -5917,6 +6480,9 @@ class Overlay:
         self._save_settings()
         try:
             POSITION_CACHE.write_text(json.dumps({
+                # Stamps which coordinate space these are in, so the next load
+                # knows whether they need migrating — see _load_positions.
+                "space": "physical",
                 "meter": {"x": self.root.winfo_x(), "y": self.root.winfo_y()},
                 "detail": {"x": self.detail.winfo_x(),
                            "y": self.detail.winfo_y()},
@@ -5927,6 +6493,10 @@ class Overlay:
                             "y": self.mapwin.winfo_y()},
                 "compass": {"x": self.compasswin.winfo_x(),
                             "y": self.compasswin.winfo_y()},
+                # Whatever the panel last told us it was — see MenuBridge.geom.
+                # Falls back to the geometry we started it with, so closing the
+                # meter without ever having moved the panel doesn't wipe it.
+                "panel": (self.menubridge.geom or self._panel_geom or {}),
             }))
         except OSError:
             pass
@@ -6113,6 +6683,1040 @@ class Overlay:
         if not pairs:
             self.side_idle.pack(fill="x")
 
+    # ---- the settings panel, as data -----------------------------------
+    # The panel is a WebView2 window in another process (MenuBridge, and
+    # menu_host.py) and it is a renderer, not a designer: everything below
+    # decides what it draws. Keeping the layout here rather than in the HTML is
+    # what keeps adding a setting a one-file change, exactly as it was when the
+    # panel was Tk widgets — and it means the labels and the state that feeds
+    # them cannot drift apart, because they are computed together.
+
+    @staticmethod
+    def _tick(on, label):
+        """The panel's checkbox convention, unchanged from the Tk menu: a
+        standing setting reads as its STATE, not as the action that would
+        change it."""
+        return ("☑  " if on else "☐  ") + label
+
+    def _menu_spec(self):
+        """Everything the panel needs to draw itself, right now.
+
+        Rebuilt whole on each refresh tick and compared against the last one by
+        MenuBridge.push, so an unchanged panel costs one dict comparison rather
+        than a pipe write and a re-render.
+        """
+        return {
+            "version": VERSION,
+            "zoom": int(round(self._scales.get("menu", 1.0) * 100)),
+            "shard": self.ui_state.server() or "",
+            # Two clicks to stop: a misclick that ends the meter mid-fight
+            # takes the encounter with it, which is worth one extra click to
+            # rule out. The arming is state on this side and disarms itself
+            # after four seconds — see _quit_clicked.
+            "quit": ("Click again to stop" if self._quit_armed
+                     else QUIT_LABEL),
+            "quitArmed": bool(self._quit_armed),
+            "banner": self._menu_banner(),
+            "tab": self._menu_tab,
+            "tabs": list(MENU_TABS),
+            "page": self._menu_page(self._menu_tab),
+        }
+
+    def _menu_banner(self):
+        """The panel's top line: how to stop the meter, or — once a newer build
+        is known about — the notice for it. Same swap the Tk panel's warn_lbl
+        did, as data."""
+        if UPDATE.get("latest"):
+            tail = ("Click here to update now." if self._can_self_update()
+                    else "Click here to download it.")
+            return {"t": f"Farever+ {UPDATE['latest']} is available — you're "
+                         f"running {VERSION}.  {tail}", "update": True}
+        return {"t": SHUTDOWN_HINT, "update": False}
+
+    # -- Help -------------------------------------------------------------
+    @staticmethod
+    def _help_articles():
+        """Every article on disk, parsed once and cached.
+
+        Cached on the function rather than the instance because the files are
+        read-only assets — re-reading them on every refresh tick would be four
+        file opens a second for prose that cannot change while the meter runs.
+        """
+        cached = getattr(Overlay._help_articles, "_cache", None)
+        if cached is not None:
+            return cached
+        out = []
+        try:
+            files = sorted(HELP_DIR.glob("*.md"))
+        except OSError:
+            files = []
+        for f in files:
+            try:
+                text = f.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            title, blurb, blocks = _parse_help(text)
+            out.append({"id": f.stem, "title": title or f.stem,
+                        "blurb": blurb, "blocks": blocks})
+        Overlay._help_articles._cache = out
+        return out
+
+    @staticmethod
+    def _support_logo_uri():
+        """The fundraiser logo as a data URI, or None if it was never added.
+
+        Cached on the function: it is read on every Help index build, and the
+        file cannot change while the meter runs.
+        """
+        cached = getattr(Overlay._support_logo_uri, "_cache", "unset")
+        if cached != "unset":
+            return cached
+        uri = None
+        try:
+            if SUPPORT_LOGO.is_file():
+                import base64
+                uri = ("data:image/png;base64,"
+                       + base64.b64encode(
+                           SUPPORT_LOGO.read_bytes()).decode("ascii"))
+        except OSError as e:
+            print(f"[meter] couldn't read the fundraiser logo: {e}",
+                  file=sys.stderr)
+        Overlay._support_logo_uri._cache = uri
+        return uri
+
+    def _support_block(self):
+        """The fundraiser, at the top of the Help index.
+
+        Top of Help rather than tucked into Actions: it is the one thing on the
+        panel that is asking rather than telling, and burying an ask reads as
+        more of an ask than putting it where it can be seen and scrolled past.
+        """
+        # One node rather than a logo plus two paragraphs, so the whole thing
+        # is a single card the renderer can centre and tint as a unit — three
+        # loose nodes could only ever be styled one at a time.
+        return [
+            {"k": "support", "id": "open_support", "t": "gofundme",
+             "img": self._support_logo_uri(), "url": SUPPORT_URL,
+             # Opening a link changes nothing on the panel, and the browser
+             # does not come forward when one is already running — so without
+             # this the click reads as having done nothing at all.
+             "toast": "Opened in your browser",
+             "paras": SUPPORT_BLURB.split("\n")},
+            {"k": "gap"},
+        ]
+
+    def _page_help(self):
+        arts = self._help_articles()
+        if not arts:
+            return [{"k": "section", "t": "Help"},
+                    {"k": "note", "warn": True,
+                     "t": "The help articles are missing from this build."}]
+        # One article open: its text, and the way back.
+        if self._help_open:
+            art = next((a for a in arts if a["id"] == self._help_open), None)
+            if art:
+                return ([{"k": "button", "id": "help_close",
+                          "t": "‹  All help topics"},
+                         {"k": "section", "t": art["title"]}]
+                        + art["blocks"]
+                        + [{"k": "gap"},
+                           {"k": "note", "t": "The full README on GitHub goes "
+                                              "further than these do."},
+                           {"k": "button", "id": "open_repo",
+                            "t": "Farever+ on GitHub"}])
+        # ...or the index, which opens with the fundraiser.
+        seen, out = set(), self._support_block()
+        for heading, ids in HELP_GROUPS:
+            rows = [a for a in arts if a["id"] in ids]
+            if not rows:
+                continue
+            seen.update(a["id"] for a in rows)
+            out.append({"k": "section", "t": heading})
+            out.append({"k": "list", "id": f"help:{heading}", "rows": [
+                {"t": a["title"], "meta": a["blurb"],
+                 "btns": [{"id": "help_open", "t": "Read",
+                           "p": {"id": a["id"]}}]}
+                for a in rows]})
+        rest = [a for a in arts if a["id"] not in seen]
+        if rest:
+            out.append({"k": "section", "t": "More"})
+            out.append({"k": "list", "id": "help:more", "rows": [
+                {"t": a["title"], "meta": a["blurb"],
+                 "btns": [{"id": "help_open", "t": "Read",
+                           "p": {"id": a["id"]}}]}
+                for a in rest]})
+        return out
+
+    def _menu_page(self, tab):
+        """One tab's controls. A builder that raises costs its own page, not
+        the panel and not the overlay — see _sync_panel for what a page builder
+        raising used to take down with it."""
+        try:
+            return self._menu_page_inner(tab)
+        except Exception as e:
+            print(f"[meter] the {tab} page failed to build: {e!r}",
+                  file=sys.stderr)
+            return [{"k": "section", "t": tab},
+                    {"k": "note", "warn": True,
+                     "t": f"This page couldn't be built: {e}. The rest of the "
+                          f"panel still works, and the details are in the log."}]
+
+    def _menu_page_inner(self, tab):
+        builder = {
+            "General": self._page_general,
+            "Windows": self._page_windows,
+            "Map": self._page_map,
+            "Actions": self._page_actions,
+            "History": self._page_history,
+            "Social": self._page_social,
+            "Buffs": self._page_buffs,
+            "Help": self._page_help,
+        }.get(tab)
+        return builder() if builder else []
+
+    # -- General ----------------------------------------------------------
+    def _page_general(self):
+        all_players = self.mode == "all"
+        parsing = self._parse_state is not None
+        return [
+            {"k": "section", "t": "Meter"},
+            {"k": "button", "id": "toggle_mode", "on": all_players,
+             "t": ("Show party only" if all_players else "Show all players")
+                  + "   (resets data)"},
+            {"k": "button", "id": "toggle_rift_auto_view",
+             "t": self._tick(self._rift_auto_view,
+                             "Auto 'View All Players' in rifts")},
+            {"k": "note", "t": "Presses the button above for you at both rift "
+                               "boundaries — all-players going in, party-only "
+                               "coming out — instead of asking. Each switch "
+                               "resets the encounter, as it does above."},
+            {"k": "button", "id": "toggle_auto_reset",
+             "t": self._tick(self._auto_reset_boss, "Auto reset on boss pull")},
+            {"k": "button", "id": "toggle_codex_alerts",
+             "t": self._tick(self._codex_alerts, "Codex alerts")},
+            {"k": "button", "id": "toggle_sparkly",
+             "t": self._tick(self._sparkly_on, "Sparkly Tracker")},
+            {"k": "note", "t": "Codex alerts: the running count on each kill "
+                               "and the fanfare when an entry fills — the "
+                               "map's 'only missing from codex' filter is "
+                               "separate and keeps working either way. Sparkly "
+                               "tracker: a pointer to the nearest sparkling "
+                               "critter, as far out as the game will tell us "
+                               "about it."},
+            {"k": "field", "t": "Reset data",
+             "c": {"k": "label", "t": ("press a key…" if self._binding_now
+                                       else bind_label())}},
+            {"k": "button", "id": "begin_bind", "t": "Change that key"},
+
+            {"k": "section", "t": "Sound"},
+            {"k": "button", "id": "toggle_sounds",
+             "t": self._tick(self._sounds_on, "Enable sounds")},
+            # Live, unlike the rest: this one costs a single MCI call and
+            # hearing the level while you drag is the entire point of it.
+            {"k": "field", "t": "Volume",
+             "c": {"k": "slider", "id": "set_volume", "v": self._sound_volume,
+                   "min": 0, "max": SOUND_VOLUME_MAX, "step": 5,
+                   "live": True, "unit": "%"}},
+
+            {"k": "section", "t": "Look"},
+            {"k": "field", "t": "Theme",
+             "c": {"k": "select", "id": "set_theme", "v": self._theme_mode,
+                   "o": list(THEME_MODES)}},
+            {"k": "field", "t": "Transparency",
+             "c": {"k": "slider", "id": "set_transparency",
+                   "v": self._transparency, "min": 0, "max": TRANSPARENCY_MAX,
+                   "step": 5, "unit": "%"}},
+            {"k": "field", "t": "Panel size",
+             "c": {"k": "slider", "id": "set_menu_zoom",
+                   "v": int(round(self._scales.get("menu", 1.0) * 100)),
+                   "min": 50, "max": 200, "step": 5, "unit": "%"}},
+            {"k": "note", "t": "This panel only, and independent of Windows' "
+                               "own display scaling — which the meter now "
+                               "ignores, so a 300% desktop no longer makes "
+                               "the overlay three times the size."},
+            {"k": "gap"},
+            {"k": "button", "id": "toggle_parse", "on": parsing,
+             "t": (f"Stop {PARSE_LENGTH_SECS}s Parse" if parsing
+                   else f"{PARSE_LENGTH_SECS}s Parse Mode")},
+        ]
+
+    # -- Windows ----------------------------------------------------------
+    def _page_windows(self):
+        """One row per window: what shows it, and how big it is. A window is
+        one thing, so it gets one row — the pre-tabs menu listed the same five
+        windows twice, a screen apart, under SCALING and SHOW / HIDE."""
+        out = [{"k": "section", "t": "Each window: visibility · size"}]
+        scale_of = dict(SCALE_GROUPS)
+        for key, label in TOGGLEABLE_ELEMENTS:
+            out.append({"k": "field", "t": label,
+                        "c": {"k": "select", "id": f"show:{key}",
+                              "v": self._show.get(key, ELEMENT_SHOW),
+                              "o": list(ELEMENT_MODES)}})
+        for group, label in SCALE_GROUPS:
+            if group == "menu":
+                continue        # it has its own slider on General
+            lo, hi = ((MINIMAP_SCALE_MIN, MINIMAP_SCALE_MAX)
+                      if group == "minimap" else (UI_SCALE_MIN, UI_SCALE_MAX))
+            out.append({"k": "field", "t": f"{label} size",
+                        "c": {"k": "slider", "id": f"scale:{group}",
+                              "v": int(round(self._scales[group] * 100)),
+                              "min": lo, "max": hi, "step": 5, "unit": "%"}})
+        out += [
+            {"k": "note", "t": "The rift timer wears the meter's fonts, so it "
+                               "sizes with the meter."},
+            {"k": "section", "t": "Content"},
+            {"k": "button", "id": "toggle_heal",
+             "t": self._tick(self._show_heal, "Healing columns")},
+            {"k": "button", "id": "toggle_hide_ooc",
+             "t": self._tick(self._hide_ooc, "Hide out of combat")},
+        ]
+        return out
+
+    # -- Map --------------------------------------------------------------
+    def _page_map(self):
+        # Three states rather than a tick, so the marker says which one it is;
+        # a hollow circle for "hidden" keeps the row reading as a filter.
+        foe = {"all": "☑", "codex": "◪",
+               "off": "☐"}.get(self._foe_mode, "☑")
+        crit = {"all": "☑", "uncollected": "◪",
+                "off": "☐"}.get(self._critter_mode, "☑")
+        out = [
+            {"k": "section", "t": "Minimap"},
+            {"k": "field", "t": "Style",
+             "c": {"k": "select", "id": "set_map_mode", "v": self._map_mode,
+                   "o": list(MINIMAP_MODES)}},
+            {"k": "field", "t": "Refresh",
+             "c": {"k": "select", "id": "set_map_rate", "v": self._map_rate,
+                   "o": list(MINIMAP_RATE_NAMES)}},
+            {"k": "field", "t": "Zoom",
+             "c": {"k": "slider", "id": "set_map_zoom", "v": self._map_zoom,
+                   "min": MINIMAP_ZOOM_MIN, "max": MINIMAP_ZOOM_MAX,
+                   "step": 5, "unit": "%"}},
+            {"k": "field", "t": "Icon scale",
+             "c": {"k": "slider", "id": "set_map_icons", "v": self._map_icons,
+                   "min": MINIMAP_ICONS_MIN, "max": MINIMAP_ICONS_MAX,
+                   "step": 5, "unit": "%"}},
+            {"k": "button", "id": "toggle_map_bg",
+             "t": self._tick(self._map_bg_on, "World map background")},
+        ]
+        for key, label, _cats in MINIMAP_FILTERS:
+            out.append({"k": "button", "id": f"mapfilter:{key}",
+                        "t": self._tick(self._map_filters.get(key, True),
+                                        label)})
+        out += [
+            {"k": "button", "id": "cycle_foe_mode",
+             "t": f"{foe}  " + MINIMAP_FOE_LABEL.get(self._foe_mode,
+                                                     "Enemies: all")},
+            {"k": "button", "id": "cycle_critter_mode",
+             "t": f"{crit}  " + MINIMAP_CRITTER_LABEL.get(self._critter_mode,
+                                                          "Critters: all")},
+            {"k": "section", "t": "Compass"},
+        ]
+        for key, label, _cats in COMPASS_FILTERS:
+            out.append({"k": "button", "id": f"compassfilter:{key}",
+                        "t": self._tick(
+                            self._compass_filters.get(key, True), label)})
+        return out
+
+    # -- Actions ----------------------------------------------------------
+    def _page_actions(self):
+        have_report = self._report_data is not None
+        return [
+            {"k": "section", "t": "Parse"},
+            # Greyed rather than hidden before the first rift: a button that
+            # appears out of nowhere mid-session is one nobody knew to look for.
+            {"k": "button", "id": "reopen_report",
+             "tone": None if have_report else "disabled",
+             "t": ("Last Rift Report" if have_report
+                   else "Last Rift Report   (no rift yet)")},
+            {"k": "button", "id": "open_parses", "t": "Parses & Rift Reports"},
+            {"k": "section", "t": "Reset"},
+            # Exactly what the hotkey fires, labelled with the keybind — the
+            # hotkey is the one that is useful mid-fight, when this panel is
+            # not an option.
+            {"k": "button", "id": "reset_data",
+             "t": f"Reset encounter data   ({bind_label()})"},
+            {"k": "button", "id": "reset_pos", "t": "Reset window positions"},
+            {"k": "section", "t": "Project"},
+            {"k": "button", "id": "open_repo", "t": "Farever+ on GitHub"},
+        ]
+
+    # -- the three list-backed tabs ---------------------------------------
+    def _page_history(self):
+        """The whole tab is one opt-in and what it unlocks. Off, the page is
+        the switch and the paragraph explaining it — a folder path and an empty
+        browser for a feature that is not recording anything reads as broken
+        rather than unused."""
+        out = [
+            {"k": "section", "t": "Combat history"},
+            {"k": "button", "id": "toggle_history",
+             "t": self._tick(self._history_on,
+                             "Keep a history of finished encounters")},
+            {"k": "note", "t": "The meter keeps one encounter at a time — a "
+                               "reset, a zone change or a boss pull throws it "
+                               "away. With this on, each finished encounter is "
+                               "saved to disk first, named for whatever took "
+                               "the most damage and where."},
+        ]
+        if not self._history_on:
+            return out
+        # One dataset opened: its breakdown as text, and the way back. Text
+        # rather than a rebuilt table — the point of the page is the per-skill
+        # detail the card has no room for, and it is the same text the Copy
+        # button puts on the clipboard, so the two cannot disagree.
+        if self._history_detail is not None:
+            entry = self._history_detail
+            body = ""
+            try:
+                body = self._history_text(entry)
+            except Exception as e:
+                body = f"That dataset couldn't be read: {e!r}"
+            return [
+                {"k": "button", "id": "close_dataset",
+                 "t": "‹  Back to datasets"},
+                {"k": "section", "t": entry.get("name") or "Encounter"},
+                {"k": "button", "id": "copy_history", "t": "Copy to clipboard"},
+                {"k": "code", "t": body},
+                {"k": "note", "t": self._history_note_text or ""},
+            ]
+        rows = []
+        for e in (self._history_entries or [])[:200]:
+            # Summaries are plain dicts off HistoryStore.entries().
+            name = e.get("name") or "Encounter"
+            # A summary's `zone` is a plain label string; the LOADED entry's is
+            # a dict with a "label" in it (which is what _history_text reads).
+            # Accepting both, because assuming the dict shape here is what took
+            # the History tab — and with it the refresh loop — down.
+            z = e.get("zone")
+            where = (z.get("label") if isinstance(z, dict) else z) or ""
+            when = time.strftime("%d %b %H:%M",
+                                 time.localtime(e.get("at") or 0))
+            q = (self._history_query_text or "").strip().lower()
+            if q and q not in f"{name} {where}".lower():
+                continue
+            btns = [{"id": "open_dataset", "t": "Open",
+                     "p": {"path": e.get("path", "")}}]
+            # Only rifts have a report to re-open.
+            if e.get("kind") == "rift":
+                btns.insert(0, {"id": "open_report", "t": "Report",
+                                "p": {"path": e.get("path", "")}})
+            rows.append({"t": name,
+                         "meta": " · ".join(x for x in (where, when) if x),
+                         "btns": btns})
+        out += [
+            {"k": "section", "t": "Where it is saved"},
+            {"k": "button", "id": "open_history_folder",
+             "t": str(self._history.dir)},
+            {"k": "note", "t": "Nothing in the meter ever deletes from this "
+                               "folder. Tidy it up yourself when you want the "
+                               "space back."},
+            {"k": "section", "t": "Datasets"},
+            {"k": "search", "id": "history_query",
+             "v": (self._history_query_text or ""),
+             "count": f"{len(rows)} shown"},
+            {"k": "button", "id": "reload_history", "t": "Refresh"},
+            {"k": "list", "id": "history", "h": 300, "rows": rows,
+             "empty": "No finished encounters saved yet."},
+            {"k": "note", "t": self._history_note_text or ""},
+        ]
+        return out
+
+    def _page_social(self):
+        """Two views of the same people. 'Current shard' is live state and can
+        show class and level; 'This session' is an accumulated log and
+        deliberately cannot — those two facts are only true while a player is
+        on your layer, and a level from twenty minutes ago is worse than none.
+        """
+        page = self._social_page
+        rows = []
+        for p in (self._social_rows_data() or []):
+            rows.append({
+                "name": p.get("name", ""),
+                "cls": p.get("cls", "") if page == "shard" else "",
+                "meta": p.get("meta", ""),
+                # Copy first so it sits left of Profile, as the Tk rows had it.
+                # Both are dropped entirely when the uid has not arrived yet —
+                # a button that cannot do anything is worse than no button.
+                "btns": ([{"id": "copy_steam", "t": "Copy ID",
+                           "p": {"uid": p.get("uid", ""),
+                                 "name": p.get("name", "")}},
+                          {"id": "open_profile", "t": "Profile",
+                           "p": {"uid": p.get("uid", "")}}]
+                         if p.get("uid") else []),
+            })
+        # Labelled with the order it IS in, not the one it would switch to —
+        # the same convention every other standing setting here uses. The two
+        # pages sort by different things: the session log has no level to rank
+        # by, so it offers last-seen instead.
+        sort = (SOCIAL_SORT_LABEL[self._social_sort] if page == "shard"
+                else SESSION_SORT_LABEL[self._session_sort])
+        return [
+            {"k": "chips", "id": "set_social_page", "v": page,
+             "o": [{"v": k, "t": label} for k, label in SOCIAL_PAGES],
+             "extra": [{"id": "toggle_social_sort", "t": sort},
+                       {"id": "reload_social", "t": "Refresh"}]},
+            {"k": "search", "id": "social_query",
+             "v": (self._social_query_text or ""),
+             "count": f"{len(rows)} shown"},
+            # Fills whatever height the panel has rather than stopping at a
+            # fixed box — a roster is the one page where more room is always
+            # worth more rows.
+            {"k": "list", "id": "social", "grow": True, "rows": rows,
+             "empty": ("Nobody on this shard yet." if page == "shard"
+                       else "Nobody logged this session yet.")},
+            # A transient confirmation ("Copied ...") wins while it lasts;
+            # otherwise the note is re-derived every push rather than left at
+            # whatever an earlier event set it to. It used to be the latter,
+            # which is how "Waiting for the roster" stayed on screen under
+            # thirty-one listed players.
+            {"k": "note", "t": (self._social_note_text
+                                if self._social_note_transient
+                                else self._social_idle_note())},
+        ]
+
+    def _page_buffs(self):
+        cur = self._tray(self._tray_edit)
+        others = len([n for n in self._trays_by_char if n != self._tray_char])
+        clash = (cur.get("timer") and cur.get("stacks")
+                 and cur.get("timer_pos") == cur.get("stacks_pos"))
+        out = [
+            {"k": "section", "t": "Tray"},
+            # Whose trays these are. Without it, editing an alt's set looks
+            # exactly like editing your main's — and the moment they differ,
+            # that is a setting you will change on the wrong character.
+            {"k": "note", "t": (
+                f"Trays for {self._tray_char}."
+                + (f" {others} other character{'' if others == 1 else 's'} "
+                   f"saved." if others else "")
+                if self._tray_char else
+                "Waiting for the game to say which character you are — these "
+                "are the trays this install last used.")},
+            {"k": "chips", "id": "pick_tray", "v": self._tray_edit,
+             "o": [{"v": i,
+                    "t": f"{i + 1}" + (
+                        f" ({len(self._tray(i).get('keys') or ())})"
+                        if self._tray(i).get("keys") else "")}
+                   for i in range(BUFF_TRAY_MAX)],
+             "extra": [
+                 {"id": "toggle_tray_on", "on": bool(cur.get("on")),
+                  "t": "☑  Tray on" if cur.get("on")
+                       else "☐  Tray off"},
+                 {"id": "toggle_tray_lock",
+                  "t": "\U0001F512  Locked" if cur.get("lock")
+                       else "\U0001F513  Unlocked"},
+             ]},
+        ]
+        # A tray that is switched off draws nothing, so every control below is
+        # configuring something invisible. The page stops here rather than
+        # offering a screen of settings whose effect cannot be seen — the
+        # switch above is the only one that does anything until it is on.
+        # What it watches is kept: turning a tray off is not the same as
+        # emptying it, and the count on the selector says so.
+        if not cur.get("on"):
+            n_keys = len(cur.get("keys") or ())
+            out.append(
+                {"k": "note",
+                 "t": (f"This tray is off. It still remembers "
+                       f"{n_keys} buff{'' if n_keys == 1 else 's'} — turn it "
+                       f"back on to see them and change how it looks."
+                       if n_keys else
+                       "This tray is off. Turn it on to choose what it "
+                       "watches and how it looks.")})
+            return out
+        out += [
+            {"k": "section", "t": "Look"},
+            {"k": "field", "t": "Icon size",
+             "c": {"k": "slider", "id": "set_tray_size",
+                   "v": int(cur.get("size") or BUFF_ICON_DEFAULT),
+                   "min": BUFF_ICON_MIN, "max": BUFF_ICON_MAX, "step": 2}},
+            {"k": "field", "t": "Direction",
+             "c": {"k": "select", "id": "set_tray_layout",
+                   "v": BUFF_LAYOUT_LABEL.get(cur.get("layout", "row"), "Row"),
+                   "o": [BUFF_LAYOUT_LABEL[k] for k in BUFF_LAYOUTS]}},
+            # Which way it grows. The options are named for the direction the
+            # tray is actually laid out in, so "end" reads as Grow left across
+            # and Grow up down.
+            {"k": "field", "t": "Alignment",
+             "c": {"k": "select", "id": "set_tray_align",
+                   "v": _align_label(cur), "o": _align_options(cur)}},
+            {"k": "note", "t": "Where you place a tray is the edge that holds "
+                               "still — so one against the right of the screen "
+                               "can grow left instead of off it."},
+            {"k": "field", "t": "When not up",
+             "c": {"k": "select", "id": "set_tray_inactive",
+                   "v": cur.get("inactive", BUFF_INACTIVE_DIM),
+                   "o": list(BUFF_INACTIVE_MODES)}},
+        ]
+        for flag, label in BUFF_TRAY_FLAGS:
+            out.append({"k": "button", "id": f"trayflag:{flag}",
+                        "t": self._tick(cur.get(flag), label)})
+        out.append({"k": "section", "t": "Numbers on the icon"})
+        for which, label in (("timer", "Time left"), ("stacks", "Stacks")):
+            out += [
+                {"k": "field", "t": label,
+                 "c": {"k": "select", "id": f"traypos:{which}",
+                       "v": cur.get(f"{which}_pos",
+                                    BUFF_TRAY_DEFAULTS[f"{which}_pos"]),
+                       "o": list(BUFF_TEXT_POS_NAMES)}},
+                {"k": "field", "t": f"{label} size",
+                 "c": {"k": "slider", "id": f"traytext:{which}",
+                       "v": int(cur.get(f"{which}_size") or 100),
+                       "min": BUFF_TEXT_SCALE_MIN, "max": BUFF_TEXT_SCALE_MAX,
+                       "step": 10, "unit": "%"}},
+            ]
+        if clash:
+            # Allowed and occasionally deliberate (one of them switched off),
+            # so this warns rather than forbids.
+            out.append({"k": "note", "warn": True, "t":
+                        "Time left and Stacks are both in the "
+                        f"{str(cur.get('timer_pos', '')).lower()} corner — "
+                        "they will draw on top of each other."})
+        tracked = list(cur.get("keys") or ())
+        out += [
+            {"k": "section", "t": "Tracking"},
+            {"k": "list", "id": "tracked", "h": 180,
+             "empty": "This tray is watching nothing yet.",
+             # _buff_label, not status_name: an item status carries its item in
+             # the key ("item:Cook_11") and status_name cannot resolve that, so
+             # the list was showing raw keys where the tray itself shows names.
+             # This is the same call the tray's placeholders use.
+             "rows": [{"t": self._buff_label(k),
+                       "icon": _status_icon_index().get(k),
+                       "btns": [{"id": "untrack_buff", "t": "Remove",
+                                 "p": {"key": k}}]}
+                      for k in tracked]},
+            {"k": "section", "t": "Add a buff"},
+            {"k": "search", "id": "buff_query",
+             "v": (self._buff_query_text or ""),
+             "count": ""},
+            {"k": "list", "id": "buffpick", "h": 220,
+             "empty": "Nothing matches that.",
+             "rows": self._buff_pick_spec_rows(tracked)},
+        ]
+        return out
+
+    def _buff_pick_spec_rows(self, tracked):
+        """The picker's rows, filtered by its search box. Every status the game
+        defines, not merely the ones you have proc'd — the list comes out of
+        data.cdb, so a buff can be set up before you have ever had it."""
+        # Rows are {key, name, desc, seen} — already sorted with the statuses
+        # you have actually had this session first. The icon is a CELL NUMBER
+        # in the shipped sheet; the panel already has the sheet itself (see
+        # _send_icon_sheet) and works the position out from this.
+        icons = _status_icon_index()
+        q = (self._buff_query_text or "").strip().lower()
+        out = []
+        for row in (self._buff_pick_rows() or []):
+            key, name = row.get("key"), row.get("name") or ""
+            if key in tracked:
+                continue
+            if q and q not in name.lower():
+                continue
+            # The mark that answers "I just had that, what was it" — the whole
+            # reason the seen ones sort to the top.
+            desc = row.get("desc") or ""
+            out.append({"t": ("● " if row.get("seen") else "") + name,
+                        "icon": icons.get(key),
+                        "meta": desc[:90] + ("…" if len(desc) > 90 else ""),
+                        "btns": [{"id": "track_buff", "t": "Add",
+                                  "p": {"key": key}}]})
+            if len(out) >= 120:     # the panel scrolls; the pipe needn't carry
+                break               # a thousand rows nobody will scroll to
+        return out
+
+    # ---- what the panel is allowed to ask for --------------------------
+    def _menu_actions(self):
+        """id -> callable, for everything the panel can press.
+
+        Built fresh rather than cached: several entries close over the tray
+        currently being edited, and a table built once at start-up would keep
+        pointing at tray 0 forever.
+
+        Callables taking one argument receive the panel's parameter dict; the
+        rest are existing meter methods that already take none. MenuBridge
+        works out which by inspection rather than making every entry a lambda.
+        """
+        acts = {
+            # -- General
+            "toggle_mode": self._toggle_mode,
+            "toggle_rift_auto_view": self._toggle_rift_auto_view,
+            "toggle_auto_reset": self._toggle_auto_reset_boss,
+            "toggle_codex_alerts": self._toggle_codex_alerts,
+            "toggle_sparkly": self._toggle_sparkly,
+            "begin_bind": self._begin_bind_capture,
+            "toggle_sounds": self._toggle_sounds,
+            "set_volume": lambda p: self._set_volume(p.get("value", 0)),
+            "set_theme": lambda p: self._set_theme_mode(p.get("value")),
+            "set_transparency":
+                lambda p: self._set_transparency(p.get("value", 0)),
+            "set_menu_zoom":
+                lambda p: self._set_menu_zoom(p.get("value", 100)),
+            "toggle_parse": self._toggle_parse,
+            # -- Windows
+            "toggle_heal": self._toggle_heal,
+            "toggle_hide_ooc": self._toggle_hide_ooc,
+            # -- Map
+            "set_map_mode": lambda p: self._set_map_mode(p.get("value")),
+            "set_map_rate": lambda p: self._set_map_rate(p.get("value")),
+            "set_map_zoom": lambda p: self._set_map_zoom(p.get("value", 100)),
+            "set_map_icons": lambda p: self._set_map_icons(p.get("value", 100)),
+            "toggle_map_bg": self._toggle_map_bg,
+            "cycle_foe_mode": self._cycle_foe_mode,
+            "cycle_critter_mode": self._cycle_critter_mode,
+            # -- Actions
+            "reopen_report": self._reopen_report,
+            "open_parses": self._open_parses,
+            "reset_data": self._manual_reset,
+            "reset_pos": self._reset_pos,
+            "open_repo": self._open_repo,
+            "quit": self._quit_clicked,
+            # -- History
+            "toggle_history": self._toggle_history,
+            "open_history_folder": self._open_history_folder,
+            "reload_history": self._reload_history,
+            "open_dataset": lambda p: self._open_history_entry(
+                {"path": p.get("path", "")}),
+            "open_report": lambda p: self._open_history_report(
+                {"path": p.get("path", "")}),
+            "close_dataset": lambda: setattr(self, "_history_detail", None),
+            "copy_history": self._copy_history,
+            "history_query": lambda p: self._set_panel_query(
+                "_history_query_text", p.get("value", "")),
+            # -- Social
+            "set_social_page": lambda p: self._set_social_page(p.get("value")),
+            "reload_social": self._refresh_social_clicked,
+            # One button, two settings — which one it means depends on the page
+            # you are looking at, exactly as the two Tk buttons did.
+            "toggle_social_sort": (
+                self._toggle_social_sort if self._social_page == "shard"
+                else self._toggle_session_sort),
+            "copy_steam": lambda p: self._copy_steamid(
+                p.get("name", ""), steam64_from_uid(p.get("uid") or None)),
+            "open_profile": lambda p: self._open_profile(p.get("uid") or None),
+            "social_query": lambda p: self._set_panel_query(
+                "_social_query_text", p.get("value", "")),
+            # -- Buffs
+            "pick_tray": lambda p: self._pick_tray(int(p.get("value", 0))),
+            "toggle_tray_on": self._toggle_tray_on,
+            "toggle_tray_lock": self._toggle_tray_lock,
+            "set_tray_size": lambda p: self._set_tray_field(
+                "size", int(p.get("value", BUFF_ICON_DEFAULT))),
+            "set_tray_layout": lambda p: self._set_tray_field(
+                "layout", BUFF_LAYOUT_BY_LABEL.get(p.get("value"), "row")),
+            "set_tray_inactive": lambda p: self._set_tray_field(
+                "inactive", p.get("value")),
+            "set_tray_align": lambda p: self._set_tray_align(p.get("value")),
+            "track_buff": lambda p: self._track_buff(p.get("key")),
+            "untrack_buff": lambda p: self._untrack_buff(p.get("key")),
+            "buff_query": lambda p: self._set_panel_query(
+                "_buff_query_text", p.get("value", "")),
+            # -- the panel's own chrome
+            "set_tab": lambda p: self._set_menu_tab(p.get("value")),
+            "help_open": lambda p: setattr(self, "_help_open", p.get("id")),
+            "help_close": lambda: setattr(self, "_help_open", None),
+            "open_support": lambda: self._open_url(SUPPORT_URL),
+            "check_updates": self._check_updates_clicked,
+            "banner_clicked": self._on_update_click,
+            "escape": self._panel_escape,
+            "boot": self._panel_booted,
+            "rendered": lambda p: None,     # telemetry; nothing to do with it
+        }
+        # The generated ids: one per window, filter and tray flag. Built in a
+        # loop for the same reason the Tk rows were — a filter added to the
+        # tuple gets its control and its handler together, or neither.
+        for key, _label in TOGGLEABLE_ELEMENTS:
+            acts[f"show:{key}"] = (
+                lambda p, k=key: self._on_element_pick(k, p.get("value")))
+        for group, _label in SCALE_GROUPS:
+            acts[f"scale:{group}"] = (
+                lambda p, g=group: self._set_group_scale(
+                    g, int(p.get("value", 100)) / 100))
+        for key, _label, _cats in MINIMAP_FILTERS:
+            acts[f"mapfilter:{key}"] = (
+                lambda p, k=key: self._toggle_map_filter(k))
+        for key, _label, _cats in COMPASS_FILTERS:
+            acts[f"compassfilter:{key}"] = (
+                lambda p, k=key: self._toggle_compass_filter(k))
+        for flag, _label in BUFF_TRAY_FLAGS:
+            acts[f"trayflag:{flag}"] = (
+                lambda p, f=flag: self._toggle_tray_flag(f))
+        for which in ("timer", "stacks"):
+            acts[f"traypos:{which}"] = (
+                lambda p, w=which: self._set_tray_field(
+                    f"{w}_pos", p.get("value")))
+            acts[f"traytext:{which}"] = (
+                lambda p, w=which: self._set_tray_field(
+                    f"{w}_size", int(p.get("value", 100))))
+        return acts
+
+    # -- small adapters the panel needs and the Tk menu got from its vars --
+    def _set_tray_field(self, field, value):
+        """One setting on the tray being edited. The Tk panel read these off
+        its own IntVars; the web panel sends the value, so there is one place
+        that writes them instead of six near-identical handlers."""
+        self._tray(self._tray_edit)[field] = value
+        self._save_settings()
+
+    def _set_tray_align(self, label):
+        """Change which edge holds still — WITHOUT moving the tray.
+
+        The anchor has to be re-derived from where the window actually is, or
+        switching from Grow right to Grow left would leave the old anchor
+        meaning something else and jump the tray by its own width.
+        """
+        i = self._tray_edit
+        t = self._tray(i)
+        try:
+            win = self.buffwins[i]
+            w, h = win.winfo_width(), win.winfo_height()
+            x, y = win.winfo_x(), win.winfo_y()
+        except tk.TclError:
+            t["align"] = _align_from_label(t, label)
+            self._save_settings()
+            return
+        t["align"] = _align_from_label(t, label)
+        dx, dy = self._tray_offset(t, w, h)
+        t["x"], t["y"] = x + dx, y + dy
+        self._save_settings()
+
+    def _set_panel_query(self, attr, text):
+        """A search box changed. Stored on the overlay rather than in a Tk
+        StringVar so the spec builder can read it back on the next tick."""
+        setattr(self, attr, text or "")
+
+    def _set_menu_zoom(self, pct):
+        """The panel's own size. It is a CSS zoom inside the window rather
+        than a font rebuild, so unlike the other groups nothing here has to
+        touch a widget — it just has to be saved and pushed."""
+        self._scales["menu"] = max(50, min(200, int(pct))) / 100
+        self._save_settings()
+
+    def _sync_panel(self, visible):
+        """Show, hide and feed the settings panel — and never, ever raise.
+
+        This is called from the middle of _refresh_visibility, which runs on
+        the input pump. An exception escaping here does not merely lose a push:
+        it abandons the rest of the visibility pass and then kills the pump,
+        because input_loop only reschedules itself if the tick returned. The
+        overlay freezes in whatever state it was in.
+
+        That is not hypothetical — it shipped. A page builder raising made
+        every tab except the two whose builders happened to work look dead
+        (the panel kept showing the old page, since no push ever went out) and
+        left the buff trays revealed for good, because the reveal expires in
+        the part of _refresh_visibility that no longer ran.
+
+        So the whole thing is wrapped, and the error is reported once per kind
+        rather than 30 times a second.
+        """
+        try:
+            self._sync_panel_inner(visible)
+        except Exception as e:
+            key = f"{type(e).__name__}:{e}"
+            if key not in self._panel_errs:
+                self._panel_errs.add(key)
+                import traceback
+                print(f"[meter] settings panel sync failed ({key}) — the "
+                      f"overlay is unaffected:", file=sys.stderr)
+                traceback.print_exc()
+
+    def _sync_panel_inner(self, visible):
+        if visible and self.menubridge.proc is None:
+            # First open of the session — or a restart, if the panel died. A
+            # fresh process starts hidden whatever we last thought, so the
+            # edge test below has to be reset or the show would be skipped.
+            self._panel_visible = False
+            self._icon_sheet_sent = False       # a new process, a new page
+            # Hand it the geometry we saved, so it comes back the size and
+            # place it was left.
+            self.menubridge.start(self.menubridge.geom or self._panel_geom)
+        if not self.menubridge.alive():
+            return
+        # Persist the panel's position and size once a move or resize has
+        # settled. _save_pos is otherwise only reached from the end of a TK
+        # window drag, and the panel is not a Tk window — so without this its
+        # geometry was reported, held in memory, and never written.
+        if (self.menubridge.geom_at
+                and time.monotonic() - self.menubridge.geom_at
+                > PANEL_GEOM_SETTLE_SECS):
+            self.menubridge.geom_at = 0.0
+            self._panel_geom = dict(self.menubridge.geom)
+            self._save_pos()
+        if visible != self._panel_visible:
+            self._panel_visible = visible
+            self._panel_reassert = 0
+            (self.menubridge.show if visible else self.menubridge.hide)()
+            if not visible:
+                # Arriving at the Buffs page makes every configured tray point
+                # at itself for a few seconds. That answers "which one is
+                # which" while you are LOOKING at the page — once the panel is
+                # gone it is just a row of trays refusing to hide, so the
+                # reveal ends with the panel rather than on its own timer.
+                self._tray_reveal = {}
+        if visible:
+            # Belt and braces on top of the edge test above. Topmost is not a
+            # standing property — anything else claiming it takes it away, and
+            # over a game that happens often — so the show is re-sent about
+            # once a second while the panel should be up. show() is cheap and
+            # idempotent on the far side: it re-asserts topmost and only calls
+            # the real show() if the window is actually hidden.
+            self._panel_reassert += 1
+            if self._panel_reassert >= PANEL_REASSERT_TICKS:
+                self._panel_reassert = 0
+                self.menubridge.show()
+            # Rebuilt a few times a second, or at once if something was
+            # clicked — an action calls invalidate(), and waiting up to a fifth
+            # of a second to redraw a button you just pressed would feel like a
+            # dead button.
+            if (self.menubridge.dirty()
+                    or self._panel_reassert % PANEL_PUSH_TICKS == 0):
+                self.menubridge.push(self._menu_spec())
+
+    def _panel_booted(self):
+        """The panel's page finished loading. Its idea of the state is nothing
+        at all, so the next push has to go even if it matches the last one."""
+        self._send_icon_sheet()
+        self.menubridge.invalidate()
+
+    def _send_icon_sheet(self):
+        """Hand the panel the status icon sheet, once.
+
+        The whole 411KB sheet as one data URI, not 242 cropped images. It is a
+        sprite sheet and the panel treats it as one: a row carries a cell
+        NUMBER and the CSS works out the background-position, so adding icons
+        to a list costs an integer per row rather than an image.
+
+        Sent on its own message rather than inside the state, because the state
+        is rebuilt several times a second and compared field by field — half a
+        megabyte of base64 in that comparison would cost more than everything
+        else the panel does put together.
+        """
+        if self._icon_sheet_sent:
+            return
+        try:
+            raw = (STATUS_DIR / "icons.webp").read_bytes()
+            meta = json.loads(
+                (STATUS_DIR / "icons.json").read_text(encoding="utf-8"))
+        except OSError as e:
+            print(f"[meter] no status icon sheet for the panel: {e}",
+                  file=sys.stderr)
+            self._icon_sheet_sent = True        # don't retry every boot
+            return
+        import base64
+        self._icon_sheet_sent = True
+        self.menubridge.send({
+            "t": "sheet",
+            "uri": "data:image/webp;base64,"
+                   + base64.b64encode(raw).decode("ascii"),
+            "cell": int(meta.get("cell") or 64),
+            "cols": int(meta.get("cols") or 16),
+        })
+
+    def _panel_typing(self, on):
+        """A search box in the panel gained or lost the caret. Same handshake
+        the Tk entries had: while the panel holds the keyboard the game cannot
+        see its own Escape."""
+        self._typing = bool(on)
+
+    def _panel_escape(self):
+        """Escape pressed inside the panel — close the game's menu with it.
+
+        The panel is a real window in another process and it holds focus while
+        you are using it, so its Escape never reaches Farever and the game's
+        menu stays open. Handing focus back is not enough on its own: the
+        keypress that caused this was consumed by the panel, so there is
+        nothing left for the game to act on.
+
+        So the key is replayed. Focus goes to the game first, then a synthetic
+        Escape is sent one tick later — the delay matters, because a keystroke
+        posted before the foreground change lands would be delivered to the
+        window we are trying to leave.
+
+        keybd_event rather than PostMessage: it is synthesised at the driver
+        level, so it reaches the game whichever way it reads the keyboard,
+        where a posted message only works for a window that pumps for it.
+        """
+        self._typing = False
+        self._refocus_game()
+        self.root.after(PANEL_ESC_REPLAY_MS, self._replay_escape)
+
+    def _replay_escape(self):
+        """The synthetic Escape, once the game has the foreground back."""
+        if sys.platform != "win32":
+            return
+        try:
+            # Only if the game really is frontmost. Firing this blind would
+            # send an Escape into whatever the user alt-tabbed to instead.
+            if self._foreground_pid() != self.target_pid:
+                return
+            u = ctypes.windll.user32
+            KEYEVENTF_KEYUP = 0x0002
+            u.keybd_event(0x1B, 0, 0, 0)                 # VK_ESCAPE down
+            u.keybd_event(0x1B, 0, KEYEVENTF_KEYUP, 0)   # ...and up
+        except Exception as e:
+            print(f"[meter] couldn't replay Escape to the game: {e}",
+                  file=sys.stderr)
+
+    def _panel_closed(self):
+        """The panel took itself off screen — alt-F4 reaching it, most likely.
+
+        Clearing _panel_visible is the point. Without it the overlay still
+        believes the panel is up, so the next time the escape menu opens the
+        edge test in _sync_panel sees no change and sends no show — and the
+        panel simply never comes back. Reported as "it isn't always appearing
+        when I press Esc".
+        """
+        self._panel_visible = False
+        self.menubridge.invalidate()
+
+    def _social_rows_data(self):
+        """The Social list, as plain dicts for the panel.
+
+        Reuses the same ordering the Tk rows used so the two cannot disagree
+        about who is at the top — see _sorted_roster for why name pins you and
+        level pins nobody.
+        """
+        # The hook's rows use short keys — n, k, lvl, uid, me, last — not the
+        # spelled-out ones. Getting that wrong is why the tab rendered
+        # twenty-nine rows with a Copy ID button and no name on any of them:
+        # the count was right because the rows were real, and every field was
+        # empty because none of the names matched.
+        q = (self._social_query_text or "").strip().lower()
+        out = []
+        if self._social_page == "session":
+            rows = list(self.world.seen_players() or [])
+            now = time.monotonic()
+            for r in rows:
+                r["ago"] = _seen_ago(max(0.0, now - r.get("last", now)))
+            if self._session_sort == "name":
+                rows.sort(key=lambda r: (r.get("n") or "").lower())
+            else:
+                rows.sort(key=lambda r: (-r.get("last", 0.0),
+                                         (r.get("n") or "").lower()))
+            for r in rows:
+                name = r.get("n") or "?"
+                if q and q not in name.lower():
+                    continue
+                # No class or level here, deliberately: both come off a live
+                # entity and are only true while the player is on your layer.
+                out.append({"name": name, "cls": "",
+                            "meta": r.get("ago") or "",
+                            "uid": str(r.get("uid") or "")})
+            return out
+
+        for r in (self._sorted_roster() or []):
+            name = r.get("n") or "?"
+            if q and q not in name.lower():
+                continue
+            lvl = r.get("lvl")
+            # "you" goes in the meta column, not appended to the name — the
+            # name is also what the Copy confirmation quotes back.
+            meta = " · ".join(x for x in ((f"lvl {lvl}" if lvl else ""),
+                                          ("you" if r.get("me") else "")) if x)
+            out.append({"name": name, "cls": _class_tag(r.get("k")),
+                        "meta": meta, "uid": str(r.get("uid") or "")})
+        return out
+
     def _build_menu(self):
         """The control menu: what used to be hotkeys, as buttons. Only on screen
         while the game's escape menu is — which is also the only time the game
@@ -6213,7 +7817,10 @@ class Overlay:
         holder.pack(side="left", fill="both", expand=True, padx=(10, 0))
         holder.grid_rowconfigure(0, weight=1)
         holder.grid_columnconfigure(0, weight=1)
-        self._menu_tab = "General"
+        # NOT reset here: the tab is remembered across runs and _load_settings
+        # has already restored it. This line used to pin it to General, which
+        # is how a remembered tab would have been quietly thrown away.
+        self._menu_tab = getattr(self, "_menu_tab", MENU_TAB_DEFAULT)
         self._menu_tab_btns = {}
         self._menu_tab_frames = {}
         # General stays the landing page — it is what you open the menu for
@@ -6950,25 +8557,31 @@ class Overlay:
         # seeded once here — _set_menu_tab only does it on arrival, and the
         # slider would otherwise sit at the default until you visited the tab.
         self._sync_tray_controls()
-        self._set_menu_tab("General")
+        # Whatever was restored, not a hardcoded page — see MENU_TAB_DEFAULT.
+        self._set_menu_tab(self._menu_tab)
 
     def _set_menu_tab(self, name):
         """Raise one settings page and paint its tab as the active one. The
         frames all live in the same grid cell, so this is a lift, not a
         re-layout."""
-        if name not in self._menu_tab_frames:
+        # Validated against MENU_TABS, not against the retired Tk frames —
+        # Help has no frame and was silently refused while this checked those.
+        if name not in MENU_TABS:
             return
-        # Leaving a page with a search box means you're done typing. Tk focus
-        # survives a raise — the box is only hidden, not destroyed — so
-        # without this the keyboard would still be pointed at an off-screen
-        # Entry, and a key pressed over on Windows while rebinding would land
-        # in it too.
+        # Leaving a page with a search box means you're done typing.
         if name not in ("Social", "History", "Buffs"):
             self._stop_typing()
+        # Leaving Help closes whatever article was open, so coming back lands
+        # on the index. An article is somewhere you went to read one thing —
+        # returning to the tab later and finding yourself mid-page, with no
+        # memory of having opened it, reads as the panel having lost its place
+        # rather than kept it.
+        if name != "Help":
+            self._help_open = None
         self._menu_tab = name
-        self._menu_tab_frames[name].tkraise()
-        for n, b in self._menu_tab_btns.items():
-            self._paint_tab_btn(b, n == name)
+        # Arriving at a tab is what re-reads its data, below. Everything the
+        # panel draws is built from that data on the next push, so there is no
+        # widget to raise and nothing to repaint here.
         # Raising Social is one of its load moments — the pages don't poll,
         # so arriving at the tab is what fetches the current picture.
         if name == "Social":
@@ -8779,8 +10392,8 @@ class Overlay:
             except Exception:
                 pass
             self._history_note_job = None
-        self.history_note.config(text=text,
-                                 fg=ACCENT if transient else FG_DIM)
+        # A string, not a label — the panel reading it is another process.
+        self._history_note_text = text
         if transient:
             def restore():
                 self._history_note_job = None
@@ -8804,6 +10417,13 @@ class Overlay:
 
     def _rebuild_history(self, *_a):
         """Redraw the dataset rows, gated on an actual change like Social's."""
+        # Retired with the Tk control menu: the settings panel builds
+        # this from data on each push, so drawing hidden widgets here
+        # is pure churn — and widget churn is the expensive thing in
+        # this UI, measured at 297ms for 27 rows. Left in place, and
+        # callable, because its call sites still mark real state
+        # changes; see _refresh_menu.
+        return
         q = self._history_query.get().strip().lower()
         rows = self._history_entries
         sig = (q, tuple(r["path"] for r in rows))
@@ -8898,6 +10518,13 @@ class Overlay:
         """Draw the opened dataset. Rift and ordinary encounters differ only
         in that a rift has two phases; everything below the phase heading is
         the same code, which is the point of storing them the same way."""
+        # Retired with the Tk control menu: the settings panel builds
+        # this from data on each push, so drawing hidden widgets here
+        # is pure churn — and widget churn is the expensive thing in
+        # this UI, measured at 297ms for 27 rows. Left in place, and
+        # callable, because its call sites still mark real state
+        # changes; see _refresh_menu.
+        return
         entry = self._history_detail
         if entry is None:
             return
@@ -9228,6 +10855,78 @@ class Overlay:
         self._parse_text = None
         self.parsewin.withdraw()
 
+    def _build_reset_toast(self):
+        """The "that worked" panel for a manual reset.
+
+        A reset is silent by nature: the meter empties, which looks exactly
+        like a meter that was already empty, and mid-fight it looks like a
+        meter that has stopped working. This is the only feedback that the
+        keypress did anything.
+
+        A solid panel rather than the drop-shadowed floating text the kill and
+        parse toasts use — those are announcements about the fight and belong
+        over the game, while this is about the METER and sits on it.
+        """
+        border = tk.Frame(self.resetwin, bg=BG_BORDER, padx=2, pady=2)
+        border.pack(fill="both", expand=True)
+        body = tk.Frame(border, bg=BG_HEADER_UNLOCKED, padx=14, pady=8)
+        body.pack(fill="both", expand=True)
+        self.reset_title = tk.Label(
+            body, text=RESET_TOAST_TEXT[0], bg=BG_HEADER_UNLOCKED,
+            fg=FG_HEADER, font=self.fonts["ui_hint_b"])
+        self.reset_title.pack()
+        self.reset_sub = tk.Label(
+            body, text=RESET_TOAST_TEXT[1], bg=BG_HEADER_UNLOCKED,
+            fg=FG_HEADER_DIM, font=self.fonts["ui_sm_b"])
+        self.reset_sub.pack()
+        self._reset_toast_job = None
+
+    def _manual_reset(self):
+        """A reset the PLAYER asked for — the hotkey, or the panel's button.
+
+        Separate from session.reset() because the automatic resets (a zone
+        change, a boss pull, switching player view) must stay silent: they
+        happen while you are reading the meter for other reasons, and a banner
+        over it every time you walked through a door would be noise.
+        """
+        self.session.reset()
+        self._show_reset_toast()
+
+    def _show_reset_toast(self):
+        """Centre it over the meter for RESET_TOAST_SECS."""
+        try:
+            self.resetwin.update_idletasks()
+            w = self.resetwin.winfo_reqwidth()
+            h = self.resetwin.winfo_reqheight()
+            # Over the METER, not the game — it is confirming something about
+            # that window. Falls back to the meter's requested size, because a
+            # window that is currently hidden reports a width of 1.
+            mw = max(self.root.winfo_width(), self.root.winfo_reqwidth())
+            mh = max(self.root.winfo_height(), self.root.winfo_reqheight())
+            x = self.root.winfo_x() + (mw - w) // 2
+            y = self.root.winfo_y() + (mh - h) // 2
+            self.resetwin.geometry(f"+{x}+{y}")
+            self.resetwin.deiconify()
+            self.resetwin.attributes("-topmost", True)
+        except tk.TclError:
+            return
+        # Resetting again inside the window restarts the clock rather than
+        # letting the first press's timer take the second one's toast away.
+        if self._reset_toast_job is not None:
+            try:
+                self.root.after_cancel(self._reset_toast_job)
+            except Exception:
+                pass
+        self._reset_toast_job = self.root.after(
+            int(RESET_TOAST_SECS * 1000), self._hide_reset_toast)
+
+    def _hide_reset_toast(self):
+        self._reset_toast_job = None
+        try:
+            self.resetwin.withdraw()
+        except tk.TclError:
+            pass
+
     def _build_kill_toast(self):
         """The boss kill time — the same drop-shadowed floating text as the
         parse banner, on its own window because the two can be up at once
@@ -9480,6 +11179,13 @@ class Overlay:
         Called on selection and after a load, never on every menu refresh: the
         size slider is a live widget and writing to its variable while it is
         being dragged fights the user for the handle."""
+        # Retired with the Tk control menu: the settings panel builds
+        # this from data on each push, so drawing hidden widgets here
+        # is pure churn — and widget churn is the expensive thing in
+        # this UI, measured at 297ms for 27 rows. Left in place, and
+        # callable, because its call sites still mark real state
+        # changes; see _refresh_menu.
+        return
         t = self._tray(self._tray_edit)
         self._tray_size_var.set(int(t.get("size", BUFF_ICON_DEFAULT)))
         self._tray_layout_var.set(
@@ -9594,6 +11300,13 @@ class Overlay:
 
         Rebuilt wholesale on change, like the Social rows: at this size
         diffing would be more code than it saves."""
+        # Retired with the Tk control menu: the settings panel builds
+        # this from data on each push, so drawing hidden widgets here
+        # is pure churn — and widget churn is the expensive thing in
+        # this UI, measured at 297ms for 27 rows. Left in place, and
+        # callable, because its call sites still mark real state
+        # changes; see _refresh_menu.
+        return
         t = self._tray(self._tray_edit)
         keys = list(t.get("keys") or ())
         sig = (self._tray_edit, tuple(keys))
@@ -9683,6 +11396,13 @@ class Overlay:
 
     def _render_buff_pick(self):
         """Draw the picker, filtered by the search box."""
+        # Retired with the Tk control menu: the settings panel builds
+        # this from data on each push, so drawing hidden widgets here
+        # is pure churn — and widget churn is the expensive thing in
+        # this UI, measured at 297ms for 27 rows. Left in place, and
+        # callable, because its call sites still mark real state
+        # changes; see _refresh_menu.
+        return
         q = (self._buff_query.get() or "").strip().lower()
         tracked = set(self._tray(self._tray_edit).get("keys") or ())
         rows = self._buff_pick_rows()
@@ -9747,8 +11467,13 @@ class Overlay:
         way. Called before anything saves or switches character."""
         for i, win in enumerate(self.buffwins):
             try:
-                self._trays[i]["x"] = win.winfo_x()
-                self._trays[i]["y"] = win.winfo_y()
+                # Stored as the ANCHOR, not the top-left: the window's corner
+                # moves as icons come and go, and saving that would walk the
+                # tray across the screen a little on every drag.
+                dx, dy = self._tray_offset(self._tray(i), win.winfo_width(),
+                                           win.winfo_height())
+                self._trays[i]["x"] = win.winfo_x() + dx
+                self._trays[i]["y"] = win.winfo_y() + dy
             except tk.TclError:
                 pass
 
@@ -9899,6 +11624,54 @@ class Overlay:
         return rows
 
     @staticmethod
+    def _tray_offset(tray, w, h):
+        """How far the window's top-left sits from the tray's anchor.
+
+        Only the axis the tray grows along moves; the other one is pinned
+        either way, so a row anchored right still keeps its top edge.
+        """
+        align = tray.get("align", BUFF_ALIGN_START)
+        span = w if tray.get("layout", "row") == "row" else h
+        if align == BUFF_ALIGN_CENTER:
+            off = span // 2
+        elif align == BUFF_ALIGN_END:
+            off = span
+        else:
+            off = 0
+        return (off, 0) if tray.get("layout", "row") == "row" else (0, off)
+
+    def _place_tray(self, i, tray, w, h):
+        """Move tray `i`'s window so its anchor stays put at this size."""
+        ax, ay = tray.get("x"), tray.get("y")
+        if not isinstance(ax, int) or not isinstance(ay, int):
+            return          # never positioned yet; the default stack has it
+        dx, dy = self._tray_offset(tray, w, h)
+        try:
+            self.buffwins[i].geometry(f"+{ax - dx}+{ay - dy}")
+        except tk.TclError:
+            pass
+
+    def _tray_has_live(self, tray):
+        """Is any of this tray's watchlist actually up right now?
+
+        Only asked of trays set to hide their inactive slots, to decide whether
+        the window has anything to be. Reads the same live set and the same
+        alias groups the draw pass does, so the window's existence and its
+        contents cannot disagree.
+        """
+        # Cached for a beat. This is asked once per hide-mode tray from
+        # _refresh_visibility, which runs on the 30Hz input pump — rebuilding
+        # the live set four times a tick to answer a yes/no question would cost
+        # more than the drawing does. A buff landing shows the tray a fraction
+        # of a second later than it could, which nobody can see.
+        now = time.monotonic()
+        if now - self._tray_live_at > TRAY_LIVE_CACHE_SECS:
+            self._tray_live_at = now
+            self._tray_live = {r["key"]: r for r in self.statuses.live()}
+        return any(self._live_for(k, self._tray_live) is not None
+                   for k in (tray.get("keys") or ()))
+
+    @staticmethod
     def _live_for(key, live_by_key):
         """Whichever member of `key`'s alias group is currently up, if any.
 
@@ -10019,6 +11792,10 @@ class Overlay:
             # is something to see and something to grab hold of.
             w = h = max(size, int(BUFF_REVEAL_EMPTY_CELL * s))
         c.config(width=w, height=h)
+        # Now that the size is known, put the window where the anchor says —
+        # growth runs away from the edge the player pinned, rather than always
+        # rightwards from a fixed left edge.
+        self._place_tray(i, tray, w, h)
         c.delete("all")
         for idx, (key, up) in enumerate(rows):
             x = idx * (size + gap) if across else 0
@@ -10391,11 +12168,22 @@ class Overlay:
         Our own windows count as the game having focus. They're WS_EX_NOACTIVATE
         so they shouldn't take it, but Tk's dropdown menus are its own windows
         and do — without this, opening the Theme dropdown would hide the very
-        menu you opened it from."""
+        menu you opened it from.
+
+        The settings panel counts too, and it is the reason this is not just a
+        pid comparison. It runs in a process of its own and it DOES take focus
+        (it has search boxes), so leaving it out made the overlay hide itself
+        the instant the panel appeared — which handed focus back to the game,
+        which showed the panel again. That is a loop, and it looked like one:
+        both menus flashing alternately for a few seconds until a click landed
+        on the panel and left the overlay hidden for good."""
         if sys.platform != "win32" or not self.target_pid:
             return True         # can't tell => don't start hiding things
         fg = self._foreground_pid()
-        return fg in (self.target_pid, os.getpid()) or fg == 0
+        if fg == 0 or fg in (self.target_pid, os.getpid()):
+            return True
+        panel = self.menubridge.pid()
+        return panel is not None and fg == panel
 
     def _cursor_is_free(self):
         """Has the game let go of the mouse?
@@ -10761,6 +12549,31 @@ class Overlay:
         return IS_FROZEN and bool(UPDATE["asset"])
 
     def _open_url(self, url):
+        """Open a link in the player's browser.
+
+        Deliberately does nothing about focus, after an attempt that made
+        things worse. The panel is topmost, so a browser can open behind it —
+        the obvious fix was to hide the panel and hold it down while the
+        browser came forward. It did not come forward: `webbrowser.open` hands
+        the URL to an ALREADY RUNNING browser as a new tab, and an existing
+        window is not raised by that, so AllowSetForegroundWindow (which only
+        licenses a process being started) had nothing to license. The result
+        was the panel vanishing, the game keeping focus, and nothing visibly
+        happening — worse than the browser merely being behind something.
+
+        Raising a window that belongs to a browser we did not launch is not
+        something this can do reliably, so it does not pretend to. The tab
+        opens; alt-tab reaches it.
+        """
+        if sys.platform == "win32":
+            # Harmless and correct for the case where the browser IS being
+            # started: it lets that new process take the foreground. Does
+            # nothing when a browser is already running, which is why it is
+            # not a fix on its own.
+            try:
+                ctypes.windll.user32.AllowSetForegroundWindow(-1)
+            except Exception:
+                pass
         import webbrowser
         try:
             webbrowser.open(url)
@@ -11215,6 +13028,33 @@ class Overlay:
         to main()'s finally, which is what unloads the hook and detaches. That
         ordering is the entire point of having a Quit button at all."""
         print("[meter] stop requested — shutting down.", file=sys.stderr)
+        # Take the UI off the screen NOW, before the slow part.
+        #
+        # quit() only breaks the mainloop; unloading the hook and detaching
+        # happens after that and is not quick — and on this game it is the part
+        # that must not be rushed. Without this the whole overlay sat frozen
+        # over the game for the duration, which reads as a hang rather than as
+        # a shutdown.
+        #
+        # The settings panel is hidden here too, so everything goes at once.
+        # Its process is ended later, in the caller's cleanup; hiding is
+        # instant and that is what the user actually sees.
+        self.menubridge.hide()
+        extra = ("parsewin", "killwin", "codexwin", "sparklywin", "badgewin",
+                 "promptwin", "updatewin", "reportwin", "riftwin")
+        wins = list(self._fade_win.values())
+        wins += [w for w in (getattr(self, n, None) for n in extra) if w]
+        for win in wins:
+            try:
+                win.withdraw()
+            except Exception:
+                pass         # already gone, or never built
+        try:
+            # Force the unmaps out to the screen before we stop pumping — a
+            # withdraw that never gets drawn is a window still on screen.
+            self.root.update_idletasks()
+        except Exception:
+            pass
         self.root.quit()
 
     def _quit_clicked(self):
@@ -11224,23 +13064,17 @@ class Overlay:
         if self._quit_armed:
             self._quit()
             return
+        # State only. The label follows from it in _menu_spec — the settings
+        # panel is not a widget this process owns, so there is nothing here to
+        # configure and the next push carries the change.
         self._quit_armed = True
-        self.btn_quit.config(text="Click again to stop", bg=FG_WARN,
-                             fg=FG_HEADER, activebackground=FG_WARN,
-                             activeforeground=FG_HEADER)
         self.root.after(4000, self._disarm_quit)
 
     def _disarm_quit(self):
         self._quit_armed = False
-        try:
-            self.btn_quit.config(text=QUIT_LABEL, bg=BG_BODY_SOFT, fg=FG_WARN,
-                                 activebackground=BG_BAR_TRACK,
-                                 activeforeground=FG_VALUE)
-        except tk.TclError:
-            pass        # the window went away while the timer was pending
 
     def _install_hotkeys(self):
-        start_hotkeys({HK_RESET: self._enqueue(self.session.reset)},
+        start_hotkeys({HK_RESET: self._enqueue(self._manual_reset)},
                       self.target_pid)
 
     def _drain(self):
@@ -11300,6 +13134,20 @@ class Overlay:
         so they're re-drawn rather than left at the old size."""
         if abs(factor - self._scales.get(group, 1.0)) < 0.001:
             return
+        # The compass is anchored by its CENTRE, so growing it opens out to
+        # both sides instead of only to the right. It is a strip you line up
+        # with the middle of the screen (and with the game's own compass), and
+        # a left-anchored one had to be dragged back into place after every
+        # nudge of the slider. Captured before the fonts change, restored once
+        # the relayout has settled — see the tail of this method.
+        centre = None
+        if group == "compass":
+            try:
+                centre = (self.compasswin.winfo_x()
+                          + max(self.compasswin.winfo_width(),
+                                self.compasswin.winfo_reqwidth()) // 2)
+            except tk.TclError:
+                centre = None
         self._scales[group] = factor
         for key, (_family, size, *_style) in FONT_SPECS.items():
             self._font_sets[group][key].configure(
@@ -11336,6 +13184,20 @@ class Overlay:
         self.social_note.config(
             wraplength=int(WARN_WRAP * self._scales["menu"]))
         self.root.update_idletasks()
+        # ...and put the compass back around the centre it had. After
+        # update_idletasks, so the new width is the real one rather than the
+        # size it was before the fonts changed.
+        if centre is not None:
+            try:
+                w = max(self.compasswin.winfo_width(),
+                        self.compasswin.winfo_reqwidth())
+                self.compasswin.geometry(
+                    f"+{centre - w // 2}+{self.compasswin.winfo_y()}")
+                # The badge underlay is glued to the compass, so it has to be
+                # re-glued or it stays behind at the old position.
+                self._sync_badgewin()
+            except tk.TclError:
+                pass
         print(f"[meter] {group} scale {factor:.2f}x", file=sys.stderr)
 
     def _on_theme_pick(self, value):
@@ -11799,6 +13661,15 @@ class Overlay:
                 tray = self._tray(idx)
                 if not tray.get("on") or not tray.get("keys"):
                     want = False
+                # ...and a tray set to HIDE its inactive slots, with none of
+                # its buffs currently up, has nothing to draw either. The draw
+                # pass used to collapse the canvas to 1x1 for this, which is
+                # not the same as being gone: the window stayed mapped, so a
+                # bordered one-pixel box sat on the game where the icons would
+                # appear. Reported as "little boxes".
+                elif (tray.get("inactive") == BUFF_INACTIVE_HIDE
+                        and not self._tray_has_live(tray)):
+                    want = False
                 # ...unless it is announcing itself. LAST, so it overrides
                 # every rule above including the blanket ones: the question
                 # "where is this tray" is only ever asked about a tray you
@@ -11825,7 +13696,18 @@ class Overlay:
         if not menu_visible:
             self._unpost_menus()
             self._stop_typing()
-        changed |= self._want_visible("menu", menu_visible)
+        # The WebView2 settings panel follows exactly the same rule, and is
+        # started the first time it is wanted rather than at launch — a player
+        # who never opens the menu never pays for a second process.
+        self._sync_panel(menu_visible)
+        # The Tk control menu is retired: the WebView2 panel above is the
+        # settings UI now. Its widgets are still built — 200-odd places across
+        # this file still reference them, and unpicking that is a separate job
+        # from replacing the window — but the window itself is never mapped
+        # again, so there is no second menu floating over the game. Pinned
+        # False rather than deleted so the fade system, the saved positions and
+        # the scale groups all keep working unchanged.
+        changed |= self._want_visible("menu", False)
         changed |= self._want_visible("hint", menu_visible)
         changed |= self._want_visible("prompt", self._prompt_open)
         # The offer lives and dies with the free cursor that makes it
@@ -12024,10 +13906,8 @@ class Overlay:
             return
         self._binding_now = True
         self._bind_poll_job = None
-        self.btn_bind.config(text="press a key…  (Esc cancels)")
-        # The Tk binding stays as well: it costs nothing, and it's what makes
-        # the capture testable without a keyboard.
-        self.btn_bind.bind("<KeyPress>", self._on_bind_key)
+        # The prompt is drawn from _binding_now by _menu_spec, not written to a
+        # button here — the panel lives in another process.
         self._poll_bind_capture()
 
     def _poll_bind_capture(self):
@@ -12072,11 +13952,10 @@ class Overlay:
             except tk.TclError:
                 pass
             self._bind_poll_job = None
-        try:
-            self.btn_bind.unbind("<KeyPress>")
-        except tk.TclError:
-            pass
-        self._refresh_menu()
+        # Nothing to unbind: the capture is polled through GetAsyncKeyState
+        # (see _begin_bind_capture) and never went through a Tk widget. The new
+        # label reaches the panel with the next state push.
+        self.menubridge.invalidate()
 
     def _on_bind_key(self, event):
         """Tk's `keycode` IS the Windows virtual-key code, which is exactly
@@ -12157,6 +14036,13 @@ class Overlay:
         choices floating over the game with nothing behind them. `unpost` on a
         menu that isn't posted is harmless, so this needs no bookkeeping about
         which one was open."""
+        # Retired with the Tk control menu: the settings panel builds
+        # this from data on each push, so drawing hidden widgets here
+        # is pure churn — and widget churn is the expensive thing in
+        # this UI, measured at 297ms for 27 rows. Left in place, and
+        # callable, because its call sites still mark real state
+        # changes; see _refresh_menu.
+        return
         for opt in getattr(self, "_option_menus", ()):
             try:
                 opt["menu"].unpost()
@@ -12403,8 +14289,9 @@ class Overlay:
                 pass
             self._social_note_job = None
         self._social_note_transient = transient
-        self.social_note.config(text=text,
-                                fg=ACCENT if transient else FG_DIM)
+        # A string on the overlay rather than a label's text: the panel that
+        # draws it is in another process and reads this on the next push.
+        self._social_note_text = text
         if transient:
             def restore():
                 self._social_note_transient = False
@@ -12431,6 +14318,13 @@ class Overlay:
         whose members appear and vanish as people zone, and it runs only on a
         genuine change — so the cost is paid when someone joins, not per tick.
         """
+        # Retired with the Tk control menu: the settings panel builds
+        # this from data on each push, so drawing hidden widgets here
+        # is pure churn — and widget churn is the expensive thing in
+        # this UI, measured at 297ms for 27 rows. Left in place, and
+        # callable, because its call sites still mark real state
+        # changes; see _refresh_menu.
+        return
         rows = self._sorted_roster()
         q = self._social_query.get().strip().lower()
         sig = (q, self._social_sort,
@@ -12471,6 +14365,13 @@ class Overlay:
         who has left your shard no longer has one — so the honest thing to show
         is a name and an id, not a snapshot of what they were an hour ago.
         """
+        # Retired with the Tk control menu: the settings panel builds
+        # this from data on each push, so drawing hidden widgets here
+        # is pure churn — and widget churn is the expensive thing in
+        # this UI, measured at 297ms for 27 rows. Left in place, and
+        # callable, because its call sites still mark real state
+        # changes; see _refresh_menu.
+        return
         rows = self.world.seen_players()
         now = time.monotonic()
         # Resolved once, here, so the sort and the column can never disagree
@@ -12629,6 +14530,20 @@ class Overlay:
             lambda s=steam64, n=name: self._copy_steamid(n, s)), ok)
         return row
 
+    def _open_profile(self, uid):
+        """That player's Steam profile in the browser.
+
+        The uid off the wire is little-endian hex, so it has to go through
+        steam64_from_uid rather than into the URL as-is — read the raw value
+        and you get a real-looking id belonging to nobody.
+        """
+        steam64 = steam64_from_uid(uid)
+        if steam64 is None:
+            self._social_note("No Steam id for that player yet.",
+                              transient=True)
+            return
+        self._open_url(STEAM_PROFILE_URL.format(steam64))
+
     def _copy_steamid(self, name, steam64):
         if steam64 is None:
             return
@@ -12645,8 +14560,22 @@ class Overlay:
         self._social_note(f"Copied {name}'s SteamID.", transient=True)
 
     def _refresh_menu(self):
-        """Menu buttons are labelled with what they'll *do*, so they double as
-        the state readout the old hint line used to provide."""
+        """Retired, and deliberately not deleted.
+
+        This used to relabel every button on the Tk control menu from the
+        state behind it. The settings panel does that job now, and does it by
+        being handed a fresh spec (_menu_spec) rather than by reconfiguring
+        widgets — so the work here is not merely unnecessary, it is the
+        expensive kind: measured on this project, a no-op Tk config() costs
+        full price, and this ran on every tick.
+
+        The ten call sites are left alone on purpose. Each one marks a place
+        that changes something the panel displays, so they become the hint that
+        the panel should be re-pushed — which invalidate() does for free.
+        """
+        self.menubridge.invalidate()
+
+    def _refresh_menu_legacy(self):
         self._cfg(self.btn_heal, 
             text=("☑  Healing columns" if self._show_heal
                   else "☐  Healing columns"))
@@ -12833,6 +14762,22 @@ class Overlay:
             self._held_duration = duration
             return rows, duration, False
         if not self._held_rows:
+            return rows, duration, False
+        # Party-only means party-only, including for the encounter being held
+        # over. A set recorded while all-players was on carries people who are
+        # not in the group, and re-showing it after the player has switched
+        # back would quietly contradict the setting they just chose — the
+        # meter would be listing strangers under a header that says PARTY.
+        #
+        # Dropped wholesale rather than filtered down to the party members in
+        # it: the totals, the percentages and the duration were all computed
+        # against the full set, so a filtered view would be a set of numbers
+        # that never existed. Better to show nothing than to show arithmetic
+        # about a fight that did not happen.
+        if self.mode == "party" and any(
+                not p.in_party and not p.is_me for p in self._held_rows):
+            self._held_rows = []
+            self._held_duration = 0.0
             return rows, duration, False
         return self._held_rows, self._held_duration, True
 
@@ -14758,6 +16703,11 @@ def locate_hlboot(pid):
 
 
 def main():
+    # First, before anything that can put a window on screen — the tray icon,
+    # Tk, or an update message box. Windows latches DPI awareness at the first
+    # window and ignores every later attempt to change it.
+    print(f"[meter] dpi awareness: {declare_dpi_awareness()} "
+          f"(display at {display_scale():.2f}x)", file=sys.stderr)
     seed_analysis()
     # background; the notice lands when it lands. Re-checked on loading screens
     # too — see the zone handler.
@@ -15400,6 +17350,13 @@ def _run(tray, session, ui_state, world, statuses, rift_rec, heal_sizer):
         except Exception:
             pass
         try:
+            # End the settings panel's process. It is already off the screen —
+            # _quit hides it along with every Tk window before the mainloop
+            # breaks — so this is just the process going away.
+            overlay.menubridge.stop()
+        except Exception:
+            pass
+        try:
             script.unload()
             fsession.detach()
         except Exception:
@@ -15412,6 +17369,16 @@ def _cli():
     # run one of the bundled hltools generators, and it must not start a meter.
     if len(sys.argv) > 2 and sys.argv[1] == TOOL_FLAG:
         run_bundled_tool(sys.argv[2], sys.argv[3:])
+        return
+    # ...and the settings panel, for the same reason: frozen, there is no
+    # python.exe to launch menu_host.py with, so the exe re-enters itself.
+    # Before setup_logging(), because the panel logs through the meter's
+    # stderr, which is the pipe its parent is already reading.
+    if len(sys.argv) > 1 and sys.argv[1] == MENU_FLAG:
+        sys.argv = sys.argv[1:]         # menu_host reads its geometry as [1]
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import menu_host
+        menu_host.main()
         return
     setup_logging()
     try:

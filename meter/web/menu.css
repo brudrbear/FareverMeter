@@ -1,0 +1,433 @@
+/* The settings panel.
+ *
+ * The palette is the Tk panel's, constant for constant — this window is
+ * Farever-styled whatever overlay theme is in use, exactly as the old one was,
+ * so there are no theme variants here on purpose.
+ *
+ * Sizes are in px and one px is one device pixel: the host pins Chromium's
+ * device scale factor to 1 so the user's Windows scaling cannot inflate this
+ * window. The user's own size preference is a CSS zoom on :root — see setZoom
+ * in menu.js — which is why nothing below uses vh/vw or rem for sizing.
+ */
+:root {
+  --border:       #2C1A0E;
+  --body:         #F2E1CB;
+  --body-soft:    #E8D5B8;
+  --track:        #D9C09A;
+  --header:       #5E9C4A;
+  --header-hot:   #4E8340;
+  --fg-header:    #FFFFFF;
+  --text:         #3D2817;
+  --value:        #1F1208;
+  --dim:          #7B5A3A;
+  --warn:         #A32B1C;
+  --accent:       #3D7C7C;
+  --grip:         6px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--border);
+  color: var(--text);
+  font: 14px/1.4 "Segoe UI", system-ui, sans-serif;
+  /* A settings panel is not a document; dragging a selection across it while
+     reaching for a button is only ever an accident. Re-enabled on the two
+     places where the text is the point (the shard id, the history path). */
+  user-select: none;
+  cursor: default;
+}
+
+/* ---- resize grips ---------------------------------------------------- */
+/* Invisible, and outside #shell so the panel's own padding cannot cover them. */
+.grip { position: fixed; z-index: 50; }
+.grip.n  { top: 0; left: 0; right: 0; height: var(--grip); cursor: ns-resize; }
+.grip.s  { bottom: 0; left: 0; right: 0; height: var(--grip); cursor: ns-resize; }
+.grip.w  { left: 0; top: 0; bottom: 0; width: var(--grip); cursor: ew-resize; }
+.grip.e  { right: 0; top: 0; bottom: 0; width: var(--grip); cursor: ew-resize; }
+.grip.nw, .grip.ne, .grip.sw, .grip.se {
+  width: calc(var(--grip) * 2); height: calc(var(--grip) * 2);
+}
+.grip.nw { top: 0; left: 0; cursor: nwse-resize; }
+.grip.se { bottom: 0; right: 0; cursor: nwse-resize; }
+.grip.ne { top: 0; right: 0; cursor: nesw-resize; }
+.grip.sw { bottom: 0; left: 0; cursor: nesw-resize; }
+
+/* ---- shell ----------------------------------------------------------- */
+#shell {
+  position: absolute;
+  inset: 2px;                       /* the 2px border frame the Tk panel had */
+  display: flex;
+  flex-direction: column;
+  background: var(--body);
+  overflow: hidden;
+}
+
+#titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--header);
+  color: var(--fg-header);
+  flex: none;
+  /* The whole bar is the drag handle, except the buttons in it — see
+     menu.js, which skips the drag when the click landed on a control. */
+  cursor: move;
+}
+#title { font-weight: 700; }
+#version { font-size: 11px; font-style: italic; opacity: .85; }
+.spacer { flex: 1 1 auto; }
+
+.linkbtn {
+  font: italic 11px "Segoe UI", sans-serif;
+  background: none; border: 0; padding: 2px 6px;
+  color: var(--fg-header); cursor: pointer; border-radius: 3px;
+}
+.linkbtn:hover { background: var(--header-hot); }
+
+#banner {
+  flex: none;
+  padding: 6px 12px 0;
+  font-size: 12px; font-weight: 700;
+  color: var(--dim);
+}
+#banner.update { color: var(--warn); cursor: pointer; }
+
+#body {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;                    /* lets #page scroll instead of growing */
+  padding: 8px 12px;
+  gap: 10px;
+}
+
+/* ---- tabs ------------------------------------------------------------ */
+#nav {
+  flex: 0 0 132px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-right: 1px solid var(--track);
+  padding-right: 9px;
+}
+#nav button {
+  text-align: left;
+  font: 700 14px "Segoe UI", sans-serif;
+  padding: 6px 12px;
+  border: 1px solid var(--track);
+  border-radius: 3px;
+  background: var(--body-soft);
+  color: var(--text);
+  cursor: pointer;
+}
+#nav button:hover { background: var(--track); }
+#nav button.active {
+  background: var(--header);
+  border-color: var(--header-hot);
+  color: var(--fg-header);
+}
+
+/* The scroll container, and the reason the panel can no longer be taller than
+   somebody's screen: the page scrolls, the window does not grow. */
+#page {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+  /* A column, so a list marked `grow` can take the leftover height instead of
+     stopping at a fixed 300px with dead space under it. Everything else keeps
+     its natural height — only an explicit flex grows. */
+  display: flex;
+  flex-direction: column;
+}
+/* Nothing stretches by accident just because the page is now a flex column. */
+#page > * { flex: 0 0 auto; }
+#page::-webkit-scrollbar { width: 10px; }
+#page::-webkit-scrollbar-track { background: var(--body-soft); }
+#page::-webkit-scrollbar-thumb {
+  background: var(--track); border-radius: 5px;
+}
+#page::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+
+/* ---- controls -------------------------------------------------------- */
+.section {
+  display: flex; align-items: center; gap: 8px;
+  margin: 14px 0 6px;
+  font: 700 12px "Segoe UI", sans-serif;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.section:first-child { margin-top: 2px; }
+/* The rule carries the heading across the row, which is what lets the heading
+   itself be quiet: the eye finds the break rather than the word. */
+.section::after {
+  content: ""; flex: 1 1 auto; height: 1px; background: var(--track);
+}
+
+.note {
+  font: italic 11px "Segoe UI", sans-serif;
+  color: var(--dim);
+  margin: 0 0 6px;
+}
+.note.warn { color: var(--warn); font-style: normal; font-weight: 700; }
+
+/* ---- transient confirmation ------------------------------------------ */
+/* Bottom-centre, over everything, and untouchable — it is a statement, not a
+   control, and a toast that could swallow a click aimed at the button under it
+   would be worse than no toast. */
+#toast {
+  position: fixed;
+  /* Top of the panel, just under the header — near where the eye already is
+     after clicking something up there, rather than at the far end of the
+     window from the button that raised it. */
+  left: 50%; top: 52px;
+  transform: translate(-50%, -8px);
+  z-index: 60;
+  padding: 8px 16px;
+  background: var(--header);
+  color: var(--fg-header);
+  font: 700 13px "Segoe UI", sans-serif;
+  border-radius: 6px;
+  box-shadow: 0 3px 12px rgba(44, 26, 14, .45);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .18s ease, transform .18s ease;
+}
+/* Slides down into place, so it reads as arriving from the header rather than
+   as something that was always there. */
+#toast.on { opacity: 1; transform: translate(-50%, 0); }
+
+/* ---- the fundraiser card --------------------------------------------- */
+/* A tinted panel that reads as one object: the logo centred on it as the
+   button, the blurb beneath at the card's full width. */
+.support {
+  background: var(--track);
+  border: 1px solid rgba(44, 26, 14, .35);
+  border-radius: 10px;
+  padding: 16px 18px 4px;
+  margin: 2px 0 12px;
+  text-align: center;
+}
+.support p {
+  /* Full width of the card, unlike .prose's reading measure — this is a short
+     notice inside a box, not an article, and a 62ch column inside a wide card
+     leaves an odd gutter down one side. */
+  max-width: none;
+  margin: 12px 0 12px;
+  text-align: left;
+  color: var(--value);
+}
+
+.linkcard {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 12px 26px;
+  background: #ffffff;
+  border: 1px solid rgba(44, 26, 14, .18); border-radius: 8px;
+  cursor: pointer;
+  transition: transform .08s ease, box-shadow .08s ease;
+}
+.linkcard:hover {
+  border-color: #00b964;
+  box-shadow: 0 2px 10px rgba(0, 185, 100, .35);
+  transform: translateY(-1px);
+}
+.linkcard:active { transform: translateY(0); }
+.linkcard img { max-width: 230px; max-height: 48px; display: block; }
+/* The stand-in when no logo file has been dropped in: the wordmark, set in the
+   brand green. Not a reproduction of the logo — just a legible button. */
+.linkcard .wordmark {
+  font: 700 30px/1 "Segoe UI", system-ui, sans-serif;
+  letter-spacing: -0.02em;
+  color: #00b964;
+}
+
+/* ---- help articles --------------------------------------------------- */
+/* Body text, unlike .note — an article is meant to be read rather than
+   glanced at, so it gets full contrast and a readable measure. */
+.prose { margin: 0 0 10px; max-width: 62ch; }
+.prose strong, .bullets strong { color: var(--value); }
+.bullets {
+  margin: 0 0 10px; padding-left: 20px; max-width: 62ch;
+}
+.bullets li { margin: 0 0 5px; }
+code {
+  font: 12px Consolas, monospace;
+  background: var(--body-soft);
+  border: 1px solid var(--track); border-radius: 3px;
+  padding: 0 4px;
+  user-select: text;
+}
+pre.code {
+  font: 12px/1.5 Consolas, monospace;
+  background: var(--body-soft);
+  border: 1px solid var(--track); border-radius: 3px;
+  padding: 8px 10px; margin: 0 0 10px;
+  /* Long shell one-liners are the reason this exists — they scroll inside the
+     block rather than widening the panel. */
+  overflow-x: auto;
+  white-space: pre;
+  user-select: text;
+}
+
+.btn {
+  display: block; width: 100%;
+  text-align: left;
+  font: 14px "Segoe UI", sans-serif;
+  padding: 6px 10px;
+  margin: 3px 0;
+  border: 1px solid var(--track);
+  border-radius: 3px;
+  background: var(--body-soft);
+  color: var(--text);
+  cursor: pointer;
+}
+.btn:hover { background: var(--track); }
+.btn.on {
+  background: var(--header); border-color: var(--header-hot);
+  color: var(--fg-header);
+}
+.btn.on:hover { background: var(--header-hot); }
+.btn.warn { color: var(--warn); font-weight: 700; }
+.btn.armed {
+  background: var(--warn); border-color: var(--warn); color: var(--fg-header);
+}
+.btn.armed:hover { background: var(--warn); }
+.btn.disabled {
+  color: var(--dim); cursor: default; opacity: .7;
+}
+.btn.disabled:hover { background: var(--body-soft); }
+
+/* A labelled control row. The label column is a fixed width so every control
+   in it starts at the same x — four sliders that should read identically
+   otherwise end up different lengths with their handles in different places. */
+.field {
+  display: flex; align-items: center; gap: 8px;
+  margin: 4px 0;
+}
+.field > label { flex: 0 0 116px; }
+.field > .ctl { flex: 1 1 auto; min-width: 0; display: flex; gap: 8px;
+                align-items: center; }
+
+select {
+  flex: 1 1 auto; min-width: 0;
+  font: 14px "Segoe UI", sans-serif;
+  padding: 4px 8px;
+  border: 1px solid var(--track); border-radius: 3px;
+  background: var(--body-soft); color: var(--text);
+  cursor: pointer;
+}
+
+input[type=range] {
+  flex: 1 1 auto; min-width: 0;
+  accent-color: var(--header);
+  cursor: pointer;
+}
+.slider-val {
+  flex: 0 0 42px; text-align: right;
+  font: italic 11px "Segoe UI", sans-serif; color: var(--dim);
+}
+
+input[type=text], input[type=search] {
+  flex: 1 1 auto; min-width: 0;
+  font: 14px "Segoe UI", sans-serif;
+  padding: 4px 8px;
+  border: 1px solid var(--track); border-radius: 3px;
+  background: var(--body-soft); color: var(--text);
+  user-select: text;
+}
+input:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.searchrow { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; }
+.searchrow .count {
+  font: italic 11px "Segoe UI", sans-serif; color: var(--dim);
+  flex: 0 0 auto;
+}
+
+.chip {
+  font: 700 14px "Segoe UI", sans-serif;
+  padding: 4px 12px; margin-right: 4px;
+  border: 1px solid var(--track); border-radius: 3px;
+  background: var(--body-soft); color: var(--text); cursor: pointer;
+}
+.chip.active {
+  background: var(--header); border-color: var(--header-hot);
+  color: var(--fg-header);
+}
+.chiprow { display: flex; align-items: center; gap: 4px; margin: 4px 0 8px;
+           flex-wrap: wrap; }
+
+/* ---- lists ----------------------------------------------------------- */
+/* Fixed-height viewports, like the Tk panel's canvases — a hub with forty
+   people in it must not decide how tall the page is. */
+.list {
+  border: 1px solid var(--track); border-radius: 3px;
+  background: var(--body-soft);
+  overflow-y: auto;
+  max-height: 320px;
+}
+/* A list that should use whatever height is left — the roster, mainly, where a
+   fixed box left two thirds of a resized panel empty. */
+#page > .list.grow {
+  flex: 1 1 auto;
+  max-height: none;
+  min-height: 140px;
+}
+.list::-webkit-scrollbar { width: 10px; }
+.list::-webkit-scrollbar-thumb { background: var(--track); border-radius: 5px; }
+.row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--body);
+}
+.row:last-child { border-bottom: 0; }
+.row:hover { background: var(--track); }
+.row .name {
+  font: 13px Consolas, monospace;
+  flex: 0 0 auto; min-width: 150px;
+  color: var(--value);
+}
+.row .cls  { font: 13px Consolas, monospace; flex: 0 0 70px; }
+.row .meta { font: italic 11px "Segoe UI", sans-serif; color: var(--dim);
+             flex: 1 1 auto; text-align: right; }
+.row .rowbtn {
+  font: 12px "Segoe UI", sans-serif; padding: 2px 8px;
+  border: 1px solid var(--track); border-radius: 3px;
+  background: var(--body); color: var(--text); cursor: pointer;
+  flex: 0 0 auto;
+}
+.row .rowbtn:hover { background: var(--track); }
+.empty { padding: 10px; font-style: italic; color: var(--dim); }
+
+/* The buff picker's icon cells. One shared sprite sheet — the image comes from
+   a custom property the host sets once (setIconSheet), and each cell only
+   differs by its background-position, set inline per row. */
+.row .icon {
+  width: 24px; height: 24px; flex: 0 0 24px;
+  border-radius: 3px;
+  background-color: var(--track);
+  background-image: var(--icon-sheet);
+  background-repeat: no-repeat;
+  /* The sheet is pixel art scaled down; crisp beats blurred at this size. */
+  image-rendering: -webkit-optimize-contrast;
+}
+
+/* ---- footer ---------------------------------------------------------- */
+#footer {
+  flex: none;
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--track);
+}
+#footer .btn { width: auto; margin: 0; }
+#shard-cap { font: 700 12px "Segoe UI", sans-serif; color: var(--dim); }
+/* Monospaced and at full contrast: a generated id with no words in it to
+   recover from a misread glyph, and Consolas is what tells an l from a 1. */
+#shard {
+  font: 14px Consolas, monospace; color: var(--value); user-select: text;
+}
