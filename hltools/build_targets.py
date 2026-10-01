@@ -73,8 +73,15 @@ SHORTLIST = [
 count_targets = {nm: candidates[nm] for nm in SHORTLIST if nm in candidates}
 
 # Singleton/static accessor functions (name -> findex) for local-player ID.
-SINGLETON_FNS = ["GameApp.getCameraHero", "ui.Console.getMyHero",
-                 "$GameApp.getMyHero", "$GameApp.get"]
+# The hook CALLS these with no arguments, so each must either be static or
+# ignore `this`. ui.Console.getMyHero is an instance method that never reads
+# `this` (it goes through the $PlayerController global) — safe. Not
+# GameApp.getCameraHero: its first instruction reads a field of `this`, and
+# nothing hands us a GameApp (see the camera note below), so calling it
+# dereferenced whatever was left in rcx every time getMyHero came back empty —
+# loading screens, character select, respawn. Checked in the bytecode
+# 2026-10-01; don't add an instance method here without the same check.
+SINGLETON_FNS = ["ui.Console.getMyHero", "$GameApp.getMyHero", "$GameApp.get"]
 funcs = {nm.lstrip("$"): fi for fi, nm in names.items() if nm in SINGLETON_FNS}
 
 # Current-map accessor — called only from the damage hook (game thread) for
