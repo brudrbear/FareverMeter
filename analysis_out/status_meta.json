@@ -14,7 +14,8 @@
 },
 "SparkSurge_Status": {
 "name": "Spark surge",
-"dur": 10,
+"desc": "Stores ::var1%:: damage you deal to each enemy. After ::duration:: all the damage stored is dealt to the enemies.",
+"dur": 20,
 "types": [
 "Buff"
 ],
@@ -24,9 +25,9 @@
 "name": "Spark surge",
 "max": -1,
 "types": [
-"Magic"
+"Debuff"
 ],
-"color": "#3dd4da"
+"color": "#b96a2b"
 },
 "Axe_Boomerang_Skill1_Status": {
 "name": "Bonethrow",
@@ -546,6 +547,9 @@
 ],
 "color": "#cae91d"
 },
+"GA_Craft_Passive_Proc": {
+"desc": "Your next [WeaponSkill] will critically strike and deal ::damage%:: increased damage."
+},
 "GA_Demon_Combo_Status": {
 "name": "Burning Appetite",
 "desc": "Your [Attack]s deals an additional ::dmg:: per stack.",
@@ -638,7 +642,7 @@
 "Book_WaterOrbs_Rise_Charge": {
 "name": "Tide",
 "desc": "Can be consumed by ::ref_name:: to spawn <val>Water Spheres</val>.",
-"max": 8,
+"max": 10,
 "types": [
 "Buff"
 ],
@@ -647,7 +651,7 @@
 "Book_WaterOrbs_Orb_Charge": {
 "name": "Tide",
 "desc": "Can be consumed by ::ref_name:: to spawn <val>Water Spheres</val>.",
-"max": 8,
+"max": 10,
 "types": [
 "Buff"
 ],
@@ -702,7 +706,12 @@
 "color": "#b96a2b"
 },
 "Scepter_Flamie_Skill1_Shield": {
-"dur": 15
+"dur": 15,
+"types": [
+"Buff",
+"Shield"
+],
+"color": "#cae91d"
 },
 "Scepter_Flamie_S2_R2": {
 "max": 5,
@@ -903,7 +912,7 @@
 },
 "Bow_Craft_Passive_Status": {
 "name": "Deadeye Focus",
-"desc": "Damage of your next ::ref_name:: increased by ::var1%::.",
+"desc": "Your next ::ref_name:: is instant.",
 "dur": 15
 },
 "Bow_BigGame_Status": {
@@ -933,7 +942,7 @@
 },
 "Bow_BigGame_Passive_Status": {
 "name": "Thrill of the Hunter",
-"desc": "Your next [Attack] against them consumes the mark and deal ::ref_damage%:: increased damage.",
+"desc": "Your next [ComboAttack] against them consumes the mark and deal ::ref_damage%:: increased damage.",
 "dur": 10
 },
 "Thrown_Seeds_Sprout": {
@@ -1054,7 +1063,7 @@
 "color": "#b96a2b"
 },
 "Staff_Censer_Passive_Buff": {
-"max": 10,
+"max": 7,
 "dur": -1,
 "types": [
 "Buff"
@@ -1065,6 +1074,285 @@
 "name": "Hidden Power",
 "desc": "You can cast [Staff_Censer_Ultimate] instead of your [Signature] skill.",
 "dur": -1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Manfish_Support_Ultimate_Proc": {
+"name": "Chain Heal",
+"desc": "Can cast [Infusion_Manfish_Support_Ultimate].",
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Manfish_Support_Ultimate_Counter": {
+"desc": "After casting ::stacks:: Chain Heal, grants you [Infusion_Manfish_Support_Ultimate].",
+"max": 3,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Manfish_Tank_Status": {
+"name": "Tide",
+"desc": "Heal for ::heal:: every ::time:: for ::dur::",
+"max": 5,
+"dur": 6,
+"types": [
+"HealOverTime",
+"Buff"
+],
+"hot": 1,
+"color": "#6ddc5b"
+},
+"Infusion_Manfish_Tank_Cooldown": {
+"desc": "Cannot receive [Infusion_Manfish_Tank_Shield].",
+"dur": 30,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Infusion_Manfish_Tank_Shield": {
+"name": "Tidal Bulwark",
+"desc": "Absorbs ::shield:: damages.",
+"dur": 10
+},
+"Infusion_Manfish_DPS_Ultimate_Counter": {
+"desc": "After ::stacks:: application of [Infusion_Manfish_DPS_Status], can cast [Infusion_Manfish_DPS_Ultimate].",
+"max": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Manfish_DPS_Status": {
+"name": "Wet",
+"max": 3,
+"dur": 6,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Infusion_Manfish_DPS_Ultimate_Proc": {
+"desc": "Can cast [Infusion_Manfish_DPS_Ultimate].",
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Bee_Tank_Shield": {
+"dur": 6
+},
+"Infusion_Bee_Tank_Status": {
+"max": 10,
+"dur": 6,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Bee_Support_Buff": {
+"dur": 6,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Bee_Support_Counter": {
+"desc": "After picking up ::stacks:: [Infusion_Bee_Support], can cast [Infusion_Bee_Support_Ultimate].",
+"max": 8,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Bee_Support_Ultimate_Proc": {
+"name": "Honey Bomb",
+"desc": "Can cast [Infusion_Bee_Support_Ultimate].",
+"dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Bee_DPS_Dot": {
+"name": "Hive Venom",
+"desc": "Deals ::dmg:: over ::duration::.",
+"max": 5,
+"dur": 6,
+"types": [
+"Debuff",
+"Poison"
+],
+"dot": 1,
+"color": "#b96a2b"
+},
+"Infusion_Kobold_Tank_Status": {
+"name": "Stench",
+"desc": "Nearby enemies deal ::ref_var1%:: less damage per stack.",
+"max": 3,
+"dur": 6,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Kobold_Tank_Debuff": {
+"name": "Stench",
+"desc": "Deals ::var1%:: less damage per stack of Stench.",
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Infusion_Kobold_Tank_Aura": {
+"name": "Pestilential Aura",
+"desc": "Deals ::dmg:: to nearby enemies every ::time:: for ::dur::.",
+"max": 1,
+"dur": 6,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Kobold_Support_Status": {
+"name": "Melted Cheese",
+"desc": "Reduces [Armor] and [MagicArmor] by ::val%:: per stack.",
+"max": 5,
+"dur": 6,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Infusion_Kobold_Support_CheeseDebuff": {
+"name": "Fermented",
+"desc": "Reduces [Armor] and [MagicArmor] by ::val%::.",
+"max": 1,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Infusion_Crimson_Tank_Status": {
+"name": "Honor",
+"desc": "Increases [Vitality] by ::val%:: per stack.",
+"max": 5,
+"dur": 6,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Crimson_Tank_Skill_Proc": {
+"name": "Shield of Honor",
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Crimson_Tank_Skill_Recharging": {
+"name": "Shield of Honor cooldown",
+"desc": "Cannot cast [Infusion_Crimson_Tank_Skill].",
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Infusion_Crimson_Support_Wrath": {
+"name": "Seal of Wrath",
+"desc": "Your attacks deal bonus magic damage.",
+"max": 1,
+"dur": 6,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Crimson_Support_Peace": {
+"name": "Seal of Peace",
+"desc": "Your attacks heal you.",
+"max": 1,
+"dur": 6,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Crimson_DPS_Physical": {
+"max": 1,
+"dur": -1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Crimson_DPS_Magic": {
+"max": 1,
+"dur": -1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Nightling_Tank_Status": {
+"name": "Blood Oath",
+"desc": "[WeaponSkill]s damage increased by ::damage%::.",
+"max": 5,
+"dur": 6,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Nightling_Support_Status": {},
+"Infusion_Nightling_Support_Status_Tracker": {
+"max": 1000000,
+"dur": 60,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Nightling_Support_Shield": {
+"dur": 15
+},
+"Infusion_Nightling_DPS_Status_Crit": {
+"name": "Gift of [CritChance]",
+"desc": "[CritChance] increased by ::val1%::.",
+"dur": 12,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Nightling_DPS_Status_Fervor": {
+"name": "Gift of [Fervor]",
+"desc": "[Fervor] increased by ::val1%::.",
+"dur": 12,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Nightling_DPS_Status_AP": {
+"name": "Gift of [ArmorPenetration]",
+"desc": "[ArmorPenetration] increased by ::val1%::.",
+"dur": 12,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Infusion_Nightling_DPS_Status_MP": {
+"name": "Gift of [SpellPenetration]",
+"desc": "[SpellPenetration] increased by ::val1%::.",
+"dur": 12,
 "types": [
 "Buff"
 ],
@@ -1240,6 +1528,36 @@
 ],
 "color": "#cae91d"
 },
+"Dead": {
+"name": "Dead",
+"max": 1,
+"types": [
+"State"
+],
+"color": "#ffe3b8"
+},
+"Dead_Resurrect": {
+"max": 1,
+"types": [
+"State"
+],
+"color": "#ffe3b8"
+},
+"Dead_Hidden": {
+"max": 1,
+"types": [
+"State"
+],
+"color": "#ffe3b8"
+},
+"Resurrected": {
+"name": "Resurrected",
+"max": -1,
+"types": [
+"State"
+],
+"color": "#ffe3b8"
+},
 "Poisoned": {
 "name": "Poisoned",
 "dur": 1,
@@ -1362,7 +1680,7 @@
 "name": "Spark Hemorrhage",
 "desc": "A [Bleed] dealing damage over ::dur::.",
 "max": -1,
-"dur": 9,
+"dur": 10,
 "types": [
 "Hemorage",
 "Debuff"
@@ -1488,16 +1806,75 @@
 ],
 "color": "#ffe3b8"
 },
+"Rogue_Talent_LethalPoison_Dose_FCA": {
+"name": "Dose : Final Combo",
+"types": [
+"Poison_Dose",
+"Debuff"
+],
+"color": "#1a592a"
+},
+"Rogue_Talent_LethalPoison_Dose_ClassSkill": {
+"name": "Dose : Class Skill",
+"types": [
+"Poison_Dose",
+"Debuff"
+],
+"color": "#1a592a"
+},
+"Rogue_Talent_LethalPoison_Dose_WeaponSkill": {
+"name": "Dose : Weapon Skill",
+"types": [
+"Poison_Dose",
+"Debuff"
+],
+"color": "#1a592a"
+},
+"Rogue_Talent_LethalPoison_Dose_Finisher": {
+"name": "Dose : Signature",
+"types": [
+"Poison_Dose",
+"Debuff"
+],
+"color": "#1a592a"
+},
+"Rogue_Talent_LethalPoison_Dose": {
+"name": "Lethal Dose",
+"desc": "At ::stacks:: stacks, is consumed to apply ::ref_name::.",
+"max": 3,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
 "Rogue_Talent_LethalPoison_Status": {
 "name": "Lethal Poison",
-"desc": "A poison dealing ::dmg#:: over ::duration::, stacking up to ::stacks::.",
-"max": 5,
-"dur": 8,
+"desc": "A poison dealing ::dmg#:: over ::duration::.",
+"max": 1,
+"dur": 20,
 "types": [
 "Debuff",
 "Poison"
 ],
 "dot": 1,
+"color": "#b96a2b"
+},
+"Rogue_Talent_ImprovedMixture_Status": {
+"desc": "Your next [SignatureSkill] will deal ::damage%#:: more damage.",
+"max": 5,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Rogue_Talent_VenomInfusion_Status": {
+"name": "Venom Infusion",
+"desc": "Damage dealt by ::ref_name:: increased by ::damage%#::.",
+"max": 20,
+"dur": 45,
+"types": [
+"Debuff"
+],
 "color": "#b96a2b"
 },
 "Rogue_Talent_AcidicSplatter_Status": {
@@ -1511,23 +1888,46 @@
 "dot": 1,
 "color": "#b96a2b"
 },
+"Rogue_Talent_VirulentMagic_Status": {
+"name": "Virulent Contamination",
+"desc": "A poison dealing ::dmg#:: over ::duration::.",
+"max": -1,
+"dur": 6,
+"types": [
+"Poison",
+"Debuff"
+],
+"dot": 1,
+"color": "#9320ff"
+},
 "Rogue_Talent_Adrenaline_Status": {
 "name": "Adrenaline",
-"desc": "[MoveSpeedFactor] increased by ::val1%::.",
 "types": [
 "Buff"
 ],
 "color": "#cae91d"
 },
-"Rogue_Talent_AtrophicPoison_Status": {
-"name": "Atrophic Poison",
-"desc": "Inflicts ::ref_dmg:: reduced damage."
+"Rogue_Talent_LeechingPoison_Status": {
+"name": "Recovery Toxins",
+"desc": "Heal ::heal:: over ::duration::.",
+"max": 1,
+"dur": 6,
+"types": [
+"Buff",
+"HealOverTime"
+],
+"hot": 1,
+"color": "#cae91d"
 },
-"Rogue_Talent_CripplingPoison_Tracker": {
+"Rogue_Talent_CripplingPoison_Status": {
 "types": [
 "Debuff"
 ],
 "color": "#b96a2b"
+},
+"Rogue_Talent_AtrophicPoison_Status": {
+"name": "Atrophic Poison",
+"desc": "Inflicts ::ref_dmg:: reduced damage."
 },
 "Rogue_Talent_CheatDeath_Status": {
 "name": "Cheat Death",
@@ -1942,7 +2342,7 @@
 },
 "Wolf_Skill1_Status": {
 "name": "Destabilized",
-"dur": 15,
+"dur": 10,
 "types": [
 "Debuff"
 ],
@@ -1954,6 +2354,43 @@
 "Shield"
 ],
 "color": "#cae91d"
+},
+"ManfishBoss_Bubble_Roam_Status": {
+"name": "Water Scar",
+"desc": "Take ::var1%#:: more damage from [Nepsilon].",
+"max": 15,
+"dur": 60,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"ManfishBoss_Bubble_Roam_Status_Slow": {
+"dur": 10,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
+"Gastbee_Heroic_Swarm_Status": {
+"name": "Biting Swarm",
+"max": 10000,
+"dur": 60,
+"types": [
+"Debuff",
+"Poison"
+],
+"dot": 1,
+"color": "#b96a2b"
+},
+"R1CrabBoss_Heroic_Bubble_Status": {
+"name": "Bubble Shock",
+"desc": "Take more damages from bubbles.",
+"dur": 10,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
 },
 "R1CrabBoss_NayasFuryMoveStatus": {
 "types": [
@@ -1967,6 +2404,26 @@
 "Debuff"
 ],
 "color": "#b96a2b"
+},
+"Ratsar_Heroic_Attack_Bleed": {
+"max": 10,
+"dur": 6,
+"types": [
+"Bleed",
+"Debuff"
+],
+"dot": 1,
+"color": "#d41616"
+},
+"Ratsar_Heroic_Burn": {
+"max": 1000,
+"dur": 9,
+"types": [
+"Burn",
+"Debuff"
+],
+"dot": 1,
+"color": "#ff9920"
 },
 "Ratsar_KingRage": {
 "name": "King's Rage",
@@ -1985,7 +2442,7 @@
 },
 "MChuck_SprayedFondueStatus": {
 "name": "Hot Cheese",
-"dur": 6,
+"dur": 1,
 "types": [
 "Debuff",
 "Burn",
@@ -1993,6 +2450,28 @@
 ],
 "dot": 1,
 "cc": 1,
+"color": "#b96a2b"
+},
+"Queenslayer_ChaosSlow": {
+"name": "Chaos Slow",
+"desc": "Slowed by Chaos.",
+"dur": 6,
+"types": [
+"Slow",
+"Debuff"
+],
+"cc": 1,
+"color": "#7e8131"
+},
+"Queenslayer_ChaosMark": {
+"name": "Chaos Mark",
+"desc": "Marked by Chaos. Reapplying the mark detonates it, dealing ::dmg:: and applying ::ref_name::.",
+"max": 2,
+"dur": 10,
+"types": [
+"Debuff",
+"Magic"
+],
 "color": "#b96a2b"
 },
 "Mokshi_ChrysalisStatus": {
@@ -2005,6 +2484,14 @@
 "cc": 1,
 "color": "#cae91d"
 },
+"Spongeblob_Suffocation": {
+"name": "Suffocation",
+"max": 10,
+"types": [
+"Debuff"
+],
+"color": "#b96a2b"
+},
 "Golcano_ShieldApply_Status": {
 "name": "Melting",
 "desc": "Take ::var1%#:: more damage from [Golcano_ShieldApply].",
@@ -2016,6 +2503,24 @@
 "color": "#b96a2b"
 },
 "Golcano_Shield": {
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"RobinHoof_Heroic_Caltrops_Slow": {
+"dur": 6,
+"types": [
+"Debuff",
+"Slow",
+"Bleed"
+],
+"dot": 1,
+"cc": 1,
+"color": "#b96a2b"
+},
+"RobinHoof_Heroic_Dog_Buff": {
+"dur": 30,
 "types": [
 "Buff"
 ],
@@ -2050,6 +2555,47 @@
 "Debuff"
 ],
 "color": "#b96a2b"
+},
+"Phrixes_NC_Bonus": {
+"name": "Demonic Power",
+"max": -1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Phrixes_NC_Bonus_Scale": {
+"max": -1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Phrixes_H_NG_Status": {
+"name": "Rift bound",
+"desc": "A visitor from another realm has reached into ours. You can't seem to affect it. The nearby Chaos Gates seem to bring him in.",
+"types": [
+"State",
+"Root"
+],
+"cc": 1,
+"color": "#ffe3b8"
+},
+"Phrixes_H_NGGate_Visual_Status": {
+"max": 1,
+"types": [
+"State"
+],
+"color": "#ffe3b8"
+},
+"Pilgrims_FlaskSpeed_Status": {
+"name": "Pilgrim's Stride",
+"desc": "Movement speed increased by ::val1%::.",
+"dur": 5,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
 },
 "ItemStatus": {
 "types": [
@@ -2147,12 +2693,14 @@
 "color": "#cae91d"
 },
 "Whetstone_Status": {
+"desc": "::sourceItemDesc::",
 "types": [
 "Buff"
 ],
 "color": "#cae91d"
 },
 "Weighstone_Status": {
+"desc": "::sourceItemDesc::",
 "types": [
 "Buff"
 ],
@@ -2287,6 +2835,51 @@
 "dot": 1,
 "color": "#b96a2b"
 },
+"Luck_LegendaryWeapon_Status": {
+"name": "Legendary Insight",
+"desc": "Increases the chance to find legendary weapons.",
+"max": 1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Luck_Mount_Status": {
+"name": "Beastcaller",
+"desc": "Increases the chance to find mounts.",
+"max": 1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Luck_Glider_Status": {
+"name": "Windborn",
+"desc": "Increases the chance to find gliders.",
+"max": 1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Luck_RareMaterial_Status": {
+"name": "Prospector's Eye",
+"desc": "Increases the chance to find rare crafting materials.",
+"max": 1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"Luck_PrismaticGear_Status": {
+"name": "Prismatic Fortune",
+"desc": "Increases the chance to find prismatic gear.",
+"max": 1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
 "OreAffix_Fire": {
 "name": "Pyrh Blessed",
 "types": [
@@ -2361,6 +2954,26 @@
 ],
 "color": "#cae91d"
 },
+"RiftstalkersReputation_RiftKillBuff": {
+"name": "Chaos Predator",
+"desc": "[MoveSpeedFactor] increased by 30%.",
+"max": 1,
+"dur": 5,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"RiftstalkersReputation_SoulwellVitality": {
+"name": "Chaos Vitality",
+"desc": "[Vitality] increased by 1% per offering.",
+"max": 1,
+"dur": -1,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
 "Activity_BallonBouncing_StatusCounter": {
 "max": 999,
 "types": [
@@ -2389,6 +3002,12 @@
 "ConsumableStatus": {
 "max": 99,
 "dur": 10,
+"types": [
+"Buff"
+],
+"color": "#cae91d"
+},
+"SpeedBoost": {
 "types": [
 "Buff"
 ],
@@ -2479,9 +3098,14 @@
 "name": "Hemorage",
 "color": "#9e0000",
 "DoT": 1
+},
+"Poison_Dose": {
+"name": "Poison_Dose",
+"color": "#1a592a"
 }
 },
 "items": {
+"SparkCube": "Spark Cube",
 "SmallAlchemistCauldron": "Minor Alchemist Cauldron",
 "MinorShieldPotion": "Minor Shield Potion",
 "MinorVelocityPotion": "Minor Velocity Potion",

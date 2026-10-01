@@ -109,11 +109,30 @@ def main():
             f"st.Inventory.content@{inv['content'][0]} — the containers no "
             "longer share a layout; fix the inventory sweep before shipping.")
 
-    # skill display-name chain: BaseSkill.inf (virtual #963) -> texts (#973) -> name
-    row = code.types[963]
+    # skill display-name chain: BaseSkill.inf (a virtual) -> texts (a virtual)
+    # -> name. Resolved through the field, not by type index: the 2026-09
+    # patch moved the row virtual from #963 to #1112 and the old hard-coded
+    # index landed on an unrelated type, killing the whole regenerate.
+    inf_ti = next((f.type_index for t in code._super_chain(byname["st.skill.BaseSkill"].index)
+                   for f in t.fields if f.name == "inf"), None)
+    if inf_ti is None or code.types[inf_ti].kind != HVIRTUAL:
+        raise SystemExit("[!] st.skill.BaseSkill.inf is missing or no longer a "
+                         "virtual — the skill-name chain needs re-measuring.")
+    row = code.types[inf_ti]
     texts_ti = next(f.type_index for f in row.vfields if f.name == "texts")
     texts = code.types[texts_ti]
     vidx = lambda vt, nm: next(i for i, f in enumerate(vt.vfields) if f.name == nm)
+
+    def skill_of(o, cls):
+        """The BaseSkill pointer on a DamageResult / HitData. The 2026-09 patch
+        renamed it `baseSkill` -> `skill` and hoisted it into a new base class,
+        st.skill.BaseSkillAccess; the offset (8) did not move. The JSON key
+        stays `baseSkill` so the hook reads it unchanged."""
+        for nm in ("skill", "baseSkill"):
+            if nm in o:
+                return o[nm][0]
+        raise SystemExit(f"[!] {cls} has neither `skill` nor `baseSkill` — "
+                         "the skill pointer moved again; re-measure it.")
 
     meta = {
         "String": {"bytes": string["bytes"][0], "length": string["length"][0]},
@@ -125,8 +144,8 @@ def main():
         # needing a probe session timed to an immune phase.
         "DamageResult": {k: dr[k][0] for k in
             ["_amount", "affinity", "_critical", "_kill", "_hitCount",
-             "_block", "blocker", "effect", "target", "serverSource", "ctx",
-             "baseSkill"]},
+             "_block", "blocker", "effect", "target", "serverSource", "ctx"]}
+            | {"baseSkill": skill_of(dr, "st.skill.DamageResult")},
         # dynVal1-3 are how MOST player heal skills carry their amount: the
         # cdb's skill@steps@effects rows name `dynVal` rather than a baseVal or
         # a scaling ratio, and these three f64s are hxbit-replicated, so the
@@ -139,7 +158,7 @@ def main():
                       "dynVal1": base["dynVal1"][0],
                       "dynVal2": base["dynVal2"][0],
                       "dynVal3": base["dynVal3"][0]},
-        "HitData": {"baseSkill": hd["baseSkill"][0],
+        "HitData": {"baseSkill": skill_of(hd, "st.skill.HitData"),
                     "step": hd["step"][0]},
         "SkillStep": {"index": step["index"][0]},
         # The rest of the heal skills scale off one of the caster's primary

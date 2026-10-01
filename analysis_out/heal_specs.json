@@ -30,7 +30,11 @@
 {
 "scale": [
 [
-0.1,
+0.075,
+"Strength"
+],
+[
+0.075,
 "Faith"
 ]
 ]
@@ -40,7 +44,11 @@
 {
 "scale": [
 [
-0.1,
+0.075,
+"Strength"
+],
+[
+0.075,
 "Faith"
 ]
 ]
@@ -52,20 +60,22 @@
 {
 "scale": [
 [
-0.15,
+0.075,
+"Strength"
+],
+[
+0.075,
 "Faith"
 ],
 [
-0.1725,
+0.08625,
+"Strength"
+],
+[
+0.08625,
 "Faith"
 ]
 ]
-}
-],
-"6": [
-{
-"base": 1,
-"dyn": 1
 }
 ]
 },
@@ -112,7 +122,11 @@
 {
 "scale": [
 [
-0.4,
+0.2,
+"Strength"
+],
+[
+0.2,
 "Faith"
 ]
 ]
@@ -124,7 +138,11 @@
 {
 "scale": [
 [
-0.3,
+0.2,
+"Intellect"
+],
+[
+0.2,
 "Faith"
 ]
 ]
@@ -148,7 +166,7 @@
 {
 "scale": [
 [
-0.1,
+0.15,
 "Faith"
 ]
 ]
@@ -176,12 +194,20 @@
 {
 "scale": [
 [
-0.7,
+0.35,
 "Intellect"
 ],
 [
-0.875,
+0.35,
+"Faith"
+],
+[
+0.4375,
 "Intellect"
+],
+[
+0.4375,
+"Faith"
 ]
 ]
 }
@@ -239,6 +265,111 @@
 }
 ]
 },
+"Infusion_Manfish_Support": {
+"0": [
+{
+"scale": [
+[
+0.5,
+"AllAttributes"
+]
+]
+}
+]
+},
+"Infusion_Manfish_Support_Ultimate": {
+"0": [
+{
+"scale": [
+[
+0.5,
+"AllAttributes"
+]
+]
+}
+]
+},
+"Infusion_Manfish_Tank_Status": {
+"0": [
+{
+"scale": [
+[
+0.01,
+"MaxHealth"
+]
+]
+}
+]
+},
+"Infusion_Manfish_Tank_Shield": {
+"3": [
+{
+"dyn": 1
+}
+]
+},
+"Infusion_Bee_Support_Buff": {
+"0": [
+{
+"scale": [
+[
+0.05,
+"Vitality"
+]
+]
+}
+]
+},
+"Infusion_Crimson_Support": {
+"1": [
+{
+"scale": [
+[
+0.2,
+"AllAttributes"
+]
+]
+}
+],
+"3": [
+{
+"scale": [
+[
+0.5,
+"AllAttributes"
+]
+]
+}
+]
+},
+"Infusion_Crimson_DPS": {
+"1": [
+{
+"scale": [
+[
+0.5,
+"Intellect"
+],
+[
+0.5,
+"Faith"
+]
+]
+}
+]
+},
+"Infusion_Nightling_DPS": {
+"0": [
+{
+"scale": [
+[
+0.5,
+"AllAttributes"
+]
+]
+}
+]
+},
 "Warrior_IgnorePain": {
 "3": [
 {
@@ -260,17 +391,19 @@
 }
 ]
 },
-"Rogue_Talent_LeechingPoison": {
+"Rogue_Talent_LeechingPoison_Status": {
 "0": [
 {
-"dyn": 1
-}
+"scale": [
+[
+0.2,
+"Vitality"
+],
+[
+0.4,
+"Vitality"
 ]
-},
-"Rogue_Talent_RegeneratingMiasmas": {
-"0": [
-{
-"dyn": 1
+]
 }
 ]
 },
@@ -387,6 +520,18 @@
 }
 ]
 },
+"ManfishBoss_Totem_HealBeam": {
+"1": [
+{
+"scale": [
+[
+0.6,
+"FoePower"
+]
+]
+}
+]
+},
 "MChuck_IsolatedHeal": {
 "0": [
 {
@@ -486,6 +631,18 @@
 ]
 },
 "OreAffix_Nature_Status": {
+"0": [
+{
+"scale": [
+[
+0.1,
+"MaxHealth"
+]
+]
+}
+]
+},
+"RiftstalkersReputation_Skill": {
 "0": [
 {
 "scale": [

@@ -42,29 +42,29 @@
     "dexterity": 64
   },
   "Hero": {
-    "name": 1280,
-    "player": 1216,
-    "isInCombat": 688,
+    "name": 1312,
+    "player": 1248,
+    "isInCombat": 728,
     "layer": 112,
-    "loadout": 1232,
-    "weaponInHand": 1344,
-    "kind": 600,
-    "level": 992
+    "loadout": 1264,
+    "weaponInHand": 1376,
+    "kind": 640,
+    "level": 1032
   },
   "Loadout": {
-    "inventory": 136,
-    "equipment": 120
+    "inventory": 144,
+    "equipment": 128
   },
   "Inventory": {
-    "content": 120
+    "content": 128
   },
   "Item": {
-    "kind": 112,
+    "kind": 120,
     "uid": 32
   },
   "Weapon": {
-    "rarity": 160,
-    "level": 144
+    "rarity": 184,
+    "level": 152
   },
   "GameLayer": {
     "isRift": 248,
@@ -95,44 +95,44 @@
     "removed": 8
   },
   "Interactible": {
-    "enabled": 600,
-    "isOffScreen": 616
+    "enabled": 640,
+    "isOffScreen": 656
   },
   "Activity": {
-    "kind": 472
+    "kind": 480
   },
   "Element": {
-    "kind": 624,
-    "stateId": 664,
-    "currentVisualState": 680
+    "kind": 664,
+    "stateId": 704,
+    "currentVisualState": 720
   },
   "Gatherable": {
-    "hitPoints": 760,
-    "gatherInf": 736
+    "hitPoints": 800,
+    "gatherInf": 776
   },
   "Camera": {
-    "direction": 208,
-    "curDirection": 256,
-    "distance": 192
+    "direction": 200,
+    "curDirection": 248,
+    "distance": 184
   },
   "Unit": {
-    "kind": 600,
-    "inf": 640,
-    "attr": 984,
-    "statuses": 496
+    "kind": 640,
+    "inf": 680,
+    "attr": 1024,
+    "statuses": 504
   },
   "Status": {
     "kind": 184,
-    "stacks": 456,
+    "stacks": 464,
     "startTime": 192,
     "duration": 336,
-    "refreshDuration": 448,
+    "refreshDuration": 456,
     "originItem": 256,
     "removed": 8
   },
   "Foe": {
-    "summonOwner": 1232,
-    "persistantSummon": 1248
+    "summonOwner": 1264,
+    "persistantSummon": 1280
   },
   "ArrayObj": {
     "length": 8,
@@ -154,19 +154,19 @@
   },
   "Player": {
     "name": 192,
-    "group": 256,
-    "isMe": 312,
-    "lobbyId": 264,
+    "group": 280,
+    "isMe": 344,
+    "lobbyId": 296,
     "uid": 184,
-    "hero": 304,
+    "hero": 336,
     "progress": 240,
     "accountProgress": 224
   },
   "AccountProgress": {
-    "collection": 168
+    "collection": 192
   },
   "Collection": {
-    "pets": 160
+    "pets": 168
   },
   "ArrayProxyData": {
     "array": 40
@@ -179,8 +179,8 @@
     "players": 184
   },
   "Progress": {
-    "unitsProgress": 160,
-    "itemProgress": 168
+    "unitsProgress": 176,
+    "itemProgress": 184
   },
   "MapData": {
     "map": 40,
@@ -194,11 +194,11 @@
     "rank": 24
   },
   "BossesInfo": {
-    "bossInfos": 1096
+    "bossInfos": 1168
   },
   "BossInfo": {
-    "active": 1096,
-    "unit": 1120
+    "active": 1168,
+    "unit": 1192
   },
   "foeClasses": [
     "ent.Foe",
