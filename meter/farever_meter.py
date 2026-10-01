@@ -17246,6 +17246,11 @@ def _run(tray, session, ui_state, world, statuses, rift_rec, heal_sizer):
             # handler catches that one. This is the case it can't see: nobody
             # died, the boss just de-aggroed and went home.)
             if boss_fight_on[0]:
+                # Fetched here, not inherited: other branches assign `ov`,
+                # which makes it local to on_message, so reading it unassigned
+                # raised UnboundLocalError on every give-up and the reset
+                # below never ran (every give-up in the 2026-10-01 log).
+                ov = _OVERLAY["ref"]
                 boss_fight_on[0] = False
                 boss_clock["t0"] = None    # an abandoned fight is not a time
                 print("[meter] boss fight ended without a kill (no boss bar "
