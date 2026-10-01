@@ -5873,6 +5873,10 @@ class Overlay:
         # from these, so loading afterwards would leave the menu disagreeing
         # with the state it is supposed to be showing.
         self._pending_scales = None
+        # Set when the hook says you are now a different character, cleared the
+        # next time the overlay is on screen — see _reassert_scales for what
+        # goes wrong in between.
+        self._rescale_pending = False
         self._load_settings()
         # The setting decides whether the primary store has anywhere to put a
         # finished encounter. Applied here rather than checked inside the hook
@@ -11648,6 +11652,11 @@ class Overlay:
         self._trays = saved
         self._trays_by_char[name] = saved
         self._tray_edit = 0
+        # Not on the first identification: that lands seconds after startup,
+        # where the scales have only just been applied to freshly built
+        # windows and there is nothing yet for them to have drifted from.
+        if previous is not None:
+            self._rescale_pending = True
         self._apply_tray_positions()
         self._save_settings()
         self._sync_tray_controls()
@@ -13253,11 +13262,17 @@ class Overlay:
         self._enqueue(lambda: self._set_group_scale(
             group, self._scale_vars[group].get() / 100))()
 
-    def _set_group_scale(self, group, factor):
+    def _set_group_scale(self, group, factor, force=False):
         """Resize one window group's fonts, which resizes the windows that pack
         to them. The two canvas-drawn banners measure their text at draw time,
-        so they're re-drawn rather than left at the old size."""
-        if abs(factor - self._scales.get(group, 1.0)) < 0.001:
+        so they're re-drawn rather than left at the old size.
+
+        `force` re-applies a scale the group is already at. Nothing about the
+        setting changes — which is why a forced pass neither saves nor logs —
+        but every font, floor and wrap width is recomputed and every window
+        relaid out. That is the whole of _reassert_scales' work.
+        """
+        if not force and abs(factor - self._scales.get(group, 1.0)) < 0.001:
             return
         # The compass is anchored by its CENTRE, so growing it opens out to
         # both sides instead of only to the right. It is a strip you line up
@@ -13282,7 +13297,8 @@ class Overlay:
             # the warning wrap) are still expressed against it.
             self._ui_scale = factor
         self._parse_text = None          # force the parse banner to re-measure
-        self._save_settings()
+        if not force:
+            self._save_settings()
         self._draw_hint()
         # Pixel floors and wrap widths don't come along for free — and each
         # belongs to ITS OWN group's scale, not to whichever slider happened to
@@ -13323,7 +13339,45 @@ class Overlay:
                 self._sync_badgewin()
             except tk.TclError:
                 pass
-        print(f"[meter] {group} scale {factor:.2f}x", file=sys.stderr)
+        if not force:
+            print(f"[meter] {group} scale {factor:.2f}x", file=sys.stderr)
+
+    def _reassert_scales(self):
+        """Put every window back at the size its slider already says it is.
+
+        Switching character was leaving the meter and the breakdown at their
+        UNSCALED size while the setting behind them still read whatever the
+        player had chosen — so the panel and the windows disagreed, and the
+        only way out was to nudge the slider and put it straight back. That
+        nudge is two _set_group_scale calls; this is the second one, made
+        automatically at the moment the size goes wrong instead.
+
+        The "menu" group is deliberately absent: its scale is the settings
+        panel's zoom, the panel is a WebView2 window in another process, and
+        nothing a character switch does can disturb it.
+
+        Sizes are measured either side and reported only when they MOVED, so a
+        log that mentions this at all is a log that caught the fault happening
+        — and a quiet one is evidence it didn't.
+        """
+        def size(w):
+            try:
+                return (w.winfo_width(), w.winfo_height())
+            except tk.TclError:
+                return (0, 0)
+
+        was = [size(self.root), size(self.detail)]
+        for group, _label in SCALE_GROUPS:
+            if group == "menu":
+                continue
+            self._set_group_scale(group, self._scales.get(group, 1.0),
+                                  force=True)
+        now = [size(self.root), size(self.detail)]
+        if now != was:
+            print("[meter] window sizes had drifted from their scale settings "
+                  f"— meter {was[0][0]}x{was[0][1]} -> {now[0][0]}x{now[0][1]}, "
+                  f"breakdown {was[1][0]}x{was[1][1]} -> "
+                  f"{now[1][0]}x{now[1][1]}", file=sys.stderr)
 
     def _on_theme_pick(self, value):
         # Queued like every other menu action: it mutates state the refresh
@@ -13852,6 +13906,20 @@ class Overlay:
                                       self._report_open and not blanket)
         if changed:
             self._start_fade()
+        # A character switch takes the whole overlay off screen (the title
+        # screen is one of the game's own windows) and brings it back, and the
+        # meter and breakdown were coming back the wrong size. Re-applied HERE
+        # rather than in set_character because the hook names the new character
+        # while the loading screen is still up: this is the first pass after
+        # that where the windows are on screen to be measured, whichever order
+        # the two arrive in. after_idle so a relayout of every window doesn't
+        # run inside the visibility pass, which is on the input pump.
+        # `blanket` rather than _shown["meter"]: someone who keeps the meter
+        # hidden still has a breakdown, and waiting on a window they have
+        # switched off would leave it wrong for the rest of the session.
+        if self._rescale_pending and not blanket:
+            self._rescale_pending = False
+            self.root.after_idle(self._reassert_scales)
 
     def _pick_theme(self):
         """The mode names two things: which base to wear, and whether a rift
