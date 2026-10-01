@@ -16074,6 +16074,37 @@ def _data_is_current():
     return True
 
 
+def _build_stamp(hlboot):
+    """What .data_stamp.json records for a successful regenerate against
+    `hlboot` — and therefore what it must say for the data to be trusted."""
+    st = Path(hlboot).stat()
+    return {"src": str(hlboot), "mtime": st.st_mtime, "size": st.st_size}
+
+
+def data_matches_build(hlboot):
+    """Were the data files generated for THIS hlboot.dat?
+
+    The stamp is written only after BOTH generators succeed, so a match means
+    the offsets were produced for exactly the build that's running. Anything
+    else means they belong to some other build — which is what the 2026-09-30
+    patch produced: build_targets succeeded, emit_offsets died, and the meter
+    attached with new function indices and the previous build's field offsets,
+    reading the wrong memory inside a live game. Used to refuse that."""
+    try:
+        return json.loads(DATA_STAMP.read_text()) == _build_stamp(hlboot)
+    except Exception:
+        return False
+
+
+STALE_DATA_TEXT = (
+    "Farever has been updated, and this version of the meter couldn't adapt "
+    "to the new game build.\n\n"
+    "To keep your game safe, the meter won't connect to it with data from the "
+    "old build. Update the meter — it offers updates itself when a new one is "
+    "out — then start it again.\n\n"
+    "The details are in:\n{log}")
+
+
 def regenerate_data(hlboot=None, force=False):
     """Re-run the target/offset generators against the given hlboot.dat (or the
     tools' own auto-detect when None). Self-heals the shipped JSONs after a
@@ -16089,8 +16120,7 @@ def regenerate_data(hlboot=None, force=False):
         return False
     stamp = None
     if hlboot is not None:
-        st = Path(hlboot).stat()
-        stamp = {"src": str(hlboot), "mtime": st.st_mtime, "size": st.st_size}
+        stamp = _build_stamp(hlboot)
         if not force:
             try:
                 # Say WHY when the skip doesn't happen. Regenerating costs two
@@ -16976,22 +17006,43 @@ def _run(tray, session, ui_state, world, statuses, rift_rec, heal_sizer):
     # directory, so a version/install mismatch — the usual cause of a slow or
     # failed table search — is impossible. Skipped when the file is unchanged.
     hlboot = locate_hlboot(pid)
+    data_ok = True
     if hlboot is None:
         print("[meter] using the shipped data files as-is (couldn't locate "
               "hlboot.dat to verify them).", file=sys.stderr)
     else:
         print(f"[*] game data: {hlboot}", file=sys.stderr)
-        regenerate_data(hlboot)   # best-effort; falls back to existing files
+        # Fails CLOSED. This used to be best-effort with a fallback to the
+        # existing files, which after a patch are the previous build's — see
+        # data_matches_build. A regenerate that fails is fine only when the
+        # files on disk were already made for this exact build.
+        if not regenerate_data(hlboot) and not data_matches_build(hlboot):
+            data_ok = False
 
-    print(f"[*] attaching to {TARGET_PROCESS} (pid {pid}) ...", file=sys.stderr)
-    try:
-        fsession = device.attach(pid)
-    except frida.ProcessNotFoundError:
-        sys.exit(f"[!] {TARGET_PROCESS} (pid {pid}) exited before attach. "
-                 "Relaunch the game, then the meter.")
-    except frida.PermissionDeniedError:
-        sys.exit("[!] permission denied attaching — if Farever runs as "
-                 "administrator, run the meter from an elevated terminal too.")
+    fsession = None
+    if data_ok:
+        print(f"[*] attaching to {TARGET_PROCESS} (pid {pid}) ...",
+              file=sys.stderr)
+        try:
+            fsession = device.attach(pid)
+        except frida.ProcessNotFoundError:
+            sys.exit(f"[!] {TARGET_PROCESS} (pid {pid}) exited before attach. "
+                     "Relaunch the game, then the meter.")
+        except frida.PermissionDeniedError:
+            sys.exit("[!] permission denied attaching — if Farever runs as "
+                     "administrator, run the meter from an elevated terminal "
+                     "too.")
+    else:
+        # No session at all, not a hook that's merely quiet: the safe amount
+        # of the meter inside a game it doesn't understand is none of it. The
+        # overlay still comes up below, because the self-updater lives there
+        # and an update is exactly what fixes this.
+        print("[meter] NOT attaching: the data files don't match this game "
+              "build and regenerating them failed. Update the meter.",
+              file=sys.stderr)
+        if not HAS_CONSOLE:
+            message_box(STALE_DATA_TEXT.format(log=LOG_FILE),
+                        "Farever+ Meter — game updated", 0x30)
 
     # The live frida link. It used to be two locals that lived as long as the
     # meter did, which is why closing the game left the meter attached to
@@ -17022,7 +17073,8 @@ def _run(tray, session, ui_state, world, statuses, rift_rec, heal_sizer):
             ov.on_game_exit(reason)
             if reason != "application-requested":
                 start_reattach_watch()
-    fsession.on("detached", lambda *a, fs=fsession: on_detached(fs, *a))
+    if fsession is not None:
+        fsession.on("detached", lambda *a, fs=fsession: on_detached(fs, *a))
 
     ready = {"ok": None}
     ready_evt = threading.Event()
@@ -17607,9 +17659,19 @@ def _run(tray, session, ui_state, world, statuses, rift_rec, heal_sizer):
         hb = locate_hlboot(new_pid)
         if hb is not None:
             # Steam can patch the game while it's closed — the exact situation
-            # that broke the meter on 2026-09-30 — so check the data again.
+            # that broke the meter on 2026-09-30 — so check the data again,
+            # and refuse the same way startup does. Returning False puts the
+            # pid on the never-retry list, so the regenerate isn't re-run
+            # every two seconds against a build it already failed on.
             print(f"[*] game data: {hb}", file=sys.stderr)
-            regenerate_data(hb)
+            if not regenerate_data(hb) and not data_matches_build(hb):
+                print(f"[meter] NOT reattaching to pid {new_pid}: the data "
+                      "files don't match this game build and regenerating "
+                      "them failed. Update the meter.", file=sys.stderr)
+                if not HAS_CONSOLE:
+                    message_box(STALE_DATA_TEXT.format(log=LOG_FILE),
+                                "Farever+ Meter — game updated", 0x30)
+                return False
         print(f"[*] reattaching to {TARGET_PROCESS} (pid {new_pid}) ...",
               file=sys.stderr)
         try:
@@ -17652,7 +17714,7 @@ def _run(tray, session, ui_state, world, statuses, rift_rec, heal_sizer):
             ov.on_game_return(new_pid)
         return True
 
-    script = bring_up_hook(fsession, hlboot)
+    script = bring_up_hook(fsession, hlboot) if fsession is not None else None
     with link_lock:
         link["script"] = script
 
@@ -17664,13 +17726,14 @@ def _run(tray, session, ui_state, world, statuses, rift_rec, heal_sizer):
         try:
             if script is not None:
                 script.unload()
-            fsession.detach()
+            if fsession is not None:
+                fsession.detach()
         except Exception:
             pass
         release_instance_lock()
         return
 
-    if script is None or ready["ok"] is not True:
+    if data_ok and (script is None or ready["ok"] is not True):
         print("[meter] could not initialise the hook after 3 attempts.\n"
               "        Fully close Farever and reopen it, then relaunch the meter.\n"
               "        If it keeps happening, send the full log above to whoever\n"
