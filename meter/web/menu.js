@@ -14,6 +14,8 @@
  *   {k:"chips",   id, v, o:[{v,t}]}               a row of small toggles
  *   {k:"search",  id, v, count?, ph?}             search box + result count
  *   {k:"list",    id, h?, rows:[<row>]}           scrolling viewport
+ *   {k:"code",    t}                              preformatted block; the one
+ *                                                 node whose columns line up
  *   {k:"gap"}                                     vertical breathing room
  * controls:
  *   {k:"select",  id, v, o:[...]}

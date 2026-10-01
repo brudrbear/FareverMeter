@@ -7060,23 +7060,28 @@ class Overlay:
         ]
         if not self._history_on:
             return out
-        # One dataset opened: its breakdown as text, and the way back. Text
-        # rather than a rebuilt table — the point of the page is the per-skill
-        # detail the card has no room for, and it is the same text the Copy
-        # button puts on the clipboard, so the two cannot disagree.
+        # One dataset opened: the whole breakdown, and the way back.
+        #
+        # This used to show _history_text — the CLIPBOARD format — on the
+        # reasoning that one text could not disagree with itself. It could not,
+        # and it was also the wrong text: that one is trimmed for pasting into
+        # chat (ten players, five skills each, no healing, no crit, no hits),
+        # so the page lost every column the old menu drew and the tab stopped
+        # being worth opening. The page shows everything; Copy still puts the
+        # short version on the clipboard, which is what it is for.
         if self._history_detail is not None:
             entry = self._history_detail
-            body = ""
             try:
-                body = self._history_text(entry)
+                body = self._history_detail_nodes(entry)
             except Exception as e:
-                body = f"That dataset couldn't be read: {e!r}"
+                body = [{"k": "code", "t": f"That dataset couldn't be read: {e!r}"}]
             return [
                 {"k": "button", "id": "close_dataset",
                  "t": "‹  Back to datasets"},
                 {"k": "section", "t": entry.get("name") or "Encounter"},
-                {"k": "button", "id": "copy_history", "t": "Copy to clipboard"},
-                {"k": "code", "t": body},
+                {"k": "button", "id": "copy_history",
+                 "t": "Copy a summary to clipboard"},
+                *body,
                 {"k": "note", "t": self._history_note_text or ""},
             ]
         rows = []
@@ -10631,8 +10636,109 @@ class Overlay:
         self._resize_scroll(self.history_detail_canvas,
                             self.history_detail_list)
 
+    def _history_detail_nodes(self, entry):
+        """The opened dataset as panel nodes — everything the retired Tk page
+        drew, which is the whole point of opening a dataset.
+
+        A section and two notes per phase (a rift has two, an encounter one),
+        then the players as ONE monospace block. The tables are `code` rather
+        than list rows because they are columns: a share and a hit count only
+        read down the page if they line up, and a proportional font cannot do
+        that. Everything else — the headings, the totals, the carried note —
+        is a real node, so the page still looks like the rest of the panel.
+        """
+        data = entry.get("data") or {}
+        names = data.get("skill_names") or {}
+        out = []
+        where = (entry.get("zone") or {}).get("label") or ""
+        when = time.strftime("%b %d, %H:%M",
+                             time.localtime(float(entry.get("at") or 0.0)))
+        out.append({"k": "note",
+                    "t": "  ·  ".join(x for x in (when, where) if x)})
+
+        def section_for(label, duration, players, total, heal, targets):
+            out.append({"k": "section", "t": label.upper()})
+            out.append({"k": "note",
+                        "t": f"{self._mmss(duration)}  ·  {int(total):,} dmg"
+                             f"  ·  {int(heal):,} heal"})
+            if targets:
+                top = sorted(targets.items(), key=lambda kv: -kv[1])[:4]
+                out.append({"k": "note", "t": "hit: " + " · ".join(
+                    f"{_boss_label(k)} {int(v):,}" for k, v in top)})
+            if not players:
+                out.append({"k": "note", "t": "nothing was recorded"})
+                return
+            lines = []
+            for p in players:
+                dmg = float(p.get("total") or 0.0)
+                hits = int(p.get("hits") or 0)
+                pct = dmg / total * 100 if total else 0.0
+                crit = (int(p.get("crits") or 0) / hits * 100) if hits else 0.0
+                # Rate first, then the total it came from — the same order the
+                # rift card uses, through the same helper, so a phase too short
+                # to have a rate is silent about it in both places.
+                bits = [b for b in (_rate_text(dmg, duration, "dps"),
+                                    f"{int(dmg):,} dmg") if b]
+                bits += [f"{pct:.0f}%", f"{hits} hits", f"{crit:.0f}% crit"]
+                if (p.get("heal") or 0.0) > 0.5:
+                    bits.append(f"{int(p['heal']):,} heal"
+                                + _overheal_note(p, " ({:.0f}% over)"))
+                if p.get("kills"):
+                    bits.append(f"{p['kills']} kills")
+                if lines:
+                    lines.append("")
+                lines.append(("* " if p.get("is_me") else "  ")
+                             + (p.get("name") or "?"))
+                lines.append("  " + " · ".join(bits))
+                for label_, tot, n, _crits in self._merge_history_skills(
+                        p.get("skills"), names):
+                    share = tot / dmg * 100 if dmg else 0.0
+                    lines.append(f"    {label_[:26]:<26} {int(tot):>10,} "
+                                 f"{share:>5.1f}%  {n:>5} hits")
+                # Healing sits under the damage it was cast alongside, marked
+                # with a "+" rather than a colour — the panel's code block has
+                # one ink, and the old menu's green is what said "this is the
+                # other table" there.
+                for label_, tot, n, _crits in self._merge_history_skills(
+                        p.get("heals"), names):
+                    lines.append(f"    {('+ ' + label_)[:26]:<26} "
+                                 f"{int(tot):>10,} {'':>6}  {n:>5} casts")
+            out.append({"k": "code", "t": "\n".join(lines)})
+
+        if isinstance(data.get("phases"), list):
+            for ph in data["phases"]:
+                section_for(ph.get("label") or "Phase",
+                            float(ph.get("duration") or 0.0),
+                            ph.get("players") or [],
+                            float(ph.get("total") or 0.0),
+                            float(ph.get("heal") or 0.0),
+                            ph.get("targets") or {})
+        else:
+            # The mode is not decoration here: it says who is missing. A party
+            # dataset's percentages are shares of the party, and reading them
+            # as shares of the fight would be wrong.
+            mode = entry.get("mode")
+            label = "Encounter" + ({"party": " — party only",
+                                    "all": " — all players"}.get(mode, ""))
+            section_for(label, float(data.get("duration") or 0.0),
+                        data.get("players") or [],
+                        float(data.get("total") or 0.0),
+                        float(data.get("heal") or 0.0),
+                        data.get("targets") or {})
+            if data.get("carried"):
+                out.append({"k": "note",
+                            "t": f"the last {data.get('carried_secs', 0):.0f}s "
+                                 f"({data['carried']} events) also open the "
+                                 "dataset that follows this one — a boss pull "
+                                 "moves them, it does not split them."})
+        return out
+
     def _history_text(self, entry):
-        """The opened dataset as chat-pasteable lines."""
+        """The opened dataset as chat-pasteable lines.
+
+        Deliberately shorter than the page above it: this is what goes in a
+        chat box, so it is ten players and their top few skills, not the whole
+        table. See _history_detail_nodes."""
         data = entry.get("data") or {}
         names = data.get("skill_names") or {}
         out = [f"Farever+ — {entry.get('name') or 'Encounter'}"]
