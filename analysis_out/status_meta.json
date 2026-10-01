@@ -706,6 +706,7 @@
 "color": "#b96a2b"
 },
 "Scepter_Flamie_Skill1_Shield": {
+"desc": "Proctects from ::shield:: damages.",
 "dur": 15,
 "types": [
 "Buff",
@@ -2348,6 +2349,7 @@
 ],
 "color": "#b96a2b"
 },
+"ManfishBoss_WaterVolley_Target": {},
 "ManfishBoss_WaterBreath_Shield": {
 "types": [
 "Buff",
