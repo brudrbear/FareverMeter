@@ -13005,6 +13005,31 @@ class Overlay:
         self._refresh_visibility()      # stand everything down FIRST
         self._show_game_exit_prompt(reason)
 
+    def on_game_return(self, pid):
+        """The game is back and a fresh hook is live in it. Safe from any
+        thread — it arrives from _run's reattach watcher."""
+        self._enqueue(lambda: self._on_game_return(pid))()
+
+    def _on_game_return(self, pid):
+        # The focus rule compares the foreground window against this pid, so
+        # a stale one would read the new game as "not focused" and keep every
+        # window hidden.
+        self.target_pid = pid
+        self._game_gone = False
+        # Fresh hook, fresh window state: it reports what opens from here on.
+        self.ui_state.clear()
+        self._menu_unlock = False
+        if self._game_exit_win is not None:
+            try:
+                self._game_exit_win.destroy()
+            except tk.TclError:
+                pass
+            self._game_exit_win = None
+        # The new agent boots on its own default sweep rate, exactly as the
+        # first one did, so it has to be told again.
+        self._set_map_rate(self._map_rate)
+        self._refresh_visibility()
+
     def _show_game_exit_prompt(self, reason=""):
         if self._game_exit_win is not None:
             return
@@ -13022,8 +13047,9 @@ class Overlay:
                  bg=BG_BODY, fg=FG_VALUE,
                  font=("Segoe UI", 11, "bold")).pack(anchor="w")
         tk.Label(body,
-                 text="The game has closed, so the meter has nothing left to "
-                      "read.\nWould you like to exit the meter?",
+                 text="The game has closed. Leave the meter running and it "
+                      "will reconnect\nby itself when you start Farever "
+                      "again — or exit it now.",
                  bg=BG_BODY, fg=FG_TEXT, justify="left",
                  font=("Segoe UI", 9)).pack(anchor="w", pady=(6, 12))
         row = tk.Frame(body, bg=BG_BODY)
@@ -16967,18 +16993,36 @@ def _run(tray, session, ui_state, world, statuses, rift_rec, heal_sizer):
         sys.exit("[!] permission denied attaching — if Farever runs as "
                  "administrator, run the meter from an elevated terminal too.")
 
-    def on_detached(*args):
+    # The live frida link. It used to be two locals that lived as long as the
+    # meter did, which is why closing the game left the meter attached to
+    # nothing forever: a new Farever is a new process and needs a new session.
+    # The reattach watcher (below) swaps a fresh pair in. `closing` is set by
+    # the final teardown so a watcher that is mid-attach when you quit cleans
+    # up its own session instead of publishing it into a meter that's gone.
+    link = {"fsession": fsession, "script": None, "pid": pid,
+            "closing": False}
+    link_lock = threading.Lock()
+
+    def on_detached(fs, *args):
         """The frida session died — in practice, the game closed or crashed.
         Fires on frida's own thread. On a normal quit this fires too (we're
         the ones detaching), but by then the finally below has already cleared
         _OVERLAY, which is what keeps the prompt out of that path."""
         reason = str(args[0]) if args else ""
+        with link_lock:
+            if link["fsession"] is not fs:
+                return              # a session we already replaced
+            if reason != "application-requested":
+                # Dead with the process: nothing left to unload or post to.
+                link["fsession"] = link["script"] = None
         print(f"[meter] game session detached ({reason or 'unknown'}).",
               file=sys.stderr)
         ov = _OVERLAY["ref"]
         if ov is not None:
             ov.on_game_exit(reason)
-    fsession.on("detached", on_detached)
+            if reason != "application-requested":
+                start_reattach_watch()
+    fsession.on("detached", lambda *a, fs=fsession: on_detached(fs, *a))
 
     ready = {"ok": None}
     ready_evt = threading.Event()
@@ -17430,8 +17474,8 @@ def _run(tray, session, ui_state, world, statuses, rift_rec, heal_sizer):
             print(f"[meter] hook ready ok={p.get('ok')}", file=sys.stderr)
             ready_evt.set()
 
-    def load_hook():
-        sc = fsession.create_script(build_script_source())
+    def load_hook(fs):
+        sc = fs.create_script(build_script_source())
         sc.on("message", on_message)
         sc.load()   # returns promptly; the hook sets up asynchronously
         return sc
@@ -17445,7 +17489,7 @@ def _run(tray, session, ui_state, world, statuses, rift_rec, heal_sizer):
         while True:
             if ready_evt.wait(timeout=0.5):
                 return True
-            if STOP.is_set():
+            if STOP.is_set() or link["closing"]:
                 return False        # asked to quit mid-scan
             now = time.monotonic()
             if now - start > max_total:
@@ -17456,35 +17500,161 @@ def _run(tray, session, ui_state, world, statuses, rift_rec, heal_sizer):
                       file=sys.stderr)
                 return False
 
-    # Bring the hook up with clean, bounded retries. The scan runs async in the
-    # agent, so a genuinely dead init times out here — we unload cleanly and
-    # retry rather than leaving a half-attached agent (which is what destabilises
-    # the game when people force-kill and relaunch repeatedly).
-    script = None
-    for attempt in range(1, 4):
-        if STOP.is_set():
-            break
-        ready["ok"] = None
-        ready_evt.clear()
-        liveness["t"] = time.monotonic()
-        try:
-            script = load_hook()
-        except Exception as e:
-            print(f"[meter] load attempt {attempt} failed: {e}", file=sys.stderr)
-            script = None
-        if script is not None and wait_ready() and ready["ok"]:
-            break
-        print(f"[meter] hook didn't come up (attempt {attempt}/3); "
-              "cleaning up and retrying ...", file=sys.stderr)
-        if script is not None:
+    def bring_up_hook(fs, hb):
+        """Load the hook into session `fs` with clean, bounded retries. The
+        scan runs async in the agent, so a genuinely dead init times out here —
+        we unload cleanly and retry rather than leaving a half-attached agent
+        (which is what destabilises the game when people force-kill and
+        relaunch repeatedly). Returns the script once its ready came back ok,
+        or None with nothing left loaded. Used by the first attach and by every
+        reattach, so both get exactly the same retry rules."""
+        sc = None
+        for attempt in range(1, 4):
+            if STOP.is_set() or link["closing"]:
+                break
+            ready["ok"] = None
+            ready_evt.clear()
+            liveness["t"] = time.monotonic()
             try:
-                script.unload()
+                sc = load_hook(fs)
+            except Exception as e:
+                print(f"[meter] load attempt {attempt} failed: {e}",
+                      file=sys.stderr)
+                sc = None
+            if sc is not None and wait_ready() and ready["ok"]:
+                return sc
+            print(f"[meter] hook didn't come up (attempt {attempt}/3); "
+                  "cleaning up and retrying ...", file=sys.stderr)
+            if sc is not None:
+                try:
+                    sc.unload()
+                except Exception:
+                    pass
+                sc = None
+            if ready["ok"] is False:        # search concluded, table not found
+                regenerate_data(hb, force=True)   # => refresh data and retry
+            time.sleep(1.0)
+        return None
+
+    # ---- reattach: the game closed, and comes back as a NEW process ----
+    # Waits for exactly one Farever with its window up, then gives it a fresh
+    # session and hook. One session at a time is the rule this game enforces
+    # (stacked sessions chain their inline hooks and crash it on teardown), and
+    # it holds here by construction: the old session died WITH the old process
+    # before this watcher was started.
+    reattach = {"thread": None}
+    failed_pids: set = set()
+
+    def start_reattach_watch():
+        with link_lock:
+            if link["closing"]:
+                return
+            t = reattach["thread"]
+            if t is not None and t.is_alive():
+                return
+            t = threading.Thread(target=reattach_loop, daemon=True,
+                                 name="reattach")
+            reattach["thread"] = t
+        t.start()
+
+    def reattach_loop():
+        print("[meter] waiting for Farever to start again — the meter will "
+              "reconnect by itself.", file=sys.stderr)
+        crowded = False
+        while True:
+            if STOP.wait(2.0) or link["closing"]:
+                return
+            try:
+                procs = [p for p in device.enumerate_processes()
+                         if p.name.lower() == TARGET_PROCESS.lower()
+                         and p.pid not in failed_pids]
+            except Exception as e:
+                print(f"[meter] couldn't list processes ({e}); still "
+                      "waiting.", file=sys.stderr)
+                continue
+            if len(procs) > 1:
+                # The first attach asks which copy to meter; there's nobody to
+                # ask here, and guessing wrong meters somebody else's client.
+                if not crowded:
+                    print(f"[meter] {len(procs)} copies of {TARGET_PROCESS} "
+                          "are running — not guessing which to reattach to. "
+                          "Close the extra one, or restart the meter to "
+                          "choose.", file=sys.stderr)
+                crowded = True
+                continue
+            crowded = False
+            if not procs:
+                continue
+            new_pid = procs[0].pid
+            # The window appears only after the HL VM has loaded and compiled
+            # the game, which is everything the hook's table search needs.
+            # Attaching to a process that is still booting is unmeasured, and
+            # a failed search costs a forced regenerate — so wait for it.
+            if not _main_hwnd_of_pid(new_pid):
+                continue
+            if STOP.wait(5.0) or link["closing"]:
+                return
+            if attach_again(new_pid):
+                return
+            # Never retried: hammering a process the hook can't come up in is
+            # the "repeatedly relaunching against a stuck session" that can
+            # crash the game. A new process gets a fresh try.
+            failed_pids.add(new_pid)
+
+    def attach_again(new_pid):
+        """One reattach attempt. True when the meter is live again (or is
+        quitting and nothing more should be tried), False to keep waiting."""
+        hb = locate_hlboot(new_pid)
+        if hb is not None:
+            # Steam can patch the game while it's closed — the exact situation
+            # that broke the meter on 2026-09-30 — so check the data again.
+            print(f"[*] game data: {hb}", file=sys.stderr)
+            regenerate_data(hb)
+        print(f"[*] reattaching to {TARGET_PROCESS} (pid {new_pid}) ...",
+              file=sys.stderr)
+        try:
+            fs = device.attach(new_pid)
+        except Exception as e:
+            print(f"[meter] reattach failed: {e}", file=sys.stderr)
+            return False
+        # Registered before the hook loads, so a game that dies mid-scan is
+        # still noticed — on_detached ignores it until the session is ours.
+        fs.on("detached", lambda *a, fs=fs: on_detached(fs, *a))
+        sc = bring_up_hook(fs, hb)
+        with link_lock:
+            closing = link["closing"]
+            live = (not closing and sc is not None
+                    and not getattr(fs, "is_detached", False))
+            if live:
+                link.update(fsession=fs, script=sc, pid=new_pid)
+        if not live:
+            try:
+                if sc is not None:
+                    sc.unload()
+                fs.detach()
             except Exception:
                 pass
-            script = None
-        if ready["ok"] is False:            # search concluded, table not found
-            regenerate_data(hlboot, force=True)   # => refresh data and retry
-        time.sleep(1.0)
+            if not closing:
+                print(f"[meter] couldn't bring the hook up in pid {new_pid}; "
+                      "waiting for the next launch of the game.",
+                      file=sys.stderr)
+            return closing
+        # A new game session: these describe the old one.
+        hero_id["name"] = None
+        shard_seen["n"] = False
+        pets_seen["n"] = None
+        boss_fight_on[0] = False
+        boss_clock["t0"] = None
+        print(f"[meter] reattached to {TARGET_PROCESS} (pid {new_pid}).",
+              file=sys.stderr)
+        ov = _OVERLAY["ref"]
+        if ov is not None:
+            ov.on_game_return(new_pid)
+        return True
+
+    script = bring_up_hook(fsession, hlboot)
+    with link_lock:
+        link["script"] = script
 
     if STOP.is_set():
         # Stopped from the tray during startup. Same teardown the overlay's
@@ -17524,9 +17694,10 @@ def _run(tray, session, ui_state, world, statuses, rift_rec, heal_sizer):
         """Push a setting to the running agent. Wrapped so the overlay doesn't
         have to know about frida, and so a dead script is a logged failure
         rather than an exception in a menu callback."""
-        if script is None:
+        sc = link["script"]         # whichever hook is live right now
+        if sc is None:
             return
-        script.post(dict(kw, type="config"))
+        sc.post(dict(kw, type="config"))
 
     overlay = Overlay(session, pid, ui_state, world, statuses,
                       configure=configure_hook)
@@ -17554,9 +17725,16 @@ def _run(tray, session, ui_state, world, statuses, rift_rec, heal_sizer):
             overlay.menubridge.stop()
         except Exception:
             pass
+        # Under the lock, so a reattach that lands right now sees `closing`
+        # and tears its own session down instead of publishing it here.
+        with link_lock:
+            link["closing"] = True
+            sc, fs = link["script"], link["fsession"]
         try:
-            script.unload()
-            fsession.detach()
+            if sc is not None:
+                sc.unload()
+            if fs is not None:
+                fs.detach()
         except Exception:
             pass
         release_instance_lock()
